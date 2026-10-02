@@ -208,6 +208,10 @@ namespace DshBar
                     return 2;
                 }
                 double w = 900, h = 620;
+                // 页面是在 Refresh 里读快照填内容的（Task 8 的会话表就照这个契约写）。
+                // 排版之前不把快照交进去，占位页也许看不出来，但填实以后 --panel-shot
+                // 渲染的永远是空表，spec §9「概览页色数显著高于关于页」那条门禁无从判定。
+                if (root is IPanelPage pp) pp.Refresh(_last);
                 // 必须全限定：本命名空间下有 DshBar.Rect（Win32 用的那个），App.cs 又同时
                 // using 了 System.Drawing 与 System.Windows，裸写 Size / Rect 会撞 CS0104 或绑到 DshBar.Rect。
                 root.Measure(new System.Windows.Size(w, h));
