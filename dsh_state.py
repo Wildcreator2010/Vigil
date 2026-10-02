@@ -525,6 +525,10 @@ def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dic
                 "kind": pending.get("kind"),
                 "tool": pending.get("tool"),
                 "text": str(pending.get("text") or "")[:120],
+                # options 有意不设长度/条数上限（控制器裁决，spec §5）：概览页要就地显示并可点
+                # 模型给的每个选项，截断/去重/排序都会丢信息。代价是 60 行满额时最坏帧约 97KB，
+                # 已按「不设字节预算」接受。想加截断前先读 test_dsh_state.run_sessions_field()
+                # 的 QST_LABELS golden——那条断言就是为了让这个决定不被无意推翻。
                 "options": list(pending.get("options") or []),
             },
         })

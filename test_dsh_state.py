@@ -330,6 +330,37 @@ def run_e2e():
     return errs
 
 
+# ---- 提问型待处理会话的 golden fixture（由 run_sessions_field 使用）----
+# 概览页要显示「正文 + 选项」，而 pending.options 是白名单里唯一有意不设上限的字段，
+# 它存在的唯一理由就是把模型给的 label 一字不差送到界面上。所以这里的 label 特意做成
+# 多条、长短悬殊（3~86 字，最长那条越过 title 的 80 字截断线）、含中文且含空格，
+# 并且首字打乱成**非字典序**——「截断 / 去重 / 排序 / 只取第一条」任何改动都会报红。
+# 仓内既有 fixture 全是 approval 型（源头本就不带 options），只有这条能覆盖真选项链路。
+QST_KEY = "s-qst"  # write_session 的会话目录名，即 sessions 行里的 key
+QST_PROJECT = "QST"
+QST_QUESTION = "要不要 只改 固件，协议 与 服务端 先不动？"
+QST_LABELS = [
+    "先不动",
+    "两套都改：协议、服务端、控制台、面板与全部测试一起动，这一条特意写得很长，"
+    "长到足以越过 title 的 80 字截断线，任何按长度截断 options 的改动都会在这里报红",
+    "按 Enter 继续 等待",
+    "保 留 现 有 选 项",
+    "删掉重来",
+]
+QST_ASK_COUNT = 2  # 多问：引擎按现有行为在正文后追加「（共 N 问）」
+QST_TEXT = f"{QST_QUESTION}（共 {QST_ASK_COUNT} 问）"
+QST_ARGUMENTS = json.dumps(
+    {
+        "questions": [
+            {"id": "q1", "question": QST_QUESTION,
+             "options": [{"label": x} for x in QST_LABELS]},
+            {"id": "q2", "question": "第二问：要不要顺手补测试？"},
+        ]
+    },
+    ensure_ascii=False,
+)
+
+
 def run_sessions_field():
     """快照的 sessions 数组：上限、字段齐全、字符串截断，且不破坏 recent/waiting。"""
     errs = []
@@ -346,6 +377,15 @@ def run_sessions_field():
                     rec("turn/start", {"turn": 3}),
                     rec("approval/asked", {"id": "a", "toolName": "pwsh", "reason": "问" * 300}),
                 ], ts - i)
+            # 与 70 条 approval 型混排的同一条 ask_user_question 型待处理会话：
+            # mtime 取 ts-0.5，保证它落在 60 行窗口内（第二新），且 age 仍可判序。
+            write_session(td, QST_PROJECT, QST_KEY, [
+                sess_head(QST_KEY, QST_PROJECT),
+                rec("turn/start", {"turn": 6}),
+                rec("step/start", {"turn": 6, "step": 2}),
+                rec("tool/call", {"turn": 6, "step": 2, "callId": "cq",
+                                  "name": "ask_user_question", "arguments": QST_ARGUMENTS}),
+            ], ts - 0.5)
             snap = ds.snapshot(g, ts, want_balance=False)
             rows = snap.get("sessions")
             if not isinstance(rows, list):
@@ -366,6 +406,33 @@ def run_sessions_field():
                 errs.append("pending.options 缺失或类型错：概览页要就地显示选项")
             if any("path" in r for r in rows):
                 errs.append("sessions 不应携带 path：无消费者，且是每帧最大的冗余项")
+            # —— pending.options 的入库 golden：概览页要「正文 + 选项」，这里逐字钉死 ——
+            qrow = next((r for r in rows if r["key"] == QST_KEY), None)
+            if qrow is None:
+                errs.append(f"sessions 里找不到提问型会话 {QST_KEY}（fixture 或 60 行窗口变了）")
+            else:
+                qpend = qrow.get("pending") or {}
+                if qrow["state"] != "needs_action" or qpend.get("kind") != "question":
+                    errs.append(
+                        "提问型会话判错：应为 needs_action/question，"
+                        f"实得 {qrow['state']}/{qpend.get('kind')}"
+                    )
+                got = qpend.get("options")
+                if got != QST_LABELS:
+                    bad = "；".join(
+                        f"[{i}] 实得 {(got[i] if isinstance(got, list) and i < len(got) else None)!r} "
+                        f"应为 {w!r}"
+                        for i, w in enumerate(QST_LABELS)
+                        if not isinstance(got, list) or i >= len(got) or got[i] != w
+                    )
+                    errs.append(
+                        "pending.options 不是逐字按序透传（截断/去重/排序都会栽在这里）："
+                        f"条数 {got if not isinstance(got, list) else len(got)}/{len(QST_LABELS)}；{bad}"
+                    )
+                if qpend.get("text") != QST_TEXT:
+                    errs.append(
+                        f"pending.text 丢了多问提示：实得 {qpend.get('text')!r} 应为 {QST_TEXT!r}"
+                    )
             if not long_titles or max(len(t) for t in long_titles) > 80:
                 errs.append("title 未截断到 80")
             texts = [(r.get("pending") or {}).get("text") or "" for r in rows]

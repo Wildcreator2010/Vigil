@@ -114,7 +114,8 @@ def check_cli() -> None:
                     "last_event", "last_tool", "end_reason", "records", "todo",
                     "usage_total", "pending"}
             miss = need - set(rows[0])
-            check("sessions 行字段齐全", not miss, f"缺 {sorted(miss)}")
+            check("sessions 行字段齐全", not miss and "path" not in rows[0],
+                  f"缺 {sorted(miss)}，path 回潮={'path' in rows[0]}（硬闸：行里不该有 path）")
             check("sessions 状态码全部合法",
                   all(r["state"] in ds.STATES for r in rows),
                   str({r["state"] for r in rows} - set(ds.STATES)))
