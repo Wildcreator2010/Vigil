@@ -72,7 +72,8 @@ def check_licenses() -> None:
         readme = fh.read()
     check("README 不再声称编译不需要联网", "不需要联网" not in readme, "仍有「不需要联网」")
     check("README 有开源协议章节", "## 开源协议" in readme, "缺章节")
-    csproj = open(os.path.join(root, "bar", "DshBar.csproj"), encoding="utf-8").read()
+    with open(os.path.join(root, "bar", "DshBar.csproj"), encoding="utf-8") as fh:
+        csproj = fh.read()
     check("csproj 声明了许可证元数据", "PackageLicenseExpression" in csproj and "Copyright" in csproj,
           "缺 PackageLicenseExpression / Copyright")
 ```
@@ -107,7 +108,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN ANY ACTION ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
@@ -115,7 +117,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 按 spec §8 的顺序，每条给「用途 + 上游地址 + 许可证 + 版权行」，并附许可证原文。条目与依据（均已实测核对，不要凭记忆改写）：
 
-1. **WPF-UI 4.2.0** — MIT，`Copyright (C) 2021-2025 Leszek Pomianowski and WPF UI Contributors`，https://github.com/lepoco/wpfui 。用途：控制台窗口的 Fluent 外壳与表单控件。依据：本机 NuGet 包内 `LICENSE.md` 与 `wpf-ui.4.2.0.nuspec` 的 `authors=lepo.co`、`license=MIT`。
+1. **WPF-UI 4.2.0** — MIT，`Copyright (C) 2021-2025 Leszek Pomianowski and WPF UI Contributors`，https://github.com/lepoco/wpfui 。用途：控制台窗口的 Fluent 外壳与表单控件。依据：本机 NuGet 包内 `LICENSE.md` 与 `wpf-ui.nuspec` 的 `authors=lepo.co`、`license=MIT`。
 2. WPF-UI 内含并需继续向下传递的 5 项（依据包内 `ThirdPartyNotices.txt`）：
    - `sbaeumlisberger/VirtualizingWrapPanel` 2.0.6 — MIT，Copyright (c) 2019 S. Bäumlisberger
    - `microsoft/fluentui-system-icons` 1.1.242 — MIT，Copyright (c) 2020 Microsoft Corporation
