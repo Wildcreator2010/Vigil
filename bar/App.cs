@@ -88,6 +88,9 @@ namespace DshBar
             Log($"DshBar 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
 
             var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            // 趁一个窗口都还没建，把 Fluent 资源挂上：BarWindow 是嵌进任务栏的分层窗口，
+            // 晚一步 Apply 会去动已存在窗口的背景，没必要冒这个风险。
+            ApplyFluentTheme();
             _window = new BarWindow();
             _window.LeftClicked += FocusHarness;
             _window.RightClicked += pt => _tray.ContextMenuStrip.Show((int)pt.X, (int)pt.Y);
@@ -194,6 +197,45 @@ namespace DshBar
             }
         }
 
+        /// <summary>
+        /// 把 WPF UI 的资源字典挂进应用资源，并按 Config.Theme 定深浅。
+        /// 本项目没有 App.xaml（入口是纯代码的 [STAThread] Main），而 ApplicationThemeManager.Apply
+        /// 的机制就是换 Application.Resources.MergedDictionaries 里那两份字典 ——
+        /// 那里什么都没有时 Apply 是空操作：ToggleSwitch 退化成系统 ToggleButton 的灰条、
+        /// NumberBox 是裸文本框、InfoBar 干脆不画。所以必须先把 ControlsDictionary 和
+        /// ThemesDictionary 加进去，Apply 才有东西可换。
+        /// 必须在创建任何窗口之前调用。
+        /// </summary>
+        static void ApplyFluentTheme()
+        {
+            var app = System.Windows.Application.Current;
+            if (app == null) return;
+            var merged = app.Resources.MergedDictionaries;
+            bool hasControls = false, hasThemes = false;
+            foreach (var d in merged)
+            {
+                if (d is Wpf.Ui.Markup.ControlsDictionary) hasControls = true;
+                else if (d is Wpf.Ui.Markup.ThemesDictionary) hasThemes = true;
+            }
+            // 顺序有讲究：ThemesDictionary.Theme 只有 setter，且只在「已挂到 Application 上」
+            // 时才真的切字典，所以先 Add 再交给 Apply 定主题。
+            if (!hasControls) merged.Add(new Wpf.Ui.Markup.ControlsDictionary());
+            if (!hasThemes) merged.Add(new Wpf.Ui.Markup.ThemesDictionary());
+            Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
+                FluentTheme(), Wpf.Ui.Controls.WindowBackdropType.None, false);
+        }
+
+        /// <summary>settings.json 的 theme 是 light/dark/system；system 按当前系统主题就地解析。</summary>
+        static Wpf.Ui.Appearance.ApplicationTheme FluentTheme()
+        {
+            string t = _settings?.Theme ?? "light";
+            if (t == "dark") return Wpf.Ui.Appearance.ApplicationTheme.Dark;
+            if (t == "system"
+                && Wpf.Ui.Appearance.ApplicationThemeManager.GetSystemTheme() == Wpf.Ui.Appearance.SystemTheme.Dark)
+                return Wpf.Ui.Appearance.ApplicationTheme.Dark;
+            return Wpf.Ui.Appearance.ApplicationTheme.Light;
+        }
+
         /// <summary>离屏渲染某一页为 PNG 并打印统计，供冒烟做像素门禁。</summary>
         static int RenderShot(string pageKey, string outPath)
         {
@@ -205,9 +247,7 @@ namespace DshBar
                 // 离屏出图也要喂真实快照，否则概览页永远是空表，Task 8 的门禁无从判断。
                 LoadOneShotSnapshot();
                 var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-                Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
-                    Wpf.Ui.Appearance.ApplicationTheme.Light,
-                    Wpf.Ui.Controls.WindowBackdropType.None, false);
+                ApplyFluentTheme();
                 if (!PanelPages.TryCreate(pageKey, out FrameworkElement root))
                 {
                     // 非法页名明确报错并非零退出。以前 default 把它静默当 overview，
