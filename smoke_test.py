@@ -219,6 +219,39 @@ def check_engine_copy() -> None:
               "改了源码但没重新编译")
 
 
+LICENSE_MUST_CONTAIN = (
+    "MIT", "Wildcreator",                      # 本项目自身
+    "lepoco", "Leszek Pomianowski",            # WPF-UI
+    "AmorFate", "AF-Media-Bar",                # 设计参照
+    "Bäumlisberger",                           # VirtualizingWrapPanel（WPF-UI 传递依赖）
+    "fluentui-system-icons", "microsoft-ui-xaml", "dotnet/wpf",
+    "Segoe Fluent Icons",
+)
+
+
+def check_licenses() -> None:
+    print("\n== 开源合规 ==")
+    root = HERE
+    lic = os.path.join(root, "LICENSE")
+    tpn = os.path.join(root, "THIRD-PARTY-NOTICES.md")
+    check("LICENSE 存在", os.path.isfile(lic), lic)
+    check("THIRD-PARTY-NOTICES.md 存在", os.path.isfile(tpn), tpn)
+    blob = ""
+    for p in (lic, tpn):
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                blob += fh.read()
+    missing = [k for k in LICENSE_MUST_CONTAIN if k not in blob]
+    check("必要归属条目齐全", not missing, f"缺 {missing}")
+    with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+        readme = fh.read()
+    check("README 不再声称编译不需要联网", "不需要联网" not in readme, "仍有「不需要联网」")
+    check("README 有开源协议章节", "## 开源协议" in readme, "缺章节")
+    csproj = open(os.path.join(root, "bar", "DshBar.csproj"), encoding="utf-8").read()
+    check("csproj 声明了许可证元数据", "PackageLicenseExpression" in csproj and "Copyright" in csproj,
+          "缺 PackageLicenseExpression / Copyright")
+
+
 # ---------------------------------------------------------------- Win32 探测
 
 class RECT(ctypes.Structure):
@@ -461,6 +494,7 @@ def main() -> int:
     if full or "--build" in args:
         check_build()
     check_engine_copy()
+    check_licenses()
     if full or "--gui" in args:
         check_gui()
     else:

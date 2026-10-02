@@ -12,7 +12,7 @@
 - 状态：正在思考 / 正在回答 / 正在执行工具 / 回答完成 / 待命 / 需要操作 / 出错了 / 已中断 / 疑似卡住 / 未运行
 - 「需要操作」把问题正文直接写在栏上，并弹系统通知，处理前按间隔重复提醒
 - 余额走官方接口 `GET https://api.deepseek.com/user/balance`
-- 实现栈：C# WPF（.NET 10 桌面运行时，本机已装，编译不需要联网）+ Python 3.14 标准库做状态引擎
+- 实现栈：C# WPF（.NET 10 桌面运行时，本机已装，首次编译需要联网还原 NuGet 包）+ Python 3.14 标准库做状态引擎
 - 交互与停靠方式参考 [AF-Media-Bar](https://github.com/Fervent-Tempo/AF-Media-Bar)
 
 ## 快速开始
@@ -141,6 +141,8 @@ Key 存在 `%LOCALAPPDATA%\dsh-status\balance.protected`，用当前 Windows 账
 | `test_dsh_state.py` | 16 个状态用例 + 端到端临时会话目录断言，`--live` 加真实数据冒烟 |
 | `smoke_test.py` | 冒烟工具：CLI 契约 + `--demo` 全状态 + 余额 Key 存取，`--build`/`--gui` 加编译与停靠校验 |
 | `build.cmd` `start-bar.bat` | 编译 / 启动 |
+| `LICENSE` | 本项目自身的 MIT 许可证全文 |
+| `THIRD-PARTY-NOTICES.md` | 第三方组件与素材的归属声明（含 WPF-UI 及其传递依赖的许可证原文） |
 
 运行时数据在 `%LOCALAPPDATA%\dsh-status\`：`settings.json`、`bar.log`、`balance.protected`、`refresh.token`。
 
@@ -178,3 +180,13 @@ DeepSeek Harness 把每个会话的完整事件流写在
 - **停掉状态栏**：托盘菜单「退出」；命令行用 `taskkill /f /im DshBar.exe`（引擎子进程靠 stdout 管道
   断裂随后自行退出，不会留孤儿）。不带 `/f` 的优雅关闭**无效**：窗口已经是 `Shell_TrayWnd` 的子窗口，
   `taskkill` 枚举不到它，会静默返回成功而进程照跑；`ShutdownMode.OnExplicitShutdown` 也让关窗口不停 app。
+
+## 开源协议
+
+本项目以 **MIT 许可证**开源（见 [`LICENSE`](LICENSE)）；所有第三方组件、字体与设计参照的归属声明见
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)，每条都附了许可证原文。
+
+## 致谢
+
+- [AF-Media-Bar](https://github.com/Fervent-Tempo/AF-Media-Bar) —— 任务栏停靠方式与控制台分组/行布局的**设计参照**，本项目未复制其任何源代码
+- [WPF-UI](https://github.com/lepoco/wpfui)（lepo.co，MIT）—— 控制台面板的 Fluent 外壳与表单控件，其内含的 5 项传递依赖一并记录在 `THIRD-PARTY-NOTICES.md`
