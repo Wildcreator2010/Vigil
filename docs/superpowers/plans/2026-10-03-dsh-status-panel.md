@@ -41,7 +41,7 @@
 
 - [ ] **Step 1: 先加失败的合规断言**
 
-在 `smoke_test.py` 的 `check_engine_copy()` 之后插入：
+在 `smoke_test.py` 的 `check_engine_copy()` 之后插入（顶部 import 需补 `import re`）。关键词存在性检查拦不住「看着像 MIT 却少了半句」的残缺正文，所以 `MIT_BODY` 承担逐字比对：
 
 ```python
 LICENSE_MUST_CONTAIN = (
@@ -53,29 +53,141 @@ LICENSE_MUST_CONTAIN = (
     "Segoe Fluent Icons",
 )
 
+# 标准 SPDX MIT 正文——去掉标题行与版权行之后剩下的那部分。权威参照逐字取自本机
+# %USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\LICENSE.md 的正文（已核实与本项目 LICENSE 一致）。
+# 关键词存在性检查（LICENSE_MUST_CONTAIN）拦不住「看着像 MIT 却少了半句」的残缺正文——
+# 简报最初给的那版就少了 AN ACTION OF CONTRACT, TORT OR OTHERWISE, 而它照样能过全部关键词断言。
+# 本任务的目的恰恰是「让本项目可被认证为 MIT」，所以正文一律与本常量逐字比对。
+MIT_BODY = """\
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."""
+
+MIT_PROBE = "Permission is hereby granted, free of charge"  # 用来认出「这段声称是 MIT」
+_MIT_TITLE = re.compile(r"^\s*(the\s+)?mit\s+(li[c]ense)(\s*\(mit\))?\s*$", re.I)
+_MIT_COPYRIGHT = re.compile(r"^\s*copyright\b", re.I)
+_MIT_RESERVED = re.compile(r"^\s*all\s+rights\s+reserved\.?\s*$", re.I)
+
+
+def read_utf8(path: str) -> tuple[str | None, str]:
+    """读 UTF-8 文本，返回 (内容, 失败原因)。缺失/无权限/非 UTF-8 都只给原因，不抛异常。
+
+    用 utf-8-sig 是为了不把 BOM 当成正文的一部分；正文比对本身仍是逐字的。
+    """
+    if not os.path.isfile(path):
+        return None, f"文件不存在：{path}"
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            return fh.read(), ""
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"无法按 UTF-8 读取 {path}：{exc}"
+
+
+def mit_body(text: str) -> str:
+    """取一段 MIT 文本的「正文」：剥掉行尾差异、许可证标题行与版权告示块，剩下的必须逐字等于 MIT_BODY。
+
+    版权告示块 = `Copyright (c) …` 那一行，以及紧跟其后的 `All rights reserved.` 一行
+    （dotnet/wpf 的原文里有这两行）。它们都不属于 MIT 的条款正文，各家写法本来就不同；
+    条款正文则一个字都不许差。
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    def skip_blank(i: int) -> int:
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        return i
+
+    i = skip_blank(0)
+    if i < len(lines) and _MIT_TITLE.match(lines[i]):
+        i = skip_blank(i + 1)
+    if i < len(lines) and _MIT_COPYRIGHT.match(lines[i]):
+        i = skip_blank(i + 1)
+        if i < len(lines) and _MIT_RESERVED.match(lines[i]):
+            i += 1
+    return "\n".join(lines[i:]).strip()
+
+
+def fenced_blocks(md: str) -> list[tuple[str, str]]:
+    """按出现顺序返回 Markdown 围栏代码块 (所属小节标题, 块内容)。"""
+    out: list[tuple[str, str]] = []
+    heading = ""
+    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("#"):
+            heading = lines[i].lstrip("#").strip() or heading
+        if lines[i].strip().startswith("```"):
+            body: list[str] = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                body.append(lines[i])
+                i += 1
+            out.append((heading, "\n".join(body)))
+        i += 1
+    return out
+
+
+def first_diff(got: str, want: str) -> str:
+    """两处文本的第一个差异，报字符偏移和上下文，便于改坏时一眼定位。"""
+    for i, (a, b) in enumerate(zip(got, want)):
+        if a != b:
+            lo = max(0, i - 24)
+            return (f"第 {i} 个字符起不同：实得 …{got[lo:i + 24]!r}，应为 …{want[lo:i + 24]!r}")
+    return (f"长度不同：实得 {len(got)} 字符、应为 {len(want)} 字符，"
+            f"差的部分：{(want[len(got):] if len(got) < len(want) else got[len(want):])[:120]!r}")
+
 
 def check_licenses() -> None:
     print("\n== 开源合规 ==")
     root = HERE
     lic = os.path.join(root, "LICENSE")
     tpn = os.path.join(root, "THIRD-PARTY-NOTICES.md")
+    readme_p = os.path.join(root, "README.md")
+    csproj_p = os.path.join(root, "bar", "DshBar.csproj")
     check("LICENSE 存在", os.path.isfile(lic), lic)
     check("THIRD-PARTY-NOTICES.md 存在", os.path.isfile(tpn), tpn)
-    blob = ""
-    for p in (lic, tpn):
-        if os.path.isfile(p):
-            with open(p, encoding="utf-8", errors="replace") as fh:
-                blob += fh.read()
+    # 缺文件 / 非 UTF-8 一律记 ✗：合规段会被后续任务的 --all 复用，不能让整段 traceback 退出。
+    lic_text, lic_err = read_utf8(lic)
+    tpn_text, tpn_err = read_utf8(tpn)
+    readme, readme_err = read_utf8(readme_p)
+    csproj, csproj_err = read_utf8(csproj_p)
+    check("四份合规文件均可按 UTF-8 读取",
+          not (lic_err or tpn_err or readme_err or csproj_err),
+          "；".join(e for e in (lic_err, tpn_err, readme_err, csproj_err) if e))
+    blob = (lic_text or "") + (tpn_text or "")
     missing = [k for k in LICENSE_MUST_CONTAIN if k not in blob]
     check("必要归属条目齐全", not missing, f"缺 {missing}")
-    with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
-        readme = fh.read()
-    check("README 不再声称编译不需要联网", "不需要联网" not in readme, "仍有「不需要联网」")
-    check("README 有开源协议章节", "## 开源协议" in readme, "缺章节")
-    with open(os.path.join(root, "bar", "DshBar.csproj"), encoding="utf-8") as fh:
-        csproj = fh.read()
-    check("csproj 声明了许可证元数据", "PackageLicenseExpression" in csproj and "Copyright" in csproj,
-          "缺 PackageLicenseExpression / Copyright")
+    check("LICENSE 正文逐字等于标准 MIT",
+          not lic_err and mit_body(lic_text or "") == MIT_BODY,
+          lic_err or first_diff(mit_body(lic_text or ""), MIT_BODY))
+    blocks = [(h, b) for h, b in fenced_blocks(tpn_text or "") if MIT_PROBE in b]
+    check("THIRD-PARTY-NOTICES 里声称 MIT 的段落数符合预期", len(blocks) >= 6,
+          f"应有 6 段（WPF-UI、其 4 项 MIT 传递依赖、AF-Media-Bar），实得 {len(blocks)}")
+    for heading, block in blocks:
+        check(f"MIT 原文逐字等于标准 MIT：{heading}",
+              mit_body(block) == MIT_BODY, first_diff(mit_body(block), MIT_BODY))
+    check("README 不再声称编译不需要联网",
+          not readme_err and "不需要联网" not in readme,
+          readme_err or "仍有「不需要联网」")
+    check("README 有开源协议章节", not readme_err and "## 开源协议" in readme,
+          readme_err or "缺章节")
+    check("csproj 声明了许可证元数据",
+          not csproj_err and "PackageLicenseExpression" in csproj and "Copyright" in csproj,
+          csproj_err or "缺 PackageLicenseExpression / Copyright")
 ```
 
 并在 `main()` 里 `check_engine_copy()` 之后、`check_gui()` 之前调用 `check_licenses()`。
@@ -83,7 +195,7 @@ def check_licenses() -> None:
 - [ ] **Step 2: 跑断言，确认它失败**
 
 Run: `python smoke_test.py`
-Expected: 退出码非 0，失败项包含 `LICENSE 存在`、`THIRD-PARTY-NOTICES.md 存在`、`必要归属条目齐全`、`README 不再声称编译不需要联网`、`csproj 声明了许可证元数据`。
+Expected: 退出码非 0，失败项包含 `LICENSE 存在`、`THIRD-PARTY-NOTICES.md 存在`、`必要归属条目齐全`、`LICENSE 正文逐字等于标准 MIT`、`README 不再声称编译不需要联网`、`csproj 声明了许可证元数据`。
 
 - [ ] **Step 3: 写 `LICENSE`**
 
@@ -146,7 +258,7 @@ README 三处改动：① 删掉实现栈那行里的「编译不需要联网」
 - [ ] **Step 6: 跑断言确认通过**
 
 Run: `python smoke_test.py`
-Expected: 退出码 0，`== 开源合规 ==` 段 6 项全 ✓。
+Expected: 退出码 0，`== 开源合规 ==` 段 15 项全 ✓（11 项存在性/关键词/元数据 + 1 项 `LICENSE` 正文逐字比对 + 6 段 MIT 原文逐字比对）。
 
 Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; cat ../b.log`
 Expected: `0`，且 `0 个警告 0 个错误`。
