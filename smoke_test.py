@@ -15,6 +15,7 @@ import compression.zstd as zstd  # noqa: F401  # 提前失败：低于 3.14 直�
 import collections
 import ctypes
 import ctypes.wintypes as wt
+import glob
 import json
 import os
 import re
@@ -106,19 +107,30 @@ def check_cli() -> None:
         check("禁用余额时标记 skipped", snap["balance"].get("skipped") is True,
               str(snap["balance"]))
         rows = snap.get("sessions")
-        check("sessions 数组存在且不超上限",
-              isinstance(rows, list) and 0 < len(rows) <= ds.SESSIONS_IN_SNAPSHOT,
-              f"{type(rows).__name__} len={len(rows) if isinstance(rows, list) else '-'}")
-        if rows:
-            need = {"key", "project", "title", "state", "turn", "step", "age_sec",
-                    "last_event", "last_tool", "end_reason", "records", "todo",
-                    "usage_total", "pending"}
-            miss = need - set(rows[0])
-            check("sessions 行字段齐全", not miss and "path" not in rows[0],
-                  f"缺 {sorted(miss)}，path 回潮={'path' in rows[0]}（硬闸：行里不该有 path）")
-            check("sessions 状态码全部合法",
-                  all(r["state"] in ds.STATES for r in rows),
-                  str({r["state"] for r in rows} - set(ds.STATES)))
+        # 本机有没有会话文件决定这组断言能不能跑：与 test_dsh_state.run_live() 用同一个跳过口径
+        # （同一行说明、同样不计入 FAILS）。少了这层，干净机器／CI 上 `python smoke_test.py`
+        # 会因为「扫不到会话」假红——而那条 0 < len(rows) 本来只是想要一个非空样本行。
+        session_files = glob.glob(os.path.expanduser(ds.SESSION_GLOB))
+        if not session_files:
+            print("  （跳过：本机没有 dsh 会话文件，sessions 行级断言无样本）")
+        else:
+            check("sessions 数组存在且不超上限",
+                  isinstance(rows, list) and 0 < len(rows) <= ds.SESSIONS_IN_SNAPSHOT,
+                  f"{type(rows).__name__} len={len(rows) if isinstance(rows, list) else '-'}"
+                  f"（本机有 {len(session_files)} 个会话文件，扫出 0 行是真缺陷）")
+            if rows:
+                need = {"key", "project", "title", "state", "turn", "step", "age_sec",
+                        "last_event", "last_tool", "end_reason", "records", "todo",
+                        "usage_total", "pending"}
+                miss = need - set(rows[0])
+                check("sessions 行字段齐全", not miss, f"缺少 {sorted(miss)}")
+                # 白名单是双向的：spec §4 原文「path 与 cwd 不在其中」，一次覆盖两个键。
+                banned = sorted(k for k in ("path", "cwd") if k in rows[0])
+                check("sessions 行不含 path/cwd", not banned,
+                      f"行里出现了 {banned}（硬闸：spec §4 的白名单排除这两项，无消费者）")
+                check("sessions 状态码全部合法",
+                      all(r["state"] in ds.STATES for r in rows),
+                      str({r["state"] for r in rows} - set(ds.STATES)))
 
     p = run("--states")
     lines = [l for l in p.stdout.splitlines() if l.strip()]

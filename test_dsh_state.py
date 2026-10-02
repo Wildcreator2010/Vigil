@@ -360,6 +360,28 @@ QST_ARGUMENTS = json.dumps(
     ensure_ascii=False,
 )
 
+# ---- 非字符串 label 的出帧形状（与上面的 QST 同目录混排，另一条会话）----
+# _question_state() 的过滤条件只是「是 dict 且 label 为真值」，所以 5 / True / 2.5 这类
+# **真值但非字符串**的 label 会原样进 pending.options。而 Task 4 的 C# 模型是
+# List<string>（bar/StateClient.cs:25）：一个非字符串元素会让**整帧**反序列化失败，
+# 后果是状态栏静默停止更新，而不是报个错。所以这里专门喂三条非字符串 label，
+# 配合 run_sessions_field() 末尾的两条断言：出帧元素必须全是 str，且**一条都不许丢**
+# （用 isinstance 过滤会把它们静默删掉，界面少掉可点选项；逐项 str() 才既不丢又保类型）。
+QSTN_KEY = "s-qstn"  # write_session 的会话目录名，即 sessions 行里的 key
+QSTN_PROJECT = "QSTN"
+QSTN_QUESTION = "这条 问题 里混了 非字符串 选项"
+QSTN_LABELS_IN = ["正常选项", 5, True, 2.5]
+QSTN_LABELS_OUT = ["正常选项", "5", "True", "2.5"]
+QSTN_ARGUMENTS = json.dumps(
+    {
+        "questions": [
+            {"id": "q1", "question": QSTN_QUESTION,
+             "options": [{"label": x} for x in QSTN_LABELS_IN]}
+        ]
+    },
+    ensure_ascii=False,
+)
+
 
 def run_sessions_field():
     """快照的 sessions 数组：上限、字段齐全、字符串截断，且不破坏 recent/waiting。"""
@@ -386,11 +408,30 @@ def run_sessions_field():
                 rec("tool/call", {"turn": 6, "step": 2, "callId": "cq",
                                   "name": "ask_user_question", "arguments": QST_ARGUMENTS}),
             ], ts - 0.5)
+            # 混排的非字符串 label 会话：mtime 取 ts-0.25 → 72 个文件里第二新，必落 60 行窗口内，
+            # 且 age 序列（0.0 / 0.2 / 0.5 / 1.0 …）仍严格升序，不伤下面的排序断言。
+            write_session(td, QSTN_PROJECT, QSTN_KEY, [
+                sess_head(QSTN_KEY, QSTN_PROJECT),
+                rec("turn/start", {"turn": 4}),
+                rec("step/start", {"turn": 4, "step": 1}),
+                rec("tool/call", {"turn": 4, "step": 1, "callId": "cn",
+                                  "name": "ask_user_question", "arguments": QSTN_ARGUMENTS}),
+            ], ts - 0.25)
             snap = ds.snapshot(g, ts, want_balance=False)
             rows = snap.get("sessions")
             if not isinstance(rows, list):
                 errs.append(f"sessions 缺失或类型错: {type(rows)}")
                 return errs
+            # —— spec §4 写死的字面契约：不许拿引擎常量自证 ——
+            # 下面几条若都写成「与 ds.SESSIONS_IN_SNAPSHOT / 引擎里的 80、120 相比」，
+            # 把引擎值改掉测试会跟着一起改口径、照样全绿（一条静默的契约变更通道）。
+            # Task 8 的会话表按 60 定尺寸，80/120 是 spec §4 的 jsonc 样例里写死的截断长度，
+            # 所以这三处一律用字面量，且截断取**恰好相等**（双向：调大调小都报红）。
+            if ds.SESSIONS_IN_SNAPSHOT != 60:
+                errs.append(
+                    "SESSIONS_IN_SNAPSHOT 偏离 spec §4 的字面契约 60"
+                    f"（Task 8 的会话表按它定尺寸）：实得 {ds.SESSIONS_IN_SNAPSHOT}"
+                )
             if len(rows) != ds.SESSIONS_IN_SNAPSHOT:
                 errs.append(f"sessions 未截到上限: {len(rows)}/{ds.SESSIONS_IN_SNAPSHOT}")
             need = {"key", "project", "title", "state", "turn", "step", "age_sec",
@@ -404,8 +445,28 @@ def run_sessions_field():
             if not all(isinstance((r.get("pending") or {}).get("options"), list)
                        for r in rows if r.get("pending")):
                 errs.append("pending.options 缺失或类型错：概览页要就地显示选项")
-            if any("path" in r for r in rows):
-                errs.append("sessions 不应携带 path：无消费者，且是每帧最大的冗余项")
+            # 白名单是**双向**的：spec §4 的约束原文是「path 与 cwd 不在其中」，
+            # 而 scan() 的行里 cwd 真实存在（dsh_state.py 的 info.update），
+            # 所以这里一次覆盖两个键——只查 path 的话，将来插一句 s.get("cwd") 零阻力通过。
+            leaked = sorted({k for r in rows for k in ("path", "cwd") if k in r})
+            if leaked:
+                errs.append(
+                    f"sessions 不应携带 {'/'.join(leaked)}：spec §4 的白名单把 path 与 cwd 都排除了"
+                    "（无消费者，且 path 是每帧最大的冗余项）"
+                )
+            # options 的**元素类型**必须是字符串：Task 4 的 C# 模型是 List<string>，
+            # 一个真值非字符串的 label（5 / True）原样出帧会让整帧反序列化失败、状态栏静默停更。
+            bad_opts = [
+                f"{r['key']}[{i}]={o!r}({type(o).__name__})"
+                for r in rows
+                for i, o in enumerate((r.get("pending") or {}).get("options") or [])
+                if not isinstance(o, str)
+            ]
+            if bad_opts:
+                errs.append(
+                    "pending.options 含非字符串元素，C# 侧 List<string> 会整帧反序列化失败："
+                    + "；".join(bad_opts[:6])
+                )
             # —— pending.options 的入库 golden：概览页要「正文 + 选项」，这里逐字钉死 ——
             qrow = next((r for r in rows if r["key"] == QST_KEY), None)
             if qrow is None:
@@ -433,11 +494,33 @@ def run_sessions_field():
                     errs.append(
                         f"pending.text 丢了多问提示：实得 {qpend.get('text')!r} 应为 {QST_TEXT!r}"
                     )
-            if not long_titles or max(len(t) for t in long_titles) > 80:
-                errs.append("title 未截断到 80")
+            # —— 非字符串 label 的那条会话：逐项 str() 且一条不丢 ——
+            qnrow = next((r for r in rows if r["key"] == QSTN_KEY), None)
+            if qnrow is None:
+                errs.append(f"sessions 里找不到非字符串 label 会话 {QSTN_KEY}（fixture 或 60 行窗口变了）")
+            else:
+                gotn = (qnrow.get("pending") or {}).get("options")
+                if gotn != QSTN_LABELS_OUT:
+                    errs.append(
+                        "非字符串 label 没被逐项 str() 成文本（或条数变了 / 被 isinstance 过滤静默丢掉）："
+                        f"实得 {gotn!r} 应为 {QSTN_LABELS_OUT!r}"
+                    )
+            # 截断长度按 spec §4 的字面值**恰好相等**判定：上一版写的是单向比较
+            # （title > 80 才报红、text <= 120 就算绿），把 80 改成 40、120 改成 60 都照绿，
+            # 而函数头那句「帧大小可控」正邀请后人去往下调这两个数。
+            longest_title = max((len(t) for t in long_titles), default=0)
+            if longest_title != 80:
+                errs.append(
+                    "title 未恰好截到 spec §4 的 80 字（fixture 的 150 字标题应被顶到 80；"
+                    f"调大调小都算契约变更）：实得最长 {longest_title} 字"
+                )
             texts = [(r.get("pending") or {}).get("text") or "" for r in rows]
-            if not max((len(t) for t in texts), default=0) <= 120:
-                errs.append("pending.text 未截断到 120")
+            longest_text = max((len(t) for t in texts), default=0)
+            if longest_text != 120:
+                errs.append(
+                    "pending.text 未恰好截到 spec §4 的 120 字（fixture 的 300 字 reason 应被顶到 120；"
+                    f"没有 pending 时也不该通过）：实得最长 {longest_text} 字"
+                )
             ages = [r["age_sec"] for r in rows]
             if ages != sorted(ages):
                 errs.append("sessions 未按静默时长升序（即 mtime 倒序）")

@@ -502,8 +502,9 @@ def pick_primary(sessions: list[dict], ts: float) -> tuple[dict | None, list[dic
 
 
 def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dict]:
-    """把 scan() 的结果压成面板会话表要用的定长行：字段白名单 + 字符串截断，
-    保证 --watch 每帧大小可控。"""
+    """把 scan() 的结果压成面板会话表要用的定长行：字段白名单 + 行数上限 +
+    title/pending.text 的字符截断。这只让「行数 × 单行」变成可算的量级，**不等于帧大小有预算**：
+    pending.options 有意不截（见下方注释），60 行满额时最坏帧实测约 97KB。"""
     out = []
     for s in rows[:cap]:
         pending = s.get("pending")
@@ -525,11 +526,16 @@ def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dic
                 "kind": pending.get("kind"),
                 "tool": pending.get("tool"),
                 "text": str(pending.get("text") or "")[:120],
-                # options 有意不设长度/条数上限（控制器裁决，spec §5）：概览页要就地显示并可点
-                # 模型给的每个选项，截断/去重/排序都会丢信息。代价是 60 行满额时最坏帧约 97KB，
-                # 已按「不设字节预算」接受。想加截断前先读 test_dsh_state.run_sessions_field()
-                # 的 QST_LABELS golden——那条断言就是为了让这个决定不被无意推翻。
-                "options": list(pending.get("options") or []),
+                # options 有意不设长度/条数上限：裁决「不设字节预算」写在 spec §4 的约束里，
+                # 「概览页就地显示并可点每个选项」是 spec §5 的页面规格（旧注释误标成 §5）。
+                # 截断/去重/排序都会丢信息；代价是 60 行满额最坏帧约 97KB，已按该裁决接受。
+                # 想加截断前先读 test_dsh_state.run_sessions_field() 的 QST_LABELS golden——
+                # 那条断言的存在就是为了让这个决定不被无意推翻。
+                # 逐项 str() 只收元素类型、不管数量：C# 侧 Task 4 的模型是 List<string>
+                # （bar/StateClient.cs:25），一个真值非字符串的 label（5 / True）若原样出帧，
+                # 整帧反序列化失败会让状态栏静默停更。用 str() 而不是 isinstance 过滤，
+                # 是因为过滤会静默少掉一个可点选项，str() 一条都不丢。
+                "options": [str(o) for o in (pending.get("options") or [])],
             },
         })
     return out
