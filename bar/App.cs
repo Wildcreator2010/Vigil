@@ -385,14 +385,31 @@ namespace DshBar
                 _tray.Text = TooltipFor(_last);
 
                 // 第二个实例只写一个请求文件就退出，由这里（已在 UI 线程的消息循环里）唤起面板。
+                // 读失败就不删也不唤起，删失败就不唤起：留下文件让下一轮重试，
+                // 免得请求被吞掉，也免得同一请求被反复触发。
                 var req = PanelRequestFile;
                 if (File.Exists(req))
                 {
-                    string page = "";
-                    try { page = File.ReadAllText(req).Trim(); File.Delete(req); }
-                    catch { }
-                    _window.Dispatcher.BeginInvoke(new Action(() =>
-                        PanelWindow.Instance?.ShowOn(string.IsNullOrEmpty(page) ? "overview" : page)));
+                    string page = null;
+                    try { page = File.ReadAllText(req).Trim(); }
+                    catch (Exception ex) { Log($"读取面板请求失败，下一轮重试: {ex.Message}"); }
+                    if (page != null)
+                    {
+                        try { File.Delete(req); }
+                        catch (Exception ex)
+                        {
+                            Log($"删除面板请求失败，本次不唤起: {ex.Message}");
+                            page = null;
+                        }
+                    }
+                    if (page != null)
+                    {
+                        string target = string.IsNullOrEmpty(page) ? "overview" : page;
+                        // 走 OpenPanel 而不是 PanelWindow.Instance?.ShowOn：常驻实例通常是普通
+                        // DshBar.exe 起的，面板压根没创建过，Instance 一直是 null，
+                        // 那时 ShowOn 的调用会被 ?. 静默吃掉 —— 请求删了、窗口却没开。
+                        _window.Dispatcher.BeginInvoke(new Action(() => OpenPanel(target)));
+                    }
                 }
             }
             catch (Exception ex)
