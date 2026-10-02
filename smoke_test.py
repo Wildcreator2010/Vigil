@@ -308,8 +308,10 @@ def notice_mit_body(text: str) -> str:
 
     为什么独独放宽这一个标点：本文件 §2.4（microsoft-ui-xaml）的原文来自上游
     `%USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\ThirdPartyNotices.txt` 第 116 行，
-    那份源文件最末一句 `…DEALINGS IN THE SOFTWARE` 后面**本来就没有句号**（已逐字节核对，
-    看似笔误、实为源文件原文）。第三方许可证声明的唯一职责是逐字忠于它的来源，
+    那份源文件最末一句 `…DEALINGS IN THE SOFTWARE` 后面**本来就没有句号**
+    （正文已与上游逐字核对，行尾则按本仓库既有的纯 LF 约定——上游那份整份是 CRLF，
+    这不是改写了来源，只是本仓库的统一行尾；看似笔误、实为源文件原文）。
+    第三方许可证声明的唯一职责是逐字忠于它的来源，
     合规文件不得为了迁就断言去改写来源——所以让步的是断言，不是 §2.4 的正文。
     （§1 那份 LICENSE.md、§2.1–2.3 与 §3 各段的来源都带句号，容差对它们是空操作，不放松任何约束。）
 
@@ -320,6 +322,23 @@ def notice_mit_body(text: str) -> str:
 
 # notice_mit_body() 一侧的参照：同样只去掉末行那一个句点，两侧口径对称。
 _MIT_BODY_TOLERANT = _MIT_TAIL.sub("", MIT_BODY, count=1)
+
+# THIRD-PARTY-NOTICES.md §2.4（microsoft-ui-xaml）那段的小节标题里含这个词，靠它认出那一段。
+XAML_NOTICE_HEADING_KEY = "microsoft-ui-xaml"
+
+
+def notice_section_last_line(blocks: list[tuple[str, str]], heading_key: str) -> tuple[str, str]:
+    """在待比对的 MIT 段里找标题含 heading_key 的那一段，返回 (小节标题, 该段末行非空文本)。
+
+    找不到那一段时返回 ("", "")——调用处据此记 ✗，不让硬闸因为段落被删/被改名而静默失效。
+    """
+    for heading, block in blocks:
+        if heading_key in heading:
+            for line in reversed(block.replace("\r\n", "\n").replace("\r", "\n").split("\n")):
+                if line.strip():
+                    return heading, line.strip()
+            return heading, ""
+    return "", ""
 
 
 def fenced_blocks(md: str) -> list[tuple[str, str]]:
@@ -382,6 +401,22 @@ def check_licenses() -> None:
         check(f"MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：{heading}",
               notice_mit_body(block) == _MIT_BODY_TOLERANT,
               first_diff(notice_mit_body(block), _MIT_BODY_TOLERANT))
+    # 单向硬闸：上面那条容差是**双向**的（`SOFTWARE` 与 `SOFTWARE.` 都能过），
+    # 所以「有人把 THIRD-PARTY-NOTICES.md §2.4 那个句号补回去」并不会让门禁变红——
+    # 而那正是轮 1 犯过的错（上游 ThirdPartyNotices.txt 第 116 行的原文末行就没有句号，
+    # 声明文件照原样保留才是对的）。这里只反着钉 §2.4 那一段：末行出现句点即 ✗。
+    # 容差本身保持双向不动，其余 5 段与 `LICENSE` 都不受本条影响。
+    xaml_heading, xaml_last = notice_section_last_line(blocks, XAML_NOTICE_HEADING_KEY)
+    if not xaml_heading:
+        xaml_detail = ("THIRD-PARTY-NOTICES.md 里没找到标题含 microsoft-ui-xaml 的 MIT 段，"
+                       "硬闸失去对象——§2.4 那段被删、被改名或正文不再声称 MIT 都会走到这里")
+    else:
+        xaml_detail = (f"段落「{xaml_heading}」的末行实得 {xaml_last!r}；上游 "
+                       "ThirdPartyNotices.txt 第 116 行的末行是不带句号的 'SOFTWARE'，"
+                       "这里带上句点就等于替上游改写了来源——请把句号去掉")
+    check("§2.4 microsoft-ui-xaml 末行不得补句号（上游原文本就缺这个句号，声明文件照原样保留）",
+          bool(xaml_heading) and not xaml_last.endswith("."),
+          xaml_detail)
     check("README 不再声称编译不需要联网",
           not readme_err and "不需要联网" not in readme,
           readme_err or "仍有「不需要联网」")

@@ -41,7 +41,7 @@
 
 - [ ] **Step 1: 先加失败的合规断言**
 
-在 `smoke_test.py` 的 `check_engine_copy()` 之后插入（顶部 import 需补 `import re`）。关键词存在性检查拦不住「看着像 MIT 却少了半句」的残缺正文，所以 `MIT_BODY` 承担逐字比对：第三方声明的各段与它只容一处差异——末行尾部的空白与**单个**句点，因为上游 `ThirdPartyNotices.txt` 抄 microsoft-ui-xaml 那段的最末一句本身就少句号（第 116 行原文如此），而第三方许可证声明的职责是逐字忠于来源，合规文件不得为迁就断言改写来源；`LICENSE` 是我们自己的文件，不享有这处容差，仍按 `MIT_BODY` 严格逐字比对（理由写在 `notice_mit_body()` 的注释里）。两条断言名各按各自口径如实命名，不带豁免的那条叫 `LICENSE 正文逐字等于标准 MIT`，带容差的那条叫 `MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：…`，名字不得强于实际：
+在 `smoke_test.py` 的 `check_engine_copy()` 之后插入（顶部 import 需补 `import re`）。关键词存在性检查拦不住「看着像 MIT 却少了半句」的残缺正文，所以 `MIT_BODY` 承担逐字比对：第三方声明的各段与它只容一处差异——末行尾部的空白与**单个**句点，因为上游 `ThirdPartyNotices.txt` 抄 microsoft-ui-xaml 那段的最末一句本身就少句号（第 116 行原文如此），而第三方许可证声明的职责是逐字忠于来源，合规文件不得为迁就断言改写来源；`LICENSE` 是我们自己的文件，不享有这处容差，仍按 `MIT_BODY` 严格逐字比对（理由写在 `notice_mit_body()` 的注释里）。两条断言名各按各自口径如实命名，不带豁免的那条叫 `LICENSE 正文逐字等于标准 MIT`，带容差的那条叫 `MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：…`，名字不得强于实际。还要注意那条容差是**双向**的——`SOFTWARE` 与 `SOFTWARE.` 都能过，所以「将来有人把 §2.4 那个句号补回去」并不会让门禁变红，而那正是本任务轮 1 犯过的错；为此再加一条**单向**硬闸 `§2.4 microsoft-ui-xaml 末行不得补句号（上游原文本就缺这个句号，声明文件照原样保留）`，只钉 THIRD-PARTY-NOTICES.md 的 §2.4 那一段（按小节标题里的 `microsoft-ui-xaml` 认出）、末行出现句点即 ✗，其余 5 段与 `LICENSE` 都不受它影响，`_MIT_TAIL` 容差本身保持双向不动：
 
 ```python
 LICENSE_MUST_CONTAIN = (
@@ -132,8 +132,10 @@ def notice_mit_body(text: str) -> str:
 
     为什么独独放宽这一个标点：本文件 §2.4（microsoft-ui-xaml）的原文来自上游
     `%USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\ThirdPartyNotices.txt` 第 116 行，
-    那份源文件最末一句 `…DEALINGS IN THE SOFTWARE` 后面**本来就没有句号**（已逐字节核对，
-    看似笔误、实为源文件原文）。第三方许可证声明的唯一职责是逐字忠于它的来源，
+    那份源文件最末一句 `…DEALINGS IN THE SOFTWARE` 后面**本来就没有句号**
+    （正文已与上游逐字核对，行尾则按本仓库既有的纯 LF 约定——上游那份整份是 CRLF，
+    这不是改写了来源，只是本仓库的统一行尾；看似笔误、实为源文件原文）。
+    第三方许可证声明的唯一职责是逐字忠于它的来源，
     合规文件不得为了迁就断言去改写来源——所以让步的是断言，不是 §2.4 的正文。
     （§1 那份 LICENSE.md、§2.1–2.3 与 §3 各段的来源都带句号，容差对它们是空操作，不放松任何约束。）
 
@@ -144,6 +146,23 @@ def notice_mit_body(text: str) -> str:
 
 # notice_mit_body() 一侧的参照：同样只去掉末行那一个句点，两侧口径对称。
 _MIT_BODY_TOLERANT = _MIT_TAIL.sub("", MIT_BODY, count=1)
+
+# THIRD-PARTY-NOTICES.md §2.4（microsoft-ui-xaml）那段的小节标题里含这个词，靠它认出那一段。
+XAML_NOTICE_HEADING_KEY = "microsoft-ui-xaml"
+
+
+def notice_section_last_line(blocks: list[tuple[str, str]], heading_key: str) -> tuple[str, str]:
+    """在待比对的 MIT 段里找标题含 heading_key 的那一段，返回 (小节标题, 该段末行非空文本)。
+
+    找不到那一段时返回 ("", "")——调用处据此记 ✗，不让硬闸因为段落被删/被改名而静默失效。
+    """
+    for heading, block in blocks:
+        if heading_key in heading:
+            for line in reversed(block.replace("\r\n", "\n").replace("\r", "\n").split("\n")):
+                if line.strip():
+                    return heading, line.strip()
+            return heading, ""
+    return "", ""
 
 
 def fenced_blocks(md: str) -> list[tuple[str, str]]:
@@ -206,6 +225,22 @@ def check_licenses() -> None:
         check(f"MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：{heading}",
               notice_mit_body(block) == _MIT_BODY_TOLERANT,
               first_diff(notice_mit_body(block), _MIT_BODY_TOLERANT))
+    # 单向硬闸：上面那条容差是**双向**的（`SOFTWARE` 与 `SOFTWARE.` 都能过），
+    # 所以「有人把 THIRD-PARTY-NOTICES.md §2.4 那个句号补回去」并不会让门禁变红——
+    # 而那正是轮 1 犯过的错（上游 ThirdPartyNotices.txt 第 116 行的原文末行就没有句号，
+    # 声明文件照原样保留才是对的）。这里只反着钉 §2.4 那一段：末行出现句点即 ✗。
+    # 容差本身保持双向不动，其余 5 段与 `LICENSE` 都不受本条影响。
+    xaml_heading, xaml_last = notice_section_last_line(blocks, XAML_NOTICE_HEADING_KEY)
+    if not xaml_heading:
+        xaml_detail = ("THIRD-PARTY-NOTICES.md 里没找到标题含 microsoft-ui-xaml 的 MIT 段，"
+                       "硬闸失去对象——§2.4 那段被删、被改名或正文不再声称 MIT 都会走到这里")
+    else:
+        xaml_detail = (f"段落「{xaml_heading}」的末行实得 {xaml_last!r}；上游 "
+                       "ThirdPartyNotices.txt 第 116 行的末行是不带句号的 'SOFTWARE'，"
+                       "这里带上句点就等于替上游改写了来源——请把句号去掉")
+    check("§2.4 microsoft-ui-xaml 末行不得补句号（上游原文本就缺这个句号，声明文件照原样保留）",
+          bool(xaml_heading) and not xaml_last.endswith("."),
+          xaml_detail)
     check("README 不再声称编译不需要联网",
           not readme_err and "不需要联网" not in readme,
           readme_err or "仍有「不需要联网」")
@@ -221,7 +256,7 @@ def check_licenses() -> None:
 - [ ] **Step 2: 跑断言，确认它失败**
 
 Run: `python smoke_test.py`
-Expected: 退出码非 0，失败项包含 `LICENSE 存在`、`THIRD-PARTY-NOTICES.md 存在`、`必要归属条目齐全`、`LICENSE 正文逐字等于标准 MIT`、`README 不再声称编译不需要联网`、`csproj 声明了许可证元数据`。
+Expected: 退出码非 0，失败项包含 `LICENSE 存在`、`THIRD-PARTY-NOTICES.md 存在`、`必要归属条目齐全`、`LICENSE 正文逐字等于标准 MIT`、`README 不再声称编译不需要联网`、`csproj 声明了许可证元数据`，以及新增的那条单向硬闸 `§2.4 microsoft-ui-xaml 末行不得补句号（上游原文本就缺这个句号，声明文件照原样保留）`（此时声明文件还不存在，它按「硬闸失去对象」记 ✗，不会静默放行）。
 
 - [ ] **Step 3: 写 `LICENSE`**
 
@@ -262,7 +297,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
    - `dotnet/wpf` 8.0 — MIT，© Microsoft Corporation
    - `microsoft/microsoft-ui-xaml` 3.0 — MIT，© Microsoft Corporation
    - `microsoft/segoe-fluent-icons-font` 3.0 — **微软专有字体许可，非 MIT**。必须单列一段写明：本项目只引用系统已安装的 Segoe Fluent Icons 字体，**不随安装包分发字体文件**，使用受微软该字体自身许可条款约束。
-   - §2 引言还要写一句标点口径：上游 `wpf-ui` 包内 `ThirdPartyNotices.txt` 的 §2.4（microsoft-ui-xaml）那段末尾本来就缺句号（第 116 行原文如此），本文照原样保留、未作补正——第三方许可证声明的职责是逐字忠于来源，不得为排版完整而改动来源。措辞用「忠于来源」，不写成「例外 / 偏差」（那会暗示我们动过来源）；这句说明放在 §2 引言，**不进 §2.4 的许可证块**，否则那个块就不再与上游逐字节一致了。
+   - §2 引言还要写一句标点口径：上游 `wpf-ui` 包内 `ThirdPartyNotices.txt` 的 §2.4（microsoft-ui-xaml）那段末尾本来就缺句号（第 116 行原文如此），本文照原样保留、未作补正——第三方许可证声明的职责是逐字忠于来源，不得为排版完整而改动来源。措辞用「忠于来源」，不写成「例外 / 偏差」（那会暗示我们动过来源）；比对口径写「正文已与上游逐字核对，行尾按本仓库既有的纯 LF 约定」，**不要**写「逐字节核对」——上游那份整份是 CRLF、本仓库工作副本是纯 LF，「逐字节」在行尾这个维度上并不成立，一份许可证声明里不该写这种强说法。这句说明放在 §2 引言，**不进 §2.4 的许可证块**，否则那个块的正文就不再与上游逐字一致了。
 3. **AF-Media-Bar** — MIT，Copyright (c) 2026 AmorFate，https://github.com/Fervent-Tempo/AF-Media-Bar 。声明为「任务栏停靠方式与控制台分组/行布局的**设计参照**，本项目未复制其任何源代码」。
 4. **.NET 10 Windows Desktop Runtime** 与 **Python 3.14 标准库** —— 运行时依赖，不随附其代码；写明版本下限（Python 低于 3.14 时引擎会因 `compression.zstd` 缺失而不可用）。
 
@@ -285,7 +320,7 @@ README 三处改动：① 删掉实现栈那行里的「编译不需要联网」
 - [ ] **Step 6: 跑断言确认通过**
 
 Run: `python smoke_test.py`
-Expected: 退出码 0，`== 开源合规 ==` 段 15 项全 ✓（11 项存在性/关键词/元数据 + 1 项 `LICENSE` 正文逐字比对 + 6 段 MIT 原文正文比对，后者断言名自带宽容口径：`MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：…`）。
+Expected: 退出码 0，`== 开源合规 ==` 段 16 项全 ✓（8 项存在性/可读性/关键词/元数据 + 1 项 `LICENSE` 正文逐字比对 + 6 段 MIT 原文正文比对 + 1 项 §2.4 末行不得补句号的单向硬闸 = 16；6 段那条的断言名自带宽容口径：`MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：…`，硬闸那条叫 `§2.4 microsoft-ui-xaml 末行不得补句号（上游原文本就缺这个句号，声明文件照原样保留）`）。默认路径的全量总数随之为 **61 项**。
 
 Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; cat ../b.log`
 Expected: `0`，且 `0 个警告 0 个错误`。
