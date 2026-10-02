@@ -566,6 +566,26 @@ def find_bar_windows() -> list[int]:
     return found
 
 
+def top_window(title: str) -> int:
+    u = _user32()
+    hits = []
+    proto = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def cb(h, _l):
+        if not u.IsWindowVisible(h):
+            return True
+        n = u.GetWindowTextLengthW(h)
+        if n:
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u.GetWindowTextW(h, buf, n + 1)
+            if buf.value == title:
+                hits.append(h)
+        return True
+
+    u.EnumWindows(proto(cb), 0)
+    return hits[0] if hits else 0
+
+
 def bar_processes() -> set[int]:
     out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq DshBar.exe", "/fo", "csv", "/nh"],
                          capture_output=True, text=True, errors="replace").stdout
@@ -576,6 +596,77 @@ def python_pids() -> set[int]:
     out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq python.exe", "/fo", "csv", "/nh"],
                          capture_output=True, text=True, errors="replace").stdout
     return {int(p.split('","')[1]) for p in out.splitlines() if p.count('"') >= 3}
+
+
+PANEL_PAGES = ("overview", "notify", "appearance", "runtime", "balance", "about")
+
+
+def check_panel_shell() -> None:
+    print("\n== 控制台面板 ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    shots = {}
+    for page in PANEL_PAGES:
+        shot = os.path.join(ds.state_dir(), f"panel-{page}.png")
+        if os.path.isfile(shot):
+            os.remove(shot)
+        p = subprocess.run([BAR_EXE, "--panel-shot", page, shot],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=120, cwd=os.path.dirname(BAR_EXE))
+        line = (p.stdout or "").strip().splitlines()
+        head = line[0] if line else ""
+        # C# 侧输出：SHOT <page> <w> <h> <colors>
+        parts = head.split()
+        good = (p.returncode == 0 and len(parts) == 5 and parts[0] == "SHOT"
+                and parts[1] == page and int(parts[2]) >= 720 and int(parts[3]) >= 480)
+        check(f"--panel-shot {page}", good,
+              f"退出码 {p.returncode} 输出 {head!r} err={(p.stderr or '')[-160:]!r}")
+        check(f"{page} 落盘 PNG", os.path.isfile(shot) and os.path.getsize(shot) > 2000, shot)
+        shots[page] = int(parts[4]) if len(parts) == 5 else -1
+
+
+def check_panel_window() -> None:
+    print("\n== 控制台窗口 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    proc = subprocess.Popen([BAR_EXE, "--panel"], cwd=os.path.dirname(BAR_EXE))
+    try:
+        u = _user32()
+        found, t0 = None, time.time()
+        while time.time() - t0 < 25:
+            found = top_window("dsh 控制台")
+            if found:
+                break
+            time.sleep(0.4)
+        check("面板窗口已出现", bool(found), "找不到标题为 dsh 控制台 的顶层窗口")
+        if found:
+            style = u.GetWindowLongW(found, -16)
+            l, t, r, b = rect_of(found)
+            check("面板是正常顶层窗口", not (style & 0x40000000) and bool(style & 0x10000000),
+                  hex(style))
+            check("面板尺寸合理", (r - l) >= 720 and (b - t) >= 480, f"{r-l}x{b-t}")
+        # 关窗应当只是隐藏，并能再次唤起（spec §3）
+        # 用 PostMessageW：user32.dll 只导出 PostMessageA/PostMessageW，
+        # 不带后缀的 PostMessage 是 Win32 头文件里的宏，ctypes 取不到（AttributeError）。
+        u.PostMessageW(found, 0x0010, 0, 0)  # WM_CLOSE
+        time.sleep(1.5)
+        check("关窗后进程仍在（只是隐藏，没销毁）", bool(bar_processes()), "进程跟着退出了")
+        check("关窗后面板不再可见", not top_window("dsh 控制台"), "窗口还看得见")
+        subprocess.run([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE),
+                       timeout=30)
+        t1 = time.time()
+        while time.time() - t1 < 20 and not top_window("dsh 控制台"):
+            time.sleep(0.4)
+        check("再次请求能重新打开面板", bool(top_window("dsh 控制台")), "面板没能再打开")
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        time.sleep(3)
+        check("退出后无残留", not bar_processes(), str(bar_processes()))
 
 
 def check_gui() -> None:
@@ -698,7 +789,9 @@ def main() -> int:
     check_engine_copy()
     check_licenses()
     if full or "--gui" in args:
+        check_panel_shell()
         check_gui()
+        check_panel_window()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")
 
