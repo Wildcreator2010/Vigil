@@ -233,7 +233,8 @@ LICENSE_MUST_CONTAIN = (
 # %USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\LICENSE.md 的正文（已核实与本项目 LICENSE 一致）。
 # 关键词存在性检查（LICENSE_MUST_CONTAIN）拦不住「看着像 MIT 却少了半句」的残缺正文——
 # 简报最初给的那版就少了 AN ACTION OF CONTRACT, TORT OR OTHERWISE, 而它照样能过全部关键词断言。
-# 本任务的目的恰恰是「让本项目可被认证为 MIT」，所以正文一律与本常量逐字比对。
+# 本任务的目的恰恰是「让本项目可被认证为 MIT」，所以正文一律与本常量逐字比对；
+# 唯一的容差是第三方声明各段末行的那一个句点，理由见 notice_mit_body() 的注释，LICENSE 不享有该容差。
 MIT_BODY = """\
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -257,6 +258,8 @@ MIT_PROBE = "Permission is hereby granted, free of charge"  # 用来认出「这
 _MIT_TITLE = re.compile(r"^\s*(the\s+)?mit\s+(li[c]ense)(\s*\(mit\))?\s*$", re.I)
 _MIT_COPYRIGHT = re.compile(r"^\s*copyright\b", re.I)
 _MIT_RESERVED = re.compile(r"^\s*all\s+rights\s+reserved\.?\s*$", re.I)
+# 末行尾部的空白 + 至多一个句点（见 notice_mit_body 的注释）。锚在 \Z，全串最多匹配一处。
+_MIT_TAIL = re.compile(r"[ \t]*\.?[ \t]*\Z")
 
 
 def read_utf8(path: str) -> tuple[str | None, str]:
@@ -295,6 +298,28 @@ def mit_body(text: str) -> str:
         if i < len(lines) and _MIT_RESERVED.match(lines[i]):
             i += 1
     return "\n".join(lines[i:]).strip()
+
+
+def notice_mit_body(text: str) -> str:
+    r"""第三方声明里各 MIT 段比对前的正文：在 mit_body() 之上只多一条容差——末行尾部的空白与单个句点。
+
+    块整体的首尾空白 mit_body() 已经去掉；除此之外零容差，条款正文任何一处被改坏、截断、
+    换词、多一个标点，都照样报红。
+
+    为什么独独放宽这一个标点：本文件 §2.4（microsoft-ui-xaml）的原文来自上游
+    `%USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\ThirdPartyNotices.txt` 第 116 行，
+    那份源文件最末一句 `…DEALINGS IN THE SOFTWARE` 后面**本来就没有句号**（已逐字节核对，
+    看似笔误、实为源文件原文）。第三方许可证声明的唯一职责是逐字忠于它的来源，
+    合规文件不得为了迁就断言去改写来源——所以让步的是断言，不是 §2.4 的正文。
+    （§1 那份 LICENSE.md、§2.1–2.3 与 §3 各段的来源都带句号，容差对它们是空操作，不放松任何约束。）
+
+    `LICENSE` 不走这条容差：那是我们自己的文件，没有「忠于上游」的豁免，仍用 mit_body() 严格逐字比对。
+    """
+    return _MIT_TAIL.sub("", mit_body(text), count=1)
+
+
+# notice_mit_body() 一侧的参照：同样只去掉末行那一个句点，两侧口径对称。
+_MIT_BODY_TOLERANT = _MIT_TAIL.sub("", MIT_BODY, count=1)
 
 
 def fenced_blocks(md: str) -> list[tuple[str, str]]:
@@ -355,7 +380,8 @@ def check_licenses() -> None:
           f"应有 6 段（WPF-UI、其 4 项 MIT 传递依赖、AF-Media-Bar），实得 {len(blocks)}")
     for heading, block in blocks:
         check(f"MIT 原文逐字等于标准 MIT：{heading}",
-              mit_body(block) == MIT_BODY, first_diff(mit_body(block), MIT_BODY))
+              notice_mit_body(block) == _MIT_BODY_TOLERANT,
+              first_diff(notice_mit_body(block), _MIT_BODY_TOLERANT))
     check("README 不再声称编译不需要联网",
           not readme_err and "不需要联网" not in readme,
           readme_err or "仍有「不需要联网」")

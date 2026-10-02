@@ -55,8 +55,7 @@ SOFTWARE.
 ## 2. WPF-UI 内含、需继续向下传递的 5 项
 
 依据包内 `ThirdPartyNotices.txt`。该文件开头写明 **“Do Not Translate or Localize”**，
-因此下列原文一律按英文原样附出、不翻译；唯一例外是 2.4 段末句补回的一个句号
-（上游漏写，不改变任何条款，已在该处单独注明）。这些组件随 WPF-UI 一起进入产物，
+因此下列原文一律按英文原样附出、不翻译；这些组件随 WPF-UI 一起进入产物，
 其声明义务由本项目继续向下游传递。
 
 ### 2.1 sbaeumlisberger/VirtualizingWrapPanel 2.0.6 — MIT
@@ -158,8 +157,6 @@ SOFTWARE.
 - **用途**：WPF-UI 的 WinUI 风格控件与主题资源参照自 WinUI（Microsoft UI Library）。
 - **上游**：https://github.com/microsoft/microsoft-ui-xaml
 - **版权行**：`Copyright (c) Microsoft Corporation. All rights reserved.`
-- **原文说明**：包内 `ThirdPartyNotices.txt` 这一段最末一句漏了句号，下面按 SPDX MIT 标准正文
-  把它补回（`… DEALINGS IN THE SOFTWARE.`）。这是纯标点补全，不改变任何条款；除此之外逐字照抄。
 
 ```
 MIT License
@@ -182,7 +179,7 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+SOFTWARE
 ```
 
 ### 2.5 microsoft/segoe-fluent-icons-font 3.0 — 微软专有字体许可（**非 MIT**）
