@@ -1,0 +1,18 @@
+bin/
+obj/
+__pycache__/
+*.pyc
+build-out.txt
+smoke-run*.txt
+final.txt
+balance.key
+
+# SDD 工作区与临时产物
+.superpowers/
+*.log
+panel-*.png
+shot-probe.png
+probe.png
+p.png
+p1.png
+p2.png

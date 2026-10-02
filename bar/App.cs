@@ -1,0 +1,562 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Windows;
+using System.Windows.Forms;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+namespace DshBar
+{
+    internal static class App
+    {
+        private static readonly Dictionary<string, Icon> IconCache = new Dictionary<string, Icon>();
+        private static readonly string StateDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-status");
+        private static readonly string LogFile = Path.Combine(StateDir, "bar.log");
+        private static readonly string SettingsFile = Path.Combine(StateDir, "settings.json");
+        private static readonly string RefreshToken = Path.Combine(StateDir, "refresh.token");
+        private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string RunValue = "dsh-status";
+
+        private static Settings _settings;
+        private static BarWindow _window;
+        private static NotifyIcon _tray;
+        private static StateClient _client;
+        private static DispatcherTimer _watchdog;
+        private static IntPtr _taskbar = IntPtr.Zero;
+        private static Snapshot _last;
+        private static string _lastState = "";
+        private static DateTime _lastNotifyAt = DateTime.MinValue;
+        private static Mutex _mutex;
+        private static ToolStripMenuItem _miState, _miProject, _miBalance, _miBalanceErr, _miTips, _miAuto;
+        private static DispatcherTimer _tween;
+        private static int _curW, _targetW;
+        private static Rect _barRect;
+        private static DateTime _hoverOut = DateTime.MinValue;
+
+        [STAThread]
+        private static int Main(string[] args)
+        {
+            Native.SetProcessDpiAwarenessContext((IntPtr)(-4));
+            Directory.CreateDirectory(StateDir);
+
+            _mutex = new Mutex(false, @"Local\dsh-status-bar-mutex");
+            bool owned = false;
+            try
+            {
+                owned = _mutex.WaitOne(0);
+            }
+            catch (AbandonedMutexException)
+            {
+                owned = true;
+            }
+            if (!owned)
+            {
+                System.Windows.MessageBox.Show("状态栏已经在运行了。", "dsh 状态栏");
+                return 0;
+            }
+
+            _settings = Settings.Load(SettingsFile);
+            string demo = null;
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "--demo") demo = args[i + 1];
+            }
+            Log($"DshBar 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"}");
+
+            var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            _window = new BarWindow();
+            _window.LeftClicked += FocusHarness;
+            _window.RightClicked += pt => _tray.ContextMenuStrip.Show((int)pt.X, (int)pt.Y);
+            _window.Wheel += Cycle;
+            _window.HoverChanged += () => PlaceNow(new System.Windows.Interop.WindowInteropHelper(_window).Handle);
+            _window.Show();
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(_window).Handle;
+            DockNow(hwnd);
+
+            BuildTray();
+            if (demo != null) DemoOnce(demo);
+            else StartClient();
+
+            _watchdog = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _watchdog.Tick += (s, e) => Tick(hwnd);
+            _watchdog.Start();
+
+            _tween = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
+            _tween.Tick += (s, e) => { PollHover(); Tween(); };
+            _tween.Start();
+
+            app.Run();
+            Cleanup();
+            return 0;
+        }
+
+        private static void StartClient()
+        {
+            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
+            if (!File.Exists(engine))
+            {
+                engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
+            }
+            string python = ResolvePython();
+            if (python == null || !File.Exists(engine))
+            {
+                Log($"找不到引擎或 python engine={engine} python={python ?? "null"}");
+                Balloon("状态检测引擎不可用", "请确认 dsh_state.py 与 python 3.14 就位", ToolTipIcon.Error);
+                return;
+            }
+            _client = new StateClient(python, engine, _settings.Interval);
+            _client.Log += Log;
+            _client.Updated += snap => _window.Dispatcher.BeginInvoke(new Action(() => OnSnapshot(snap)));
+            _client.Start();
+        }
+
+        /// <summary>--demo 只喂一帧伪造快照，用来肉眼核对各状态的视觉。</summary>
+        private static void DemoOnce(string state)
+        {
+            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
+            string python = ResolvePython();
+            if (python == null || !File.Exists(engine)) return;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = python,
+                    Arguments = $"-X utf8 \"{engine}\" --demo {state} --json",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                string line = proc.StandardOutput.ReadLine();
+                proc.WaitForExit(15000);
+                if (string.IsNullOrWhiteSpace(line)) return;
+                var snap = System.Text.Json.JsonSerializer.Deserialize<Snapshot>(line,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (snap != null) _window.Dispatcher.BeginInvoke(new Action(() => OnSnapshot(snap)));
+            }
+            catch (Exception ex)
+            {
+                Log($"demo 失败: {ex.Message}");
+            }
+        }
+
+        private static string ResolvePython()
+        {
+            foreach (var name in new[] { "python", "python3" })
+            {
+                foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+                {
+                    if (dir.Length == 0) continue;
+                    try
+                    {
+                        string candidate = Path.Combine(dir.Trim(), name + ".exe");
+                        if (File.Exists(candidate)) return candidate;
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            var fallback = Path.Combine(@"C:\Python314", "python.exe");
+            return File.Exists(fallback) ? fallback : null;
+        }
+
+        private static void DockNow(IntPtr hwnd)
+        {
+            _taskbar = Native.TaskbarHandle();
+            if (_taskbar != IntPtr.Zero) Native.Dock(hwnd, _taskbar);
+            PlaceNow(hwnd);
+        }
+
+        private static void PlaceNow(IntPtr hwnd)
+        {
+            if (_taskbar == IntPtr.Zero) return;
+            if (!Native.GetWindowRect(_taskbar, out Rect band)) return;
+            var (left, right) = Native.FreeRange(band, 240);
+            int height = Math.Max(20, band.Height - 8);
+            int max = Math.Max(200, right - left);
+
+            double scale = 1.0;
+            try
+            {
+                scale = VisualTreeHelper.GetDpi(_window).DpiScaleX;
+            }
+            catch
+            {
+            }
+            int wanted = Math.Max(200, (int)Math.Ceiling(_window.ContentWidth() * scale));
+            int target = _window.Expanded ? Math.Min(max, wanted + (int)(200 * scale)) : Math.Min(max, wanted);
+            if (_curW <= 0) _curW = target;
+            _targetW = target;
+
+            int width = Math.Max(200, Math.Min(_curW, max));
+            int top = band.Top + (band.Height - height) / 2;
+            var rect = new Rect { Left = left, Top = top, Right = left + width, Bottom = top + height };
+            Native.Place(hwnd, _taskbar, rect);
+            _barRect = rect;
+        }
+
+        private static void PollHover()
+        {
+            if (!Native.GetCursorPos(out Point cur)) { Log("GetCursorPos 失败"); return; }
+            bool inside = cur.X >= _barRect.Left && cur.X < _barRect.Right && cur.Y >= _barRect.Top && cur.Y < _barRect.Bottom;
+            if (inside)
+            {
+                _window.SetHover(true);
+                _hoverOut = DateTime.Now.AddMilliseconds(260);
+            }
+            else if (DateTime.Now > _hoverOut)
+            {
+                _window.SetHover(false);
+            }
+        }
+
+        private static void Tween()
+        {
+            if (_curW <= 0 || Math.Abs(_curW - _targetW) <= 2)
+            {
+                if (_curW != _targetW)
+                {
+                    _curW = _targetW;
+                    PlaceNow(new System.Windows.Interop.WindowInteropHelper(_window).Handle);
+                }
+                return;
+            }
+            int step = Math.Max(6, (int)(Math.Abs(_targetW - _curW) * 0.35));
+            _curW = _targetW > _curW ? Math.Min(_targetW, _curW + step) : Math.Max(_targetW, _curW - step);
+            PlaceNow(new System.Windows.Interop.WindowInteropHelper(_window).Handle);
+        }
+
+        private static void Tick(IntPtr hwnd)
+        {
+            try
+            {
+                IntPtr tb = Native.TaskbarHandle();
+                if (tb == IntPtr.Zero) return;
+                if (tb != _taskbar)
+                {
+                    Log("任务栏窗口已重建，重新停靠");
+                    _taskbar = tb;
+                    Native.Dock(hwnd, _taskbar);
+                }
+                PlaceNow(hwnd);
+                _tray.Text = TooltipFor(_last);
+            }
+            catch (Exception ex)
+            {
+                Log($"watchdog 异常: {ex.Message}");
+            }
+        }
+
+        private static string TooltipFor(Snapshot snap)
+        {
+            if (snap == null) return "dsh 状态检测";
+            string tip = (snap.Tooltip ?? snap.Label ?? "").Replace('\n', ' ');
+            tip = System.Text.RegularExpressions.Regex.Replace(tip, @"\s+", " ").Trim();
+            return tip.Length <= 63 ? tip : tip.Substring(0, 62) + "…";
+        }
+
+        private static void OnSnapshot(Snapshot snap)
+        {
+            if (snap == null) return;
+            if (!snap.Ok)
+            {
+                Log($"引擎报错: {snap.Error}");
+                return;
+            }
+            _last = snap;
+            _window.Apply(snap);
+            _tray.Icon = StatusIcon(snap.Color, snap.Glyph);
+            _tray.Text = TooltipFor(snap);
+            _miState.Text = "状态：" + snap.Label;
+            _miProject.Text = "项目：" + (snap.Session?.Project ?? "-");
+            _miBalance.Text = "余额：" + (snap.StripRight ?? "--");
+            string err = snap.Balance != null && !snap.Balance.Available ? snap.Balance.Error : "";
+            _miBalanceErr.Text = string.IsNullOrEmpty(err) ? "" : "（" + err + "）";
+            _miBalanceErr.Visible = !string.IsNullOrEmpty(err);
+            _miTips.DropDownItems.Clear();
+            foreach (var line in snap.TipLines ?? new List<string>())
+            {
+                _miTips.DropDownItems.Add(new ToolStripMenuItem(line) { Enabled = false });
+            }
+            Notify(snap);
+        }
+
+        private static void Notify(Snapshot snap)
+        {
+            string state = snap.State ?? "";
+            string prev = _lastState;
+            var now = DateTime.Now;
+            string project = snap.Session?.Project ?? "";
+            string pending = snap.Session?.Pending?.Text ?? "";
+
+            if (state != prev)
+            {
+                switch (state)
+                {
+                    case "needs_action":
+                        Balloon("DeepSeek 在等你操作", project + "\n" + pending, ToolTipIcon.Warning);
+                        break;
+                    case "error":
+                        Balloon("DeepSeek 出错了", project + "\n" + (snap.Session?.Error ?? ""), ToolTipIcon.Error);
+                        break;
+                    case "done":
+                        if (prev == "thinking" || prev == "answering" || prev == "tool_running" || prev == "needs_action" || prev == "stalled")
+                        {
+                            Balloon("回答完成", project, ToolTipIcon.Info);
+                        }
+                        break;
+                }
+                _lastNotifyAt = now;
+            }
+            else if (state == "needs_action" && _settings.RepeatSec > 0
+                     && (now - _lastNotifyAt).TotalSeconds >= _settings.RepeatSec)
+            {
+                Balloon("还在等你操作", project + "\n" + pending, ToolTipIcon.Warning);
+                _lastNotifyAt = now;
+            }
+            _lastState = state;
+        }
+
+        private static void Balloon(string title, string text, ToolTipIcon icon)
+        {
+            if (!_settings.Notify || _tray == null) return;
+            _tray.BalloonTipTitle = title;
+            _tray.BalloonTipText = string.IsNullOrEmpty(text) ? " " : (text.Length > 240 ? text.Substring(0, 240) : text);
+            _tray.BalloonTipIcon = icon;
+            _tray.ShowBalloonTip(12000);
+            Log($"通知 [{icon}] {title} / {(text ?? "").Replace('\n', ' ')}");
+        }
+
+        private static void Cycle(int direction)
+        {
+            var snap = _last;
+            if (snap == null || direction == 0) return;
+            var items = new List<string> { snap.Label + " · " + (snap.Session?.Project ?? "") };
+            foreach (var w in snap.Waiting ?? new List<Brief>())
+            {
+                items.Add($"{w.Project}：{w.Text}");
+            }
+            foreach (var r in snap.Recent ?? new List<Brief>())
+            {
+                if (r.Project != snap.Session?.Project) items.Add($"{r.Project} · {r.State}");
+            }
+            if (items.Count < 2) return;
+            _cycleIndex = ((_cycleIndex + direction) % items.Count + items.Count) % items.Count;
+            _window.ShowTransient(items[_cycleIndex]);
+        }
+
+        private static int _cycleIndex = -1;
+
+        private static void FocusHarness()
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("DeepSeek Harness"))
+            {
+                if (p.MainWindowHandle == IntPtr.Zero) continue;
+                Native.ShowWindowAsync(p.MainWindowHandle, 9);
+                Native.SetForegroundWindow(p.MainWindowHandle);
+                return;
+            }
+            Balloon("DeepSeek Harness 没有可激活的窗口", "", ToolTipIcon.Info);
+        }
+
+        private static Icon StatusIcon(string hex, string glyph)
+        {
+            string key = (hex ?? "") + "|" + (glyph ?? "");
+            if (IconCache.TryGetValue(key, out Icon hit) && hit != null) return hit;
+
+            var color = System.Drawing.Color.Gray;
+            try
+            {
+                var c = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex);
+                color = System.Drawing.Color.FromArgb(c.A, c.R, c.G, c.B);
+            }
+            catch
+            {
+            }
+
+            var bmp = new Bitmap(32, 32);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                g.Clear(System.Drawing.Color.Transparent);
+                using var brush = new SolidBrush(color);
+                g.FillEllipse(brush, 1, 1, 30, 30);
+                using var font = new Font("Segoe UI", 15, System.Drawing.FontStyle.Bold, GraphicsUnit.Pixel);
+                using var text = new SolidBrush(System.Drawing.Color.White);
+                var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                g.DrawString(string.IsNullOrEmpty(glyph) ? "?" : glyph, font, text, new RectangleF(0, 0, 32, 32), sf);
+            }
+            IntPtr hicon = bmp.GetHicon();
+            bmp.Dispose();
+            var icon = Icon.FromHandle(hicon);
+            IconCache[key] = icon;
+            return icon;
+        }
+
+        private static void OpenLog()
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(LogFile) { UseShellExecute = true });
+            }
+            catch
+            {
+            }
+        }
+
+        private static void BuildTray()
+        {
+            var menu = new ContextMenuStrip { Font = new Font("Microsoft YaHei UI", 9f) };
+            _miState = Add(menu, "状态：检测中…", null, false);
+            _miProject = Add(menu, "项目：-", null, false);
+            _miBalance = Add(menu, "余额：-", null, false);
+            _miBalanceErr = Add(menu, "", null, false);
+            _miBalanceErr.Visible = false;
+            _miTips = Add(menu, "详情", null, false);
+            menu.Items.Add(new ToolStripSeparator());
+            Add(menu, "立即刷新余额", (s, e) => RefreshBalance());
+            Add(menu, "设置余额 Key…", (s, e) => KeyDialog.Ask());
+            Add(menu, "切到 DeepSeek Harness", (s, e) => FocusHarness());
+            Add(menu, "重启检测进程", (s, e) => RestartClient());
+            _miAuto = Add(menu, "开机自动启动", (s, e) => ToggleAutostart(!_miAuto.Checked));
+            _miAuto.CheckOnClick = false;
+            Add(menu, "打开日志", (s, e) => OpenLog());
+            menu.Items.Add(new ToolStripSeparator());
+            Add(menu, "退出", (s, e) => System.Windows.Application.Current?.Shutdown());
+
+            _tray = new NotifyIcon
+            {
+                Icon = StatusIcon("#9CA3AF", "?"),
+                Text = "dsh 状态检测",
+                Visible = true,
+                ContextMenuStrip = menu,
+            };
+            _tray.DoubleClick += (s, e) => FocusHarness();
+            _miAuto.Checked = AutostartEnabled();
+        }
+
+        private static ToolStripMenuItem Add(ToolStripDropDown menu, string text, EventHandler handler, bool enabled = true)
+        {
+            var item = new ToolStripMenuItem(text) { Enabled = enabled };
+            if (handler != null) item.Click += handler;
+            menu.Items.Add(item);
+            return item;
+        }
+
+        private static void RefreshBalance()
+        {
+            try
+            {
+                File.WriteAllText(RefreshToken, DateTime.Now.ToString("o", CultureInfo.InvariantCulture));
+                Log("已请求刷新余额");
+            }
+            catch (Exception ex)
+            {
+                Log($"刷新余额失败: {ex.Message}");
+            }
+        }
+
+        private static void RestartClient()
+        {
+            _client?.Dispose();
+            _client = null;
+            StartClient();
+        }
+
+        private static bool AutostartEnabled()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey);
+                return key?.GetValue(RunValue) != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void ToggleAutostart(bool on)
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKey);
+                if (on)
+                {
+                    key.SetValue(RunValue, $"\"{Environment.ProcessPath}\"");
+                }
+                else
+                {
+                    key.DeleteValue(RunValue, false);
+                }
+                _miAuto.Checked = on;
+                Log($"开机自启 -> {on}");
+            }
+            catch (Exception ex)
+            {
+                Balloon("设置开机自启失败", ex.Message, ToolTipIcon.Error);
+            }
+        }
+
+        private static void Log(string message)
+        {
+            try
+            {
+                File.AppendAllText(LogFile,
+                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}", Encoding.UTF8);
+                var info = new FileInfo(LogFile);
+                if (info.Length > 262144)
+                {
+                    var lines = File.ReadAllLines(LogFile);
+                    int take = Math.Min(200, lines.Length);
+                    var keep = new string[take];
+                    Array.Copy(lines, lines.Length - take, keep, 0, take);
+                    File.WriteAllLines(LogFile, keep, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void Cleanup()
+        {
+            try
+            {
+                _watchdog?.Stop();
+                _tween?.Stop();
+                _client?.Dispose();
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(_window).Handle;
+                Native.Undock(hwnd);
+                if (_tray != null)
+                {
+                    _tray.Visible = false;
+                    _tray.Dispose();
+                }
+                _window?.Close();
+                foreach (var kv in IconCache)
+                {
+                    Native.DestroyIcon(kv.Value.Handle);
+                    kv.Value.Dispose();
+                }
+                IconCache.Clear();
+                _settings?.Save(SettingsFile);
+                _mutex.ReleaseMutex();
+                _mutex.Dispose();
+                Log("DshBar 退出");
+            }
+            catch
+            {
+            }
+        }
+    }
+}
