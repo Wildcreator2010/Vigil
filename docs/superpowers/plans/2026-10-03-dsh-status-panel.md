@@ -373,7 +373,7 @@ def run_sessions_field():
                 return errs
             if len(rows) != ds.SESSIONS_IN_SNAPSHOT:
                 errs.append(f"sessions 未截到上限: {len(rows)}/{ds.SESSIONS_IN_SNAPSHOT}")
-            need = {"key", "project", "title", "path", "state", "turn", "step", "age_sec",
+            need = {"key", "project", "title", "state", "turn", "step", "age_sec",
                     "last_event", "last_tool", "end_reason", "records", "todo",
                     "usage_total", "pending"}
             for r in rows[:3]:
@@ -381,6 +381,11 @@ def run_sessions_field():
                 if miss:
                     errs.append(f"sessions 字段缺失: {sorted(miss)}")
             long_titles = [r["title"] for r in rows if r.get("title")]
+            if not all(isinstance((r.get("pending") or {}).get("options"), list)
+                       for r in rows if r.get("pending")):
+                errs.append("pending.options 缺失或类型错：概览页要就地显示选项")
+            if any("path" in r for r in rows):
+                errs.append("sessions 不应携带 path：无消费者，且是每帧最大的冗余项")
             if not long_titles or max(len(t) for t in long_titles) > 80:
                 errs.append("title 未截断到 80")
             texts = [(r.get("pending") or {}).get("text") or "" for r in rows]
@@ -433,7 +438,6 @@ def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dic
             "key": s["key"],
             "project": s["project"],
             "title": (s.get("title") or "")[:80] or None,
-            "path": s["path"],
             "state": s["state"],
             "turn": s.get("turn"),
             "step": s.get("step"),
@@ -448,6 +452,7 @@ def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dic
                 "kind": pending.get("kind"),
                 "tool": pending.get("tool"),
                 "text": str(pending.get("text") or "")[:120],
+                "options": list(pending.get("options") or []),
             },
         })
     return out
@@ -477,7 +482,7 @@ Expected: 退出码 0；`真实会话 N 个` 那行仍正常，且缓存单轮�
               isinstance(rows, list) and 0 < len(rows) <= ds.SESSIONS_IN_SNAPSHOT,
               f"{type(rows).__name__} len={len(rows) if isinstance(rows, list) else '-'}")
         if rows:
-            need = {"key", "project", "title", "path", "state", "turn", "step", "age_sec",
+            need = {"key", "project", "title", "state", "turn", "step", "age_sec",
                     "last_event", "last_tool", "end_reason", "records", "todo",
                     "usage_total", "pending"}
             miss = need - set(rows[0])

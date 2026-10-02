@@ -91,7 +91,6 @@ DshBar.exe
   "key": "T47-abc123",            // 会话目录名，用于和 session 字段对齐
   "project": "FurBoard",
   "title": "专利申请合规性核验",     // 截断到 80 字符
-  "path": "C:\\Users\\...\\session.v4.jsonl.zstd",
   "state": "needs_action",
   "turn": 47, "step": 10,          // 可为 null
   "age_sec": 12.4,
@@ -101,14 +100,21 @@ DshBar.exe
   "records": 1284,
   "todo": { "total": 6, "done": 5, "in_progress": 0, "pending": 1 },   // 可为 null
   "usage_total": { "input": 120000, "output": 9000, "total": 129000 },
-  "pending": { "kind": "approval", "tool": "pwsh", "text": "要联网下载" } // 截断到 120 字符，可为 null
+  "pending": { "kind": "approval", "tool": "pwsh", "text": "要联网下载",
+               "options": ["允许一次", "总是允许"] }  // text 截到 120 字符，可为 null
 }]
 ```
 
 约束：
 
 - `recent` 与 `waiting` 字段保持原样不动（滚轮循环 `Cycle()` 在用）。
-- 所有字符串字段在 Python 侧就截断，保证帧大小可控（25 个会话约 7.5KB / 2 秒）。
+- 所有字符串字段在 Python 侧就截断。**实测校正**：本机 29 个真实会话下单帧 17KB（我原先估的 7.5KB 偏低——
+  截断按字符算而 UTF-8 中文占 3 字节/字），60 行满额最坏约 110KB，即每 2 秒约 55KB/s。
+  这个量对 `System.Text.Json` 与管道都可忽略，**不设字节预算**。
+- 白名单只收面板真消费的字段：`path` 与 `cwd` 不在其中（没有任何页面用到，且 `project` 已由 `cwd` 派生）；
+  `pending.options` 保留，因为 §5 概览页要求就地显示待处理问题的选项。
+- `--watch` 的异常帧（引擎抛错时那条 `ok:false`）**不带** `sessions`；C# 侧 `Snapshot.Sessions`
+  须按 null 处理，消费方要能容忍空表。
 - `C#` 侧 `Snapshot` 增加 `List<SessionRow> Sessions`，旧字段不受影响；`System.Text.Json`
   对多余字段本来就宽容，所以这是向后兼容的。
 - 引擎异常路径（`--watch` 的 try/except）不变。
@@ -117,7 +123,8 @@ DshBar.exe
 
 左侧导航是原生 `ListBox`（6 项固定，样式对齐 Fluent 的导航条），右侧一个 `ContentControl`
 宿主页面。内容区一律「分组卡片 + 行」结构，每行是 **标题 + 说明文字 + 右侧控件**，
-分组与行由自绘控件 `SettingsGroup` / `SettingsRow` 承担（对应 AF-Media-Bar 的同名自绘件）。
+分组与行由 `bar/Panel/Ui.cs` 里的 `Ui.Group()` / `Ui.Row()` 工厂自绘（对应 AF-Media-Bar 的
+`SettingsGroup` / `SettingsRow` 词汇，但那两个在参考项目里也是自绘件，不是库件）。
 
 | 页面 | 内容 | 右侧控件 |
 | --- | --- | --- |
