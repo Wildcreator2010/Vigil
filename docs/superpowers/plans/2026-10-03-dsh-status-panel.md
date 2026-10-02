@@ -41,7 +41,7 @@
 
 - [ ] **Step 1: 先加失败的合规断言**
 
-在 `smoke_test.py` 的 `check_engine_copy()` 之后插入（顶部 import 需补 `import re`）。关键词存在性检查拦不住「看着像 MIT 却少了半句」的残缺正文，所以 `MIT_BODY` 承担逐字比对：第三方声明的各段与它只容一处差异——末行尾部的空白与**单个**句点，因为上游 `ThirdPartyNotices.txt` 抄 microsoft-ui-xaml 那段的最末一句本身就少句号（第 116 行原文如此），而第三方许可证声明的职责是逐字忠于来源，合规文件不得为迁就断言改写来源；`LICENSE` 是我们自己的文件，不享有这处容差，仍按 `MIT_BODY` 严格逐字比对（理由写在 `notice_mit_body()` 的注释里）：
+在 `smoke_test.py` 的 `check_engine_copy()` 之后插入（顶部 import 需补 `import re`）。关键词存在性检查拦不住「看着像 MIT 却少了半句」的残缺正文，所以 `MIT_BODY` 承担逐字比对：第三方声明的各段与它只容一处差异——末行尾部的空白与**单个**句点，因为上游 `ThirdPartyNotices.txt` 抄 microsoft-ui-xaml 那段的最末一句本身就少句号（第 116 行原文如此），而第三方许可证声明的职责是逐字忠于来源，合规文件不得为迁就断言改写来源；`LICENSE` 是我们自己的文件，不享有这处容差，仍按 `MIT_BODY` 严格逐字比对（理由写在 `notice_mit_body()` 的注释里）。两条断言名各按各自口径如实命名，不带豁免的那条叫 `LICENSE 正文逐字等于标准 MIT`，带容差的那条叫 `MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：…`，名字不得强于实际：
 
 ```python
 LICENSE_MUST_CONTAIN = (
@@ -203,7 +203,7 @@ def check_licenses() -> None:
     check("THIRD-PARTY-NOTICES 里声称 MIT 的段落数符合预期", len(blocks) >= 6,
           f"应有 6 段（WPF-UI、其 4 项 MIT 传递依赖、AF-Media-Bar），实得 {len(blocks)}")
     for heading, block in blocks:
-        check(f"MIT 原文逐字等于标准 MIT：{heading}",
+        check(f"MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：{heading}",
               notice_mit_body(block) == _MIT_BODY_TOLERANT,
               first_diff(notice_mit_body(block), _MIT_BODY_TOLERANT))
     check("README 不再声称编译不需要联网",
@@ -262,6 +262,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
    - `dotnet/wpf` 8.0 — MIT，© Microsoft Corporation
    - `microsoft/microsoft-ui-xaml` 3.0 — MIT，© Microsoft Corporation
    - `microsoft/segoe-fluent-icons-font` 3.0 — **微软专有字体许可，非 MIT**。必须单列一段写明：本项目只引用系统已安装的 Segoe Fluent Icons 字体，**不随安装包分发字体文件**，使用受微软该字体自身许可条款约束。
+   - §2 引言还要写一句标点口径：上游 `wpf-ui` 包内 `ThirdPartyNotices.txt` 的 §2.4（microsoft-ui-xaml）那段末尾本来就缺句号（第 116 行原文如此），本文照原样保留、未作补正——第三方许可证声明的职责是逐字忠于来源，不得为排版完整而改动来源。措辞用「忠于来源」，不写成「例外 / 偏差」（那会暗示我们动过来源）；这句说明放在 §2 引言，**不进 §2.4 的许可证块**，否则那个块就不再与上游逐字节一致了。
 3. **AF-Media-Bar** — MIT，Copyright (c) 2026 AmorFate，https://github.com/Fervent-Tempo/AF-Media-Bar 。声明为「任务栏停靠方式与控制台分组/行布局的**设计参照**，本项目未复制其任何源代码」。
 4. **.NET 10 Windows Desktop Runtime** 与 **Python 3.14 标准库** —— 运行时依赖，不随附其代码；写明版本下限（Python 低于 3.14 时引擎会因 `compression.zstd` 缺失而不可用）。
 
@@ -284,7 +285,7 @@ README 三处改动：① 删掉实现栈那行里的「编译不需要联网」
 - [ ] **Step 6: 跑断言确认通过**
 
 Run: `python smoke_test.py`
-Expected: 退出码 0，`== 开源合规 ==` 段 15 项全 ✓（11 项存在性/关键词/元数据 + 1 项 `LICENSE` 正文逐字比对 + 6 段 MIT 原文逐字比对）。
+Expected: 退出码 0，`== 开源合规 ==` 段 15 项全 ✓（11 项存在性/关键词/元数据 + 1 项 `LICENSE` 正文逐字比对 + 6 段 MIT 原文正文比对，后者断言名自带宽容口径：`MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：…`）。
 
 Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; cat ../b.log`
 Expected: `0`，且 `0 个警告 0 个错误`。

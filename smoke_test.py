@@ -379,7 +379,7 @@ def check_licenses() -> None:
     check("THIRD-PARTY-NOTICES 里声称 MIT 的段落数符合预期", len(blocks) >= 6,
           f"应有 6 段（WPF-UI、其 4 项 MIT 传递依赖、AF-Media-Bar），实得 {len(blocks)}")
     for heading, block in blocks:
-        check(f"MIT 原文逐字等于标准 MIT：{heading}",
+        check(f"MIT 原文与标准 MIT 正文一致（末行句号与行尾空白除外，余皆逐字）：{heading}",
               notice_mit_body(block) == _MIT_BODY_TOLERANT,
               first_diff(notice_mit_body(block), _MIT_BODY_TOLERANT))
     check("README 不再声称编译不需要联网",

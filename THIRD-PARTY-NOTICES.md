@@ -58,6 +58,10 @@ SOFTWARE.
 因此下列原文一律按英文原样附出、不翻译；这些组件随 WPF-UI 一起进入产物，
 其声明义务由本项目继续向下游传递。
 
+标点同样以来源为准：上游 `wpf-ui` 包内 `ThirdPartyNotices.txt` 的 §2.4（microsoft-ui-xaml）那一段，
+末尾本来就缺一个句号（该行以 `SOFTWARE` 收尾，第 116 行原文如此，已逐字节核对），本文照原样保留、
+未作补正。第三方许可证声明的职责是逐字忠于来源，不得为排版完整而改动来源，请勿替它把那个句号补上。
+
 ### 2.1 sbaeumlisberger/VirtualizingWrapPanel 2.0.6 — MIT
 
 - **用途**：WPF-UI 虚拟化换行面板的实现来源，本项目经由 WPF-UI 间接使用，不直接引用其源码。
