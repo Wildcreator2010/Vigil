@@ -8,6 +8,7 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace DshBar
@@ -45,6 +46,21 @@ namespace DshBar
             Native.SetProcessDpiAwarenessContext((IntPtr)(-4));
             Directory.CreateDirectory(StateDir);
 
+            string demo = null, panel = null, shotPage = null, shotOut = null;
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] == "--demo" && i + 1 < args.Length) demo = args[++i];
+                else if (args[i] == "--panel") panel = i + 1 < args.Length ? args[++i] : "";
+                else if (args[i] == "--panel-shot" && i + 2 < args.Length)
+                {
+                    shotPage = args[++i];
+                    shotOut = args[++i];
+                }
+            }
+
+            // shot 模式不开窗口、不抢单实例，状态栏正在跑时也能出图，所以在互斥体之前就返回。
+            if (shotPage != null) return RenderShot(shotPage, shotOut);
+
             _mutex = new Mutex(false, @"Local\dsh-status-bar-mutex");
             bool owned = false;
             try
@@ -57,17 +73,12 @@ namespace DshBar
             }
             if (!owned)
             {
-                System.Windows.MessageBox.Show("状态栏已经在运行了。", "dsh 状态栏");
+                RequestPanel(panel);
                 return 0;
             }
 
             _settings = Settings.Load(SettingsFile);
-            string demo = null;
-            for (int i = 0; i < args.Length - 1; i++)
-            {
-                if (args[i] == "--demo") demo = args[i + 1];
-            }
-            Log($"DshBar 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"}");
+            Log($"DshBar 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
 
             var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             _window = new BarWindow();
@@ -82,6 +93,7 @@ namespace DshBar
             BuildTray();
             if (demo != null) DemoOnce(demo);
             else StartClient();
+            if (panel != null) OpenPanel(string.IsNullOrEmpty(panel) ? "overview" : panel);
 
             _watchdog = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _watchdog.Tick += (s, e) => Tick(hwnd);
@@ -94,6 +106,129 @@ namespace DshBar
             app.Run();
             Cleanup();
             return 0;
+        }
+
+        internal static Settings Config => _settings;
+        internal static Snapshot Latest => _last;
+        internal static event Action SnapshotChanged;
+        internal static string LogPath => LogFile;
+        internal static string DataDir => StateDir;
+        internal static string PanelRequestFile => Path.Combine(StateDir, "panel.request");
+
+        internal static void RestartEngine() => RestartClient();
+        internal static void RequestBalanceRefresh() => RefreshBalance();
+        internal static bool AutostartOn() => AutostartEnabled();
+        internal static void SetAutostart(bool on) => ToggleAutostart(on);
+
+        internal static void OpenInExplorer(string path)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(
+                    new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+            }
+            catch (Exception ex) { Log($"打开路径失败 {path}: {ex.Message}"); }
+        }
+
+        static void RequestPanel(string page)
+        {
+            try { File.WriteAllText(PanelRequestFile, page ?? ""); }
+            catch (Exception ex) { Log($"转交面板请求失败: {ex.Message}"); }
+        }
+
+        static void OpenPanel(string page)
+        {
+            if (_panel == null) _panel = new PanelWindow();
+            _panel.ShowOn(page);
+        }
+
+        static PanelWindow _panel;
+
+        /// <summary>跑一次引擎拿真实快照，只给 --panel-shot 用（常驻路径走 StateClient）。</summary>
+        static void LoadOneShotSnapshot()
+        {
+            try
+            {
+                string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
+                if (!File.Exists(engine))
+                    engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
+                string python = ResolvePython();
+                if (python == null || !File.Exists(engine)) return;
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = python,
+                    Arguments = $"-X utf8 \"{engine}\" --json --no-balance",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                string line = proc.StandardOutput.ReadLine();
+                proc.WaitForExit(20000);
+                if (string.IsNullOrWhiteSpace(line)) return;
+                _last = System.Text.Json.JsonSerializer.Deserialize<Snapshot>(line,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (Exception ex)
+            {
+                Log($"shot 取快照失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>离屏渲染某一页为 PNG 并打印统计，供冒烟做像素门禁。</summary>
+        static int RenderShot(string pageKey, string outPath)
+        {
+            try
+            {
+                // shot 模式在单实例检查之前就 return 了，_settings 还没加载；
+                // 而每一页构造时都要读 App.Config，不先加载就是空引用。
+                _settings = Settings.Load(SettingsFile);
+                // 离屏出图也要喂真实快照，否则概览页永远是空表，Task 8 的门禁无从判断。
+                LoadOneShotSnapshot();
+                var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
+                    Wpf.Ui.Appearance.ApplicationTheme.Light,
+                    Wpf.Ui.Controls.WindowBackdropType.None, false);
+                FrameworkElement root;
+                switch (pageKey)
+                {
+                    case "notify": root = new NotifyPage(); break;
+                    case "appearance": root = new AppearancePage(); break;
+                    case "runtime": root = new RuntimePage(); break;
+                    case "balance": root = new BalancePage(); break;
+                    case "about": root = new AboutPage(); break;
+                    default: root = new OverviewPage(); break;
+                }
+                double w = 900, h = 620;
+                // 必须全限定：本命名空间下有 DshBar.Rect（Win32 用的那个），App.cs 又同时
+                // using 了 System.Drawing 与 System.Windows，裸写 Size / Rect 会撞 CS0104 或绑到 DshBar.Rect。
+                root.Measure(new System.Windows.Size(w, h));
+                root.Arrange(new System.Windows.Rect(0, 0, w, h));
+                root.UpdateLayout();
+                var rtb = new RenderTargetBitmap((int)w, (int)h, 96, 96, PixelFormats.Pbgra32);
+                rtb.Render(root);
+                var pixels = new byte[(int)w * (int)h * 4];
+                rtb.CopyPixels(pixels, (int)w * 4, 0);
+                var seen = new HashSet<uint>();
+                for (int i = 0; i + 3 < pixels.Length; i += 4)
+                    seen.Add((uint)(pixels[i] << 16 | pixels[i + 1] << 8 | pixels[i + 2]));
+                if (!string.IsNullOrEmpty(outPath) && outPath != "-")
+                {
+                    var enc = new PngBitmapEncoder();
+                    enc.Frames.Add(BitmapFrame.Create(rtb));
+                    using var fs = File.Create(outPath);
+                    enc.Save(fs);
+                }
+                Console.Out.WriteLine($"SHOT {pageKey} {(int)w} {(int)h} {seen.Count}");
+                Console.Out.Flush();
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"SHOT-FAIL {ex.GetType().Name}: {ex.Message}");
+                return 1;
+            }
         }
 
         private static void StartClient()
@@ -248,6 +383,17 @@ namespace DshBar
                 }
                 PlaceNow(hwnd);
                 _tray.Text = TooltipFor(_last);
+
+                // 第二个实例只写一个请求文件就退出，由这里（已在 UI 线程的消息循环里）唤起面板。
+                var req = PanelRequestFile;
+                if (File.Exists(req))
+                {
+                    string page = "";
+                    try { page = File.ReadAllText(req).Trim(); File.Delete(req); }
+                    catch { }
+                    _window.Dispatcher.BeginInvoke(new Action(() =>
+                        PanelWindow.Instance?.ShowOn(string.IsNullOrEmpty(page) ? "overview" : page)));
+                }
             }
             catch (Exception ex)
             {
@@ -286,6 +432,9 @@ namespace DshBar
             {
                 _miTips.DropDownItems.Add(new ToolStripMenuItem(line) { Enabled = false });
             }
+            // 面板开着的话让它自己拉新快照。不在这里发的话 SnapshotChanged 就是个从不触发的事件
+            // （CS0067，本仓库门禁是 0 警告），Task 4 之后每页也就没有数据驱动的重绘入口。
+            SnapshotChanged?.Invoke();
             Notify(snap);
         }
 
@@ -416,6 +565,8 @@ namespace DshBar
         private static void BuildTray()
         {
             var menu = new ContextMenuStrip { Font = new Font("Microsoft YaHei UI", 9f) };
+            Add(menu, "打开面板", (s, e) => OpenPanel("overview"));
+            menu.Items.Add(new ToolStripSeparator());
             _miState = Add(menu, "状态：检测中…", null, false);
             _miProject = Add(menu, "项目：-", null, false);
             _miBalance = Add(menu, "余额：-", null, false);
@@ -542,6 +693,7 @@ namespace DshBar
                     _tray.Visible = false;
                     _tray.Dispose();
                 }
+                try { _panel?.ForceClose(); } catch { }
                 _window?.Close();
                 foreach (var kv in IconCache)
                 {

@@ -1,0 +1,28 @@
+<ui:FluentWindow x:Class="DshBar.PanelWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="dsh 控制台"
+        Width="960" Height="640"
+        MinWidth="760" MinHeight="500"
+        WindowStartupLocation="CenterScreen"
+        ShowInTaskbar="True"
+        Background="#F3F3F3">
+  <Grid>
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="188" />
+      <ColumnDefinition Width="*" />
+    </Grid.ColumnDefinitions>
+    <Border Grid.Column="0" Background="White" BorderBrush="#E2E5EA" BorderThickness="0,0,1,0">
+      <StackPanel Margin="10,14,10,0">
+        <TextBlock Text="dsh 控制台" FontSize="17" FontWeight="SemiBold"
+                   Foreground="#1A1D23" Margin="4,0,0,12" />
+        <ListBox x:Name="Nav" BorderThickness="0" Background="Transparent"
+                 SelectionChanged="OnNavChanged" />
+      </StackPanel>
+    </Border>
+    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" Padding="24,20,24,20">
+      <ContentControl x:Name="Host" />
+    </ScrollViewer>
+  </Grid>
+</ui:FluentWindow>
