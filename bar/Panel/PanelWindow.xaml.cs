@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using Win = System.Windows;
 using WpfControls = System.Windows.Controls;
@@ -10,9 +9,6 @@ namespace DshBar
     /// BarWindow/KeyDialog 那种纯代码窗口不受此限，仍是 internal。
     public sealed partial class PanelWindow : Wpf.Ui.Controls.FluentWindow
     {
-        static readonly string[] Keys = { "overview", "notify", "appearance", "runtime", "balance", "about" };
-        static readonly string[] Labels = { "概览", "通知", "外观", "运行", "余额", "关于" };
-
         readonly Dictionary<string, Win.FrameworkElement> _pages =
             new Dictionary<string, Win.FrameworkElement>();
         bool _navigating;
@@ -23,8 +19,8 @@ namespace DshBar
         public PanelWindow()
         {
             InitializeComponent();
-            for (int i = 0; i < Keys.Length; i++)
-                Nav.Items.Add(new WpfControls.ListBoxItem { Content = Labels[i], Tag = Keys[i] });
+            for (int i = 0; i < PanelPages.Keys.Length; i++)
+                Nav.Items.Add(new WpfControls.ListBoxItem { Content = PanelPages.Labels[i], Tag = PanelPages.Keys[i] });
             Nav.SelectedIndex = 0;
             Instance = this;
             App.SnapshotChanged += OnSnapshotChanged;
@@ -58,8 +54,7 @@ namespace DshBar
 
         void Navigate(string key)
         {
-            int idx = Array.IndexOf(Keys, key);
-            if (idx < 0) idx = 0;
+            int idx = PanelPages.IndexOf(key);
             if (Nav.SelectedIndex == idx) { Render(idx); return; }
             _navigating = true;
             Nav.SelectedIndex = idx;
@@ -73,27 +68,16 @@ namespace DshBar
 
         void Render(int index)
         {
-            string key = Keys[index];
+            string key = PanelPages.Keys[index];
             if (!_pages.TryGetValue(key, out var page))
             {
-                page = Build(key);
+                // key 来自 PanelPages.Keys，TryCreate 必定成功；这个兜底只是防住「以后加了 key
+                // 却忘了在工厂里登记」这类改动，导航路径不能因为找不到页就开不出窗口。
+                if (!PanelPages.TryCreate(key, out page)) page = new OverviewPage();
                 _pages[key] = page;
             }
             Host.Content = page;
             if (page is IPanelPage p) p.Refresh(App.Latest);
-        }
-
-        static Win.FrameworkElement Build(string key)
-        {
-            switch (key)
-            {
-                case "notify": return new NotifyPage();
-                case "appearance": return new AppearancePage();
-                case "runtime": return new RuntimePage();
-                case "balance": return new BalancePage();
-                case "about": return new AboutPage();
-                default: return new OverviewPage();
-            }
         }
     }
 

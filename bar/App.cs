@@ -51,8 +51,15 @@ namespace DshBar
             {
                 if (args[i] == "--demo" && i + 1 < args.Length) demo = args[++i];
                 else if (args[i] == "--panel") panel = i + 1 < args.Length ? args[++i] : "";
-                else if (args[i] == "--panel-shot" && i + 2 < args.Length)
+                else if (args[i] == "--panel-shot")
                 {
+                    // 参数不够也必须在这里就非零退出，不能让它落到下面的状态栏分支：
+                    // 那样等于「参数没被认出来」，调用方（冒烟）会一直等到超时才崩。
+                    if (i + 2 >= args.Length)
+                    {
+                        Console.Error.WriteLine("用法: --panel-shot <page> <out.png|->");
+                        return 2;
+                    }
                     shotPage = args[++i];
                     shotOut = args[++i];
                 }
@@ -190,15 +197,15 @@ namespace DshBar
                 Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
                     Wpf.Ui.Appearance.ApplicationTheme.Light,
                     Wpf.Ui.Controls.WindowBackdropType.None, false);
-                FrameworkElement root;
-                switch (pageKey)
+                if (!PanelPages.TryCreate(pageKey, out FrameworkElement root))
                 {
-                    case "notify": root = new NotifyPage(); break;
-                    case "appearance": root = new AppearancePage(); break;
-                    case "runtime": root = new RuntimePage(); break;
-                    case "balance": root = new BalancePage(); break;
-                    case "about": root = new AboutPage(); break;
-                    default: root = new OverviewPage(); break;
+                    // 非法页名明确报错并非零退出。以前 default 把它静默当 overview，
+                    // `--panel-shot nonsense` 回 `SHOT nonsense 900 620 7` 还退 0，
+                    // 冒烟只比 parts[1] == page 的回声，看不出渲染其实跑偏去了别页。
+                    Console.Error.WriteLine(
+                        $"SHOT-FAIL 未知页面 \"{pageKey}\"，可用页：{string.Join(", ", PanelPages.Keys)}");
+                    Console.Error.Flush();
+                    return 2;
                 }
                 double w = 900, h = 620;
                 // 必须全限定：本命名空间下有 DshBar.Rect（Win32 用的那个），App.cs 又同时
