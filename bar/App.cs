@@ -273,8 +273,12 @@ namespace DshBar
                 var pixels = new byte[(int)w * (int)h * 4];
                 rtb.CopyPixels(pixels, (int)w * 4, 0);
                 var seen = new HashSet<uint>();
+                // 统计键必须带上 alpha：主题刷几乎都是「纯黑/纯白 + alpha」
+                // （Light 的 TextFillColorPrimaryBrush 就是 #E4000000），
+                // PBGRA32 是预乘的，丢掉 alpha 之后它的 RGB 和「未绘制的透明像素」同为 0x000000，
+                // 整页会被数成 1 色 —— 色数门禁当场失效还看不出来。
                 for (int i = 0; i + 3 < pixels.Length; i += 4)
-                    seen.Add((uint)(pixels[i] << 16 | pixels[i + 1] << 8 | pixels[i + 2]));
+                    seen.Add((uint)(pixels[i + 3] << 24 | pixels[i] << 16 | pixels[i + 1] << 8 | pixels[i + 2]));
                 if (!string.IsNullOrEmpty(outPath) && outPath != "-")
                 {
                     var enc = new PngBitmapEncoder();

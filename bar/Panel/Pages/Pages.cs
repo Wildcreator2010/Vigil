@@ -9,13 +9,16 @@ namespace DshBar
     {
         protected PageBase(string title)
         {
+            // 页面本身透明，让控制台外壳的主题底色透出来；文字用主题刷而不是写死的
+            // #1A1D23，否则切到 dark 就是「深色外壳 + 黑底黑字」。
             Background = Brushes.Transparent;
-            Content = new WpfControls.TextBlock
+            var text = new WpfControls.TextBlock
             {
                 Text = title,
                 FontSize = 16,
-                Foreground = new SolidColorBrush(Color.FromRgb(0x1A, 0x1D, 0x23)),
             };
+            text.SetResourceReference(WpfControls.TextBlock.ForegroundProperty, "TextFillColorPrimaryBrush");
+            Content = text;
         }
 
         public virtual void Refresh(Snapshot snap) { }

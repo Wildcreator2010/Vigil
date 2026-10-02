@@ -7,16 +7,20 @@
         MinWidth="760" MinHeight="500"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="True"
-        Background="#F3F3F3">
+        Background="{DynamicResource ApplicationBackgroundBrush}">
   <Grid>
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="188" />
       <ColumnDefinition Width="*" />
     </Grid.ColumnDefinitions>
-    <Border Grid.Column="0" Background="White" BorderBrush="#E2E5EA" BorderThickness="0,0,1,0">
+    <!-- 颜色一律走主题刷 + DynamicResource：写死 #F3F3F3/White/#1A1D23 的话，
+         切到 dark 就成了「深色 Fluent 外壳 + 纯白内容区」，spec §6/§7 不允许这种拼缝。
+         DynamicResource 还让 Task 5 的主题开关当场生效，不用重建窗口。 -->
+    <Border Grid.Column="0" Background="{DynamicResource LayerFillColorDefaultBrush}"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
       <StackPanel Margin="10,14,10,0">
         <TextBlock Text="dsh 控制台" FontSize="17" FontWeight="SemiBold"
-                   Foreground="#1A1D23" Margin="4,0,0,12" />
+                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="4,0,0,12" />
         <ListBox x:Name="Nav" BorderThickness="0" Background="Transparent"
                  SelectionChanged="OnNavChanged" />
       </StackPanel>
