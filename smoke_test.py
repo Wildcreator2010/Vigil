@@ -37,6 +37,7 @@ SNAPSHOT_KEYS = (
     "ok", "state", "label", "glyph", "color", "detail", "strip", "strip_left",
     "strip_right", "tooltip", "tooltip_full", "tip_lines", "attention",
     "session", "waiting", "balance", "recent", "sessions_scanned", "app_running",
+    "sessions",
 )
 FAILS: list[str] = []
 PASSED = 0
