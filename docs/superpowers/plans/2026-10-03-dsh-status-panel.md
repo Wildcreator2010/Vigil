@@ -520,7 +520,10 @@ git commit -m "feat(engine): 快照输出 sessions 数组供控制台会话表�
 **Interfaces:**
 - Consumes: `StateClient.Snapshot`（Task 4 扩 `Sessions`）、`Settings`。
 - Produces:
-  - `internal sealed class PanelWindow : Wpf.Ui.Controls.FluentWindow`，方法 `void Open(string pageKey)`、`void ShowOn(string pageKey)`；属性 `static PanelWindow Instance { get; }`（打开过才非空）。
+  - `public sealed partial class PanelWindow : Wpf.Ui.Controls.FluentWindow`（`x:Class` 生成的半个分部固定是 `public`，`internal` 会 CS0262），
+  方法只有 `void ShowOn(string pageKey)`（**没有 `Open`**，两者语义重复）与 `internal void ForceClose()`；
+  属性 `static PanelWindow Instance { get; }`（构造过才非空）。注意 `FrameworkElement` 在 `System.Windows`，
+  写成 `WpfControls.FrameworkElement` 会 CS0234。
   - `App` 上的 internal 门面：`internal static Settings Config`、`internal static Snapshot Latest`、`internal static event Action SnapshotChanged`、`internal static void RestartEngine()`、`internal static void RequestBalanceRefresh()`、`internal static bool AutostartOn()`、`internal static void SetAutostart(bool)`、`internal static string LogPath`、`internal static string DataDir`、`internal static void OpenInExplorer(string path)`。后续页面只依赖这些。
   - 命令行：`--panel [page]`、`--panel-shot <page> <out.png>`。
 
