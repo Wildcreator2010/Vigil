@@ -40,6 +40,8 @@ TAIL_EVENTS = 500
 
 BALANCE_TTL = 300.0
 
+SESSIONS_IN_SNAPSHOT = 60
+
 BLOCKING_TOOLS = {"ask_user_question": "问题", "exit_plan_mode": "计划确认"}
 ANSWER_TOOLS = set(BLOCKING_TOOLS)
 
@@ -499,6 +501,36 @@ def pick_primary(sessions: list[dict], ts: float) -> tuple[dict | None, list[dic
     return primary, (waiting or busy)
 
 
+def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dict]:
+    """把 scan() 的结果压成面板会话表要用的定长行：字段白名单 + 字符串截断，
+    保证 --watch 每帧大小可控。"""
+    out = []
+    for s in rows[:cap]:
+        pending = s.get("pending")
+        out.append({
+            "key": s["key"],
+            "project": s["project"],
+            "title": (s.get("title") or "")[:80] or None,
+            "path": s["path"],
+            "state": s["state"],
+            "turn": s.get("turn"),
+            "step": s.get("step"),
+            "age_sec": s["age_sec"],
+            "last_event": s.get("last_event"),
+            "last_tool": s.get("last_tool"),
+            "end_reason": s.get("end_reason"),
+            "records": s.get("records"),
+            "todo": s.get("todo"),
+            "usage_total": s.get("usage_total"),
+            "pending": None if not pending else {
+                "kind": pending.get("kind"),
+                "tool": pending.get("tool"),
+                "text": str(pending.get("text") or "")[:120],
+            },
+        })
+    return out
+
+
 def format_money(balance: dict) -> str:
     if not balance.get("available"):
         return "--"
@@ -661,6 +693,7 @@ def snapshot(
             for s in sessions
             if s["age_sec"] <= ACTIVE_WINDOW
         ][:6],
+        "sessions": _session_rows(sessions),
     }
 
 

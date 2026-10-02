@@ -330,6 +330,135 @@ def run_e2e():
     return errs
 
 
+def run_sessions_field():
+    """快照的 sessions 数组：上限、字段齐全、字符串截断，且不破坏 recent/waiting。"""
+    errs = []
+    ts = time.time()
+    running = ds.harness_running
+    ds.harness_running = lambda: True
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            g = os.path.join(td, "*", "*", "session.v4.jsonl.zstd")
+            for i in range(70):
+                write_session(td, f"Proj{i}", f"s{i:02d}", [
+                    rec("session", {"id": f"s{i}", "cwd": f"C:\\p\\Proj{i}"}),
+                    rec("session/title", {"title": "很长的标题" * 30}),
+                    rec("turn/start", {"turn": 3}),
+                    rec("approval/asked", {"id": "a", "toolName": "pwsh", "reason": "问" * 300}),
+                ], ts - i)
+            snap = ds.snapshot(g, ts, want_balance=False)
+            rows = snap.get("sessions")
+            if not isinstance(rows, list):
+                errs.append(f"sessions 缺失或类型错: {type(rows)}")
+                return errs
+            if len(rows) != ds.SESSIONS_IN_SNAPSHOT:
+                errs.append(f"sessions 未截到上限: {len(rows)}/{ds.SESSIONS_IN_SNAPSHOT}")
+            need = {"key", "project", "title", "path", "state", "turn", "step", "age_sec",
+                    "last_event", "last_tool", "end_reason", "records", "todo",
+                    "usage_total", "pending"}
+            for r in rows[:3]:
+                miss = need - set(r)
+                if miss:
+                    errs.append(f"sessions 字段缺失: {sorted(miss)}")
+            long_titles = [r["title"] for r in rows if r.get("title")]
+            if not long_titles or max(len(t) for t in long_titles) > 80:
+                errs.append("title 未截断到 80")
+            texts = [(r.get("pending") or {}).get("text") or "" for r in rows]
+            if not max((len(t) for t in texts), default=0) <= 120:
+                errs.append("pending.text 未截断到 120")
+            ages = [r["age_sec"] for r in rows]
+            if ages != sorted(ages):
+                errs.append("sessions 未按静默时长升序（即 mtime 倒序）")
+            for k in ("recent", "waiting"):
+                if k not in snap:
+                    errs.append(f"回归：{k} 字段丢失")
+            json.dumps(snap, ensure_ascii=False)
+    finally:
+        ds.harness_running = running
+    return errs
+
+
+PIN_TS = 1_800_000_000.0
+
+# recent / waiting 被 C# 的滚轮循环 Cycle() 消费，Task 2 只许新增 sessions，不许动这两个字段。
+# 下面的期望值不是手推的，是从改动前的引擎（git HEAD 的 dsh_state.py）对同一 fixture
+# 跑出来的真实输出，逐字钉住；连键名一起钉，因为 C# 侧按 JsonPropertyName 反序列化。
+PIN_RECENT = [
+    ("DONE1", "done", 5.0),
+    ("TOOL1", "tool_running", 7.0),
+    ("W01", "needs_action", 10.0),
+    ("W02", "needs_action", 20.0),
+    ("W03", "needs_action", 30.0),
+    ("W04", "needs_action", 40.0),
+]
+PIN_WAITING = [
+    ("W02", "授权 2：请确认是否放行这条 pwsh 命令", 20.0),
+    ("W03", "授权 3：请确认是否放行这条 pwsh 命令", 30.0),
+    ("W04", "授权 4：请确认是否放行这条 pwsh 命令", 40.0),
+    ("W05", "授权 5：请确认是否放行这条 pwsh 命令", 50.0),
+    ("W06", "授权 6：请确认是否放行这条 pwsh 命令", 60.0),
+    ("W07", "授权 7：请确认是否放行这条 pwsh 命令", 70.0),
+    ("W08", "授权 8：请确认是否放行这条 pwsh 命令", 80.0),
+    ("W09", "授权 9：请确认是否放行这条 pwsh 命令", 90.0),
+]
+
+
+def sess_head(sid, proj):
+    """真实 dsh 的 session 头记录把 id/cwd 放在顶层，read_session 读的也是顶层。"""
+    return {"type": "session", "seq": 1, "time": 1, "id": sid, "cwd": "C:\\p\\" + proj}
+
+
+def run_recent_waiting_pin():
+    """钉住 recent/waiting 的确切内容与既有上限（6 / 8），防 sessions 的改动外溢。
+
+    fixture 特意铺 14 个会话：recent 有 11 个候选（截到 6）、waiting 有 10 个候选
+    （去掉主会话后截到 8）、外加一个超过 2 小时的待授权（须被排除）。
+    """
+    errs = []
+    running = ds.harness_running
+    ds.harness_running = lambda: True
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            g = os.path.join(td, "*", "*", "session.v4.jsonl.zstd")
+            for k in range(1, 12):
+                write_session(td, f"W{k:02d}", f"s-w{k:02d}", [
+                    sess_head(f"s{k}", f"W{k:02d}"),
+                    rec("turn/start", {"turn": k}),
+                    rec("approval/asked", {"id": f"a{k}", "toolName": "pwsh",
+                                           "reason": f"授权 {k}：请确认是否放行这条 pwsh 命令"}),
+                ], PIN_TS - k * 10)
+            write_session(td, "OLD", "s-old", [
+                sess_head("sold", "OLD"), rec("turn/start", {"turn": 1}),
+                rec("approval/asked", {"id": "az", "toolName": "pwsh", "reason": "四天前"}),
+            ], PIN_TS - 4 * 86400)
+            write_session(td, "DONE1", "s-done", [
+                sess_head("sd", "DONE1"), rec("turn/start", {"turn": 1}),
+                rec("turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+            ], PIN_TS - 5)
+            write_session(td, "TOOL1", "s-tool", [
+                sess_head("st", "TOOL1"), rec("turn/start", {"turn": 2}),
+                rec("step/start", {"turn": 2, "step": 3}),
+                rec("tool/call", {"turn": 2, "step": 3, "callId": "c1", "name": "grep"}),
+            ], PIN_TS - 7)
+            snap = ds.snapshot(g, PIN_TS, want_balance=False)
+            want_recent = [{"project": p, "state": s, "age_sec": a} for p, s, a in PIN_RECENT]
+            want_waiting = [{"project": p, "text": t, "age_sec": a, "key": f"s-w{p[1:]}"}
+                            for p, t, a in PIN_WAITING]
+            if snap["recent"] != want_recent:
+                errs.append(f"回归：recent 变了\n     实得 {snap['recent']}\n     应为 {want_recent}")
+            if snap["waiting"] != want_waiting:
+                errs.append(f"回归：waiting 变了\n     实得 {snap['waiting']}\n     应为 {want_waiting}")
+            if len(snap["recent"]) > 6 or len(snap["waiting"]) > 8:
+                errs.append(f"回归：recent/waiting 超上限 {len(snap['recent'])}/{len(snap['waiting'])}")
+            if snap["state"] != "needs_action" or snap["session"].get("project") != "W01":
+                errs.append(f"回归：主会话选择变了 {snap['state']}/{snap['session'].get('project')}")
+            if any(w["project"] == "OLD" for w in snap["waiting"]):
+                errs.append("回归：四小时前的待授权会话又冒出来了")
+    finally:
+        ds.harness_running = running
+    return errs
+
+
 def run_live():
     errs = []
     files = glob.glob(os.path.expanduser(ds.SESSION_GLOB))
@@ -383,6 +512,15 @@ def main() -> int:
     if not e2e:
         print("✓ 陈旧降级 / 实时报错 / 待授权优先 / 陈旧待授权 通过")
     errs += e2e
+    se = run_sessions_field()
+    if not se:
+        print("✓ sessions 契约（上限/字段/截断/排序/无回归）通过")
+    errs += se
+    print("== recent/waiting 回归钉 ==")
+    pw = run_recent_waiting_pin()
+    if not pw:
+        print("✓ recent/waiting 内容与上限与基线逐字一致")
+    errs += pw
     if not errs:
         print("✓ 轮次/提问/错误/todo/余额/截断/主会话选择/离线 断言通过")
     if "--live" in sys.argv:

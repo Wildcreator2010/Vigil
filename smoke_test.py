@@ -105,6 +105,19 @@ def check_cli() -> None:
         check("tip_lines 非空", bool(snap["tip_lines"]), "空列表")
         check("禁用余额时标记 skipped", snap["balance"].get("skipped") is True,
               str(snap["balance"]))
+        rows = snap.get("sessions")
+        check("sessions 数组存在且不超上限",
+              isinstance(rows, list) and 0 < len(rows) <= ds.SESSIONS_IN_SNAPSHOT,
+              f"{type(rows).__name__} len={len(rows) if isinstance(rows, list) else '-'}")
+        if rows:
+            need = {"key", "project", "title", "path", "state", "turn", "step", "age_sec",
+                    "last_event", "last_tool", "end_reason", "records", "todo",
+                    "usage_total", "pending"}
+            miss = need - set(rows[0])
+            check("sessions 行字段齐全", not miss, f"缺 {sorted(miss)}")
+            check("sessions 状态码全部合法",
+                  all(r["state"] in ds.STATES for r in rows),
+                  str({r["state"] for r in rows} - set(ds.STATES)))
 
     p = run("--states")
     lines = [l for l in p.stdout.splitlines() if l.strip()]
