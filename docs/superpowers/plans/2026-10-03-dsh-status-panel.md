@@ -1146,7 +1146,7 @@ git commit -m "feat(panel): 引入 WPF-UI，加控制台外壳与离屏渲染门
 
 **Interfaces:**
 - Consumes: Task 2 的 `"sessions"` JSON 形状。
-- Produces: `public sealed class SessionRow`，属性 `Key/Project/Title/Path/State/Turn(int?)/Step(int?)/AgeSec/LastEvent/LastTool/EndReason/Records/Todo/Usage/Pending`；`public sealed class Usage { long Input, Output, Total }`；`Snapshot.Sessions` 为 `List<SessionRow>`。概览页依赖。
+- Produces: `public sealed class SessionRow`，属性 `Key/Project/Title/State/Turn(int?)/Step(int?)/AgeSec/LastEvent/LastTool/EndReason/Records/Todo/Usage/Pending`；`public sealed class Usage { long Input, Output, Total }`；`Snapshot.Sessions` 为 `List<SessionRow>`。概览页依赖。
 
 - [ ] **Step 1: 收紧概览页的门禁**
 
@@ -1182,7 +1182,6 @@ Expected: `概览页已画出表格（不再是一行占位文字）` 失败（�
         [JsonPropertyName("key")] public string Key { get; set; }
         [JsonPropertyName("project")] public string Project { get; set; }
         [JsonPropertyName("title")] public string Title { get; set; }
-        [JsonPropertyName("path")] public string Path { get; set; }
         [JsonPropertyName("state")] public string State { get; set; }
         [JsonPropertyName("turn")] public int? Turn { get; set; }
         [JsonPropertyName("step")] public int? Step { get; set; }
