@@ -511,7 +511,6 @@ def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dic
             "key": s["key"],
             "project": s["project"],
             "title": (s.get("title") or "")[:80] or None,
-            "path": s["path"],
             "state": s["state"],
             "turn": s.get("turn"),
             "step": s.get("step"),
@@ -526,6 +525,7 @@ def _session_rows(rows: list[dict], cap: int = SESSIONS_IN_SNAPSHOT) -> list[dic
                 "kind": pending.get("kind"),
                 "tool": pending.get("tool"),
                 "text": str(pending.get("text") or "")[:120],
+                "options": list(pending.get("options") or []),
             },
         })
     return out

@@ -110,7 +110,7 @@ def check_cli() -> None:
               isinstance(rows, list) and 0 < len(rows) <= ds.SESSIONS_IN_SNAPSHOT,
               f"{type(rows).__name__} len={len(rows) if isinstance(rows, list) else '-'}")
         if rows:
-            need = {"key", "project", "title", "path", "state", "turn", "step", "age_sec",
+            need = {"key", "project", "title", "state", "turn", "step", "age_sec",
                     "last_event", "last_tool", "end_reason", "records", "todo",
                     "usage_total", "pending"}
             miss = need - set(rows[0])
