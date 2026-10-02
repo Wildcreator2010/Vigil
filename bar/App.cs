@@ -171,8 +171,19 @@ namespace DshBar
                     StandardOutputEncoding = new UTF8Encoding(false),
                 };
                 using var proc = System.Diagnostics.Process.Start(psi);
-                string line = proc.StandardOutput.ReadLine();
-                proc.WaitForExit(20000);
+                // ReadLine() 没有超时：python 起不来、或者卡在网络请求上不肯写 stdout 时，
+                // --panel-shot 会在这里永挂，冒烟侧只能等到 subprocess 的 120 秒超时抛
+                // TimeoutExpired —— 失败表现是「整轮崩」而不是「一条 ✗」。
+                // 并发读 + 20 秒等：读不到第一行就杀掉引擎子进程树，让 shot 带着空快照继续。
+                var read = System.Threading.Tasks.Task.Run(() => proc.StandardOutput.ReadLine());
+                if (!read.Wait(20000))
+                {
+                    try { proc.Kill(true); } catch { }
+                    Log("shot 取快照超时（20 秒没读到 stdout），已终止引擎子进程");
+                    return;
+                }
+                string line = read.Result;
+                proc.WaitForExit(5000);
                 if (string.IsNullOrWhiteSpace(line)) return;
                 _last = System.Text.Json.JsonSerializer.Deserialize<Snapshot>(line,
                     new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
