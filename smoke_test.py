@@ -526,18 +526,26 @@ def capture_bar(hwnd: int, out_path: str) -> tuple[int, int, bytes]:
     mdc = g.CreateCompatibleDC(wdc)
     bmp = g.CreateCompatibleBitmap(wdc, w, h)
     g.SelectObject(mdc, bmp)
+    bgra = b""
     try:
-        if not u.PrintWindow(hwnd, mdc, 2):  # PW_RENDERFULLCONTENT
-            return 0, 0, b""
-        info = BI(s=ctypes.sizeof(BI), w=w, h=-h, pl=1, bc=32, comp=0, size=w * h * 4)
-        buf = ctypes.create_string_buffer(w * h * 4)
-        if not g.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(info), 0):
+        for flag in (2, 0):  # 分层窗口要 PW_RENDERFULLCONTENT，普通窗口反而要用 0
+            if not u.PrintWindow(hwnd, mdc, flag):
+                continue
+            info = BI(s=ctypes.sizeof(BI), w=w, h=-h, pl=1, bc=32, comp=0, size=w * h * 4)
+            buf = ctypes.create_string_buffer(w * h * 4)
+            if not g.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(info), 0):
+                continue
+            raw = buf.raw
+            hues = len({raw[i:i + 4] for i in range(0, len(raw), 4)})
+            if hues > 1:
+                bgra = raw
+                break
+        if not bgra:
             return 0, 0, b""
     finally:
         u.ReleaseDC(hwnd, wdc)
         g.DeleteDC(mdc)
         g.DeleteObject(bmp)
-    bgra = buf.raw
     rgb = bytearray(w * h * 3)
     for i in range(w * h):
         rgb[i * 3] = bgra[i * 4 + 2]
