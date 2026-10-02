@@ -10,6 +10,8 @@ namespace DshBar
         [JsonPropertyName("interval")] public int Interval { get; set; } = 2;
         [JsonPropertyName("notify")] public bool Notify { get; set; } = true;
         [JsonPropertyName("repeatSec")] public int RepeatSec { get; set; } = 90;
+        [JsonPropertyName("theme")] public string Theme { get; set; } = "light";
+        [JsonPropertyName("showBar")] public bool ShowBar { get; set; } = true;
 
         public static Settings Load(string path)
         {
@@ -21,6 +23,8 @@ namespace DshBar
                     if (s != null)
                     {
                         s.Interval = Math.Max(1, s.Interval);
+                        if (s.Theme != "light" && s.Theme != "dark" && s.Theme != "system")
+                            s.Theme = "light";
                         return s;
                     }
                 }
