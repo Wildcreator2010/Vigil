@@ -184,7 +184,8 @@ DeepSeek Harness 把每个会话的完整事件流写在
 ## 开源协议
 
 本项目以 **MIT 许可证**开源（见 [`LICENSE`](LICENSE)）；所有第三方组件、字体与设计参照的归属声明见
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)，每条都附了许可证原文。
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)——随产物分发的每一条都附了许可证原文，
+运行时依赖（.NET、Python 标准库）不随附其代码，只写用途与版本下限。
 
 ## 致谢
 

@@ -2,12 +2,14 @@
 
 dsh-status（Wildcreator）本身以 **MIT 许可证** 发布，全文见仓库根目录的 [`LICENSE`](LICENSE)。
 
-本文件列出项目中用到的第三方组件、素材与参考项目，每条给出**用途 + 上游地址 + 许可证 + 版权行**，
-并按上游要求附上许可证原文（不是只给链接）。
+本文件列出项目中用到的第三方组件、素材与参考项目，每条给出**用途 + 上游地址 + 许可证 + 版权行**；
+**凡随产物分发的条目**（第 1、2、3 节）都按上游要求附上许可证原文（不是只给链接），
+第 4 节的运行时依赖不随附其代码，因此只写用途与版本下限、不附全文。
 
 核实依据（2026-10-03 实测核对，未凭记忆改写）：本机 NuGet 包缓存
 `%USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\` 内的 `LICENSE.md`、`ThirdPartyNotices.txt`、
-`wpf-ui.nuspec` 三个文件，以及通过 GitHub API 核实的 AF-Media-Bar 上游许可证。
+`wpf-ui.nuspec` 三个文件；AF-Media-Bar 只通过 GitHub API 核实到**许可证类型为 MIT**，
+其上游 `LICENSE` 文件本机不可得，未逐字比对（见第 3 节的明确口径）。
 
 ---
 
@@ -53,7 +55,8 @@ SOFTWARE.
 ## 2. WPF-UI 内含、需继续向下传递的 5 项
 
 依据包内 `ThirdPartyNotices.txt`。该文件开头写明 **“Do Not Translate or Localize”**，
-因此下列原文一律按英文原样附出、不翻译；这些组件随 WPF-UI 一起进入产物，
+因此下列原文一律按英文原样附出、不翻译；唯一例外是 2.4 段末句补回的一个句号
+（上游漏写，不改变任何条款，已在该处单独注明）。这些组件随 WPF-UI 一起进入产物，
 其声明义务由本项目继续向下游传递。
 
 ### 2.1 sbaeumlisberger/VirtualizingWrapPanel 2.0.6 — MIT
@@ -155,6 +158,8 @@ SOFTWARE.
 - **用途**：WPF-UI 的 WinUI 风格控件与主题资源参照自 WinUI（Microsoft UI Library）。
 - **上游**：https://github.com/microsoft/microsoft-ui-xaml
 - **版权行**：`Copyright (c) Microsoft Corporation. All rights reserved.`
+- **原文说明**：包内 `ThirdPartyNotices.txt` 这一段最末一句漏了句号，下面按 SPDX MIT 标准正文
+  把它补回（`… DEALINGS IN THE SOFTWARE.`）。这是纯标点补全，不改变任何条款；除此之外逐字照抄。
 
 ```
 MIT License
@@ -177,7 +182,7 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE
+SOFTWARE.
 ```
 
 ### 2.5 microsoft/segoe-fluent-icons-font 3.0 — 微软专有字体许可（**非 MIT**）
@@ -207,10 +212,13 @@ You may use the Segoe and icon fonts, or glyphs included in this file (“Softwa
   **设计参照**。本项目**未复制其任何源代码**：`bar/Native.cs` 的 `Dock()` / `Place()` / `FreeRange()`
   等全部为自行实现，只是交互与停靠思路上参考了它。
 - **上游**：https://github.com/Fervent-Tempo/AF-Media-Bar
-- **许可证**：MIT（上游 LICENSE 已核实为 MIT；因本项目不含其代码，此处仅作归属声明）
-- **版权行**：`Copyright (c) 2026 AmorFate`
+- **许可证**：MIT —— 2026-10-03 经 GitHub API 核实，其仓库许可证**类型为 MIT**。
+  因本项目不含其代码，此处仅作归属声明。
+- **版权行**：`Copyright (c) 2026 AmorFate`（同一次 API 核实得到的版权行）
 
-许可证原文（MIT 标准全文，即 SPDX `MIT`，与上游 LICENSE 同一文本）：
+许可证原文（**按 SPDX `MIT` 标准文本附出**。上游仓库的 `LICENSE` 文件在本机不可得，
+GitHub 网页与 raw 均不可达，因此**未与上游逐字比对**；下面这段是 SPDX MIT 的标准正文 +
+核实到的版权行，不是对上游文件内容的转录）：
 
 ```
 MIT License
