@@ -609,32 +609,61 @@ def python_pids() -> set[int]:
 PANEL_PAGES = ("overview", "notify", "appearance", "runtime", "balance", "about")
 
 
-def check_panel_shell() -> None:
+def run_shot(page: str, out_path: str):
+    """跑一次 --panel-shot；卡死也要记成 ✗，不能让 TimeoutExpired 把整轮冒烟带崩。"""
+    try:
+        return subprocess.run([BAR_EXE, "--panel-shot", page, out_path],
+                              capture_output=True, text=True, errors="replace",
+                              timeout=120, cwd=os.path.dirname(BAR_EXE))
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def check_panel_shell() -> dict[str, int]:
     print("\n== 控制台面板 ==")
+    shots: dict[str, int] = {}
     if not os.path.isfile(BAR_EXE):
         print("  （跳过：没有编译产物）")
-        return
+        return shots
     if bar_processes():
         check("启动前无残留实例", False, "已有 DshBar 在跑")
-        return
-    shots = {}
+        return shots
     for page in PANEL_PAGES:
         shot = os.path.join(ds.state_dir(), f"panel-{page}.png")
         if os.path.isfile(shot):
             os.remove(shot)
-        p = subprocess.run([BAR_EXE, "--panel-shot", page, shot],
-                           capture_output=True, text=True, errors="replace",
-                           timeout=120, cwd=os.path.dirname(BAR_EXE))
-        line = (p.stdout or "").strip().splitlines()
-        head = line[0] if line else ""
+        p = run_shot(page, shot)
+        if p is None:
+            check(f"--panel-shot {page}", False, "120 秒没返回（离屏渲染卡死）")
+            shots[page] = -1
+            continue
+        head = ((p.stdout or "").strip().splitlines() or [""])[0]
         # C# 侧输出：SHOT <page> <w> <h> <colors>
         parts = head.split()
-        good = (p.returncode == 0 and len(parts) == 5 and parts[0] == "SHOT"
-                and parts[1] == page and int(parts[2]) >= 720 and int(parts[3]) >= 480)
-        check(f"--panel-shot {page}", good,
+        # 数字解析不了就记 ✗，别 ValueError 崩整轮：`and` 短路只挡长度，不挡 parts[2..4] 的内容。
+        w_px = h_px = colors = -1
+        if len(parts) == 5 and parts[0] == "SHOT" and parts[1] == page:
+            try:
+                w_px, h_px, colors = int(parts[2]), int(parts[3]), int(parts[4])
+            except ValueError:
+                pass
+        check(f"--panel-shot {page}",
+              p.returncode == 0 and colors >= 0 and w_px >= 720 and h_px >= 480,
               f"退出码 {p.returncode} 输出 {head!r} err={(p.stderr or '')[-160:]!r}")
         check(f"{page} 落盘 PNG", os.path.isfile(shot) and os.path.getsize(shot) > 2000, shot)
-        shots[page] = int(parts[4]) if len(parts) == 5 else -1
+        shots[page] = colors
+        print(f"  {page} 离屏颜色种类 {colors}")
+
+    # 非法页名必须非零退出。旧实现把未知 key 静默当 overview：`--panel-shot nonsense`
+    # 照样回 `SHOT nonsense 900 620 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
+    # 看不出渲染其实跑偏去了别的页。
+    p = run_shot("nonsense", "-")
+    if p is None:
+        check("--panel-shot 非法页名非零退出", False, "120 秒没返回")
+    else:
+        check("--panel-shot 非法页名非零退出", p.returncode != 0,
+              f"退出码 {p.returncode} 输出 {((p.stdout or '').strip().splitlines() or [''])[0][:80]!r}")
+    return shots
 
 
 def check_panel_window() -> None:
@@ -675,6 +704,50 @@ def check_panel_window() -> None:
         subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
         time.sleep(3)
         check("退出后无残留", not bar_processes(), str(bar_processes()))
+
+
+def check_panel_cold_open() -> None:
+    """冷打开：常驻实例是不带 --panel 起的、面板从来没创建过。
+
+    check_panel_window() 用 `DshBar.exe --panel` 起的正是常驻实例本身，
+    PanelWindow.Instance 在它的构造函数里就被置上了，所以那条链路从没覆盖过
+    「Instance 还是 null、只能惰性创建」的路径 —— 而日常最常见的情形恰恰是它：
+    开机自启的普通 DshBar.exe + 用户后来敲一次 `DshBar.exe --panel`。
+    """
+    print("\n== 面板冷打开 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    req = os.path.join(ds.state_dir(), "panel.request")
+    if os.path.isfile(req):
+        os.remove(req)  # 上一轮残留的请求会让常驻实例一起来就自己把面板弹出来
+    check("冷打开前无残留请求文件", not os.path.exists(req), req)
+    before = python_pids()
+    proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 25 and not find_bar_windows():
+            time.sleep(0.4)
+        hwnds = find_bar_windows()
+        check("常驻实例已起（不带 --panel）", proc.poll() is None and bool(hwnds),
+              f"存活={proc.poll() is None} 状态栏窗口={hwnds}")
+        time.sleep(3)  # 让 watchdog 至少跑过一轮，确认面板不是它自己冒出来的
+        check("冷打开前面板不存在", not top_window("dsh 控制台"), "状态栏一起来面板就在")
+        subprocess.run([BAR_EXE, "--panel", "balance"], cwd=os.path.dirname(BAR_EXE),
+                       timeout=30)
+        found, t1 = 0, time.time()
+        while time.time() - t1 < 25 and not (found := top_window("dsh 控制台")):
+            time.sleep(0.4)
+        check("冷打开：--panel 唤起面板", bool(found),
+              "常驻实例的 PanelWindow.Instance 是 null，请求文件被删掉却没人开窗")
+        check("冷打开：请求文件已消费", not os.path.exists(req), req)
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        deadline = time.time() + 20
+        while time.time() < deadline and (bar_processes() or python_pids() - before):
+            time.sleep(1)
+        check("冷打开后无残留", not bar_processes() and not (python_pids() - before),
+              f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)}")
 
 
 def check_gui() -> None:
@@ -796,14 +869,19 @@ def main() -> int:
         check_build()
     check_engine_copy()
     check_licenses()
+    panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
-        check_panel_shell()
+        panel_shots = check_panel_shell()
         check_gui()
         check_panel_window()
+        check_panel_cold_open()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")
 
     print(f"\n结果：{PASSED} 项通过" + ("" if not FAILS else f"，{len(FAILS)} 项失败"))
+    if panel_shots:
+        # 颜色门禁将来红了的时候，这行就是现场：哪一页掉到几色一眼可见。
+        print("  各页离屏色数 " + "  ".join(f"{k}={v}" for k, v in panel_shots.items()))
     for f in FAILS:
         print(f"  ✗ {f}")
     return 1 if FAILS else 0
