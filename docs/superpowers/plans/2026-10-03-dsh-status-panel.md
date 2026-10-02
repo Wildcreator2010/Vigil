@@ -1489,6 +1489,17 @@ namespace DshBar
 
 - [ ] **Step 3: `App.cs` 加生效逻辑**
 
+**前提（Task 3 复核查明，不做则本步是假功能）**：`ApplicationThemeManager.Apply` 的实现机制就是
+换 `Application.Resources.MergedDictionaries`。项目没有 `App.xaml`，若从未把 WPF-UI 的
+`Wpf.Ui.Markup.ControlsDictionary` 与 `Wpf.Ui.Markup.ThemesDictionary` 合并进 `Application.Resources`，
+`Apply` 就是**空操作**（实测：合并前后两张离屏 PNG 字节完全相同），`ToggleSwitch`/`NumberBox`/`InfoBar`
+会退化成系统默认件甚至不画。Task 3 已应在 `Main` 建窗口之前完成合并；本步开工前先 grep 确认：
+
+Run: `grep -rn "ControlsDictionary\|ThemesDictionary" bar/`
+Expected: 至少各一处命中。零命中就**停下来报 BLOCKED**，不要继续写 `ApplyTheme`。
+
+确认后再写：
+
 ```csharp
         internal static void ApplyTheme()
         {
