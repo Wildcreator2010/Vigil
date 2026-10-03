@@ -12,6 +12,14 @@
 
 ## Global Constraints
 
+- **面板颜色只能走主题键**：入口是 `Ui.InkKey / InkDimKey / CardKey / LineKey / PageKey`
+  五个 `const string` 加 `Ui.Ref(FrameworkElement, DependencyProperty, string key)`。
+  **`Ui.Ink / InkDim / CardBg / CardLine / PageBg` 这五个 Brush 成员不存在**（Task 5 实测：
+  静态 Brush 在切主题时不重解析，而页实例被 `PanelWindow` 缓存 → 深色外壳配黑底黑字）。
+  `Ui.Ref` 的参数类型必须是 `FrameworkElement`（`SetResourceReference` 定义在它身上，
+  裸 `DependencyObject` 会 CS0611/CS1061）。写代码时先构造元素、紧接着 `Ui.Ref(...)`，
+  不要在对象初始化器里赋 Brush。
+
 - **面板外壳不再代劳整页滚动**（Task 4 轮 2 的裁决：`PanelWindow.xaml` 去掉了包 `Host` 的
   `ScrollViewer`，让 `Host` 直接占 `*` 行，这样概览页的表格才能表头固定、只滚表体）。
   **因此每个需要整页滚动的页面必须自己在页内放 `ScrollViewer`** —— Task 5/6/7/9 的页内容都可能超
@@ -1303,7 +1311,8 @@ git commit -m "feat(panel): 快照会话行打通到概览页表格"
 **Interfaces:**
 - Consumes: `App.Config`、`App.OpenInExplorer`。
 - Produces:
-  - `internal static class Ui`，`static FrameworkElement Ui.Row(string title, string desc, FrameworkElement field)`、`static FrameworkElement Ui.Group(string title, params FrameworkElement[] rows)`、画刷 `Ui.Ink / InkDim / CardBg / CardLine / PageBg`。
+  - `internal static class Ui`，`static FrameworkElement Ui.Row(string title, string desc, FrameworkElement field)`、`static FrameworkElement Ui.Group(string title, params FrameworkElement[] rows)`、主题键 `Ui.InkKey / InkDimKey / CardKey / LineKey / PageKey` 与入口 `Ui.Ref(elem, dp, key)`
+  （**没有** Brush 成员，见 Global Constraints）。
   - `App.ApplyTheme()`（把 `Config.Theme` 落到 `ApplicationThemeManager`）。
   - `App.ApplyBarVisibility()`（`showBar` 决定停靠/隐藏）。
   - `PageBase(string title)` 仍可用。
@@ -1711,15 +1720,16 @@ namespace DshBar
 {
     internal sealed class RuntimePage : WpfControls.ContentControl, IPanelPage
     {
-        readonly TextBlock _thresholds = new WpfControls.TextBlock
+        readonly WpfControls.TextBlock _thresholds = new WpfControls.TextBlock
         {
             FontSize = 12,
-            Foreground = Ui.InkDim,
             TextWrapping = TextWrapping.Wrap,
         };
 
         public RuntimePage()
         {
+            Ui.Ref(_thresholds, WpfControls.TextBlock.ForegroundProperty, Ui.InkDimKey);
+
             var interval = new UiControls.NumberBox
             { Width = 120, Minimum = 1, Maximum = 60, Value = App.Config.Interval };
             interval.ValueChanged += (s, e) =>
@@ -1880,10 +1890,11 @@ namespace DshBar
     {
         readonly WpfControls.PasswordBox _key = new WpfControls.PasswordBox { Width = 300 };
         readonly WpfControls.TextBlock _state = new WpfControls.TextBlock
-        { FontSize = 12, Foreground = Ui.InkDim, TextWrapping = TextWrapping.Wrap };
+        { FontSize = 12, TextWrapping = TextWrapping.Wrap };
 
         public BalancePage()
         {
+            Ui.Ref(_state, WpfControls.TextBlock.ForegroundProperty, Ui.InkDimKey);
             var save = new UiControls.Button { Content = "保存（当前用户加密）", Padding = new Thickness(12, 5, 12, 5) };
             save.Click += (s, e) =>
             {
@@ -2000,6 +2011,13 @@ git commit -m "feat(panel): 余额页并入面板，移除独立的 KeyDialog"
    必须存在可用的滚动视口（`ScrollViewer.CanContentScroll` 为真且高度受限）。
 2. 列绑定必须补 `StringFormat` 或走投影：`age_sec` 会出现 `133.9` 与 `30517` 混排且无单位。
    本任务的 `SessionView` 已把 `AgeText` 格式化成 `Ns`，确认**没有**别的列还在直出原始值。
+3. **收掉 Task 5 的白底豁免（这是豁免的终点，不是无限期）**：概览页表格与状态卡的
+   `Brushes.White` / `#E2E5EA` 在本任务换成 `Ui.CardKey` / `Ui.LineKey`。
+   **同一个提交里**必须同步改掉所有以「纯白」为判据的像素门禁 ——
+   清单见 `Pages.cs` 顶部注释与 plan Global Constraints（`shot_table_stats`、
+   `real_window_stats`、`row_data_gate`，**外加 Task 5 新加的「直达页=请求页」那条
+   `whites < 5000` 负证据**，它换刷后会从"能红"退化成"永远绿"，必须一起改正证据）。
+   改完必须证明：把表底换回白、而不同步改断言时，至少有一条断言会红。
 
 - [ ] **Step 1: 写状态标签与配色的前端映射**
 
@@ -2027,14 +2045,27 @@ git commit -m "feat(panel): 余额页并入面板，移除独立的 KeyDialog"
             return StateMap.TryGetValue(state ?? "", out var v) ? v.Label : "未知";
         }
 
+        static readonly Brush Fallback = Frozen(Color.FromRgb(0x5A, 0x62, 0x70));
+
+        /// <summary>状态色是**数据驱动**的（引擎报什么色画什么色），不是主题色，
+        /// 所以这里返回具体 Brush 而不走 Ui.Ref；解析失败退回次级文字色。</summary>
         public static Brush BrushOf(string hex)
         {
-            try { return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)); }
-            catch { return InkDim; }
+            try { return Frozen((Color)ColorConverter.ConvertFromString(hex)); }
+            catch { return Fallback; }
+        }
+
+        static Brush Frozen(Color c)
+        {
+            var b = new SolidColorBrush(c);
+            b.Freeze();
+            return b;
         }
 ```
 
-`Ui.cs` 顶部补 `using System.Windows;`（`Color`/`ColorConverter` 需要）。
+`Ui.cs` 顶部需有 `using System.Windows;` 与 `using System.Windows.Media;`
+（`Color` / `ColorConverter` / `SolidColorBrush` 都要）。**注意 `Freeze(...)` 这个静态助手在
+Task 5 落地的 `Ui.cs` 里不存在**，所以本步自带 `Frozen`；别照旧写法调 `Freeze`。
 
 - [ ] **Step 2: 写 `OverviewPage.cs`**
 
@@ -2051,9 +2082,9 @@ namespace DshBar
         readonly WpfControls.Border _accent = new WpfControls.Border
         { Width = 4, CornerRadius = new CornerRadius(2), HorizontalAlignment = HorizontalAlignment.Left };
         readonly WpfControls.TextBlock _big = new WpfControls.TextBlock
-        { FontSize = 26, FontWeight = FontWeights.SemiBold, Foreground = Ui.Ink, VerticalAlignment = VerticalAlignment.Center };
-        readonly WpfControls.TextBlock _sub = new WpfControls.TextBlock { FontSize = 12.5, Foreground = Ui.InkDim, Margin = new Thickness(0, 4, 0, 0) };
-        readonly WpfControls.TextBlock _waiting = new WpfControls.TextBlock { FontSize = 12.5, Foreground = Ui.Ink, TextWrapping = TextWrapping.Wrap };
+        { FontSize = 26, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+        readonly WpfControls.TextBlock _sub = new WpfControls.TextBlock { FontSize = 12.5, Margin = new Thickness(0, 4, 0, 0) };
+        readonly WpfControls.TextBlock _waiting = new WpfControls.TextBlock { FontSize = 12.5, TextWrapping = TextWrapping.Wrap };
 
         readonly WpfControls.DataGrid _grid = new WpfControls.DataGrid
         {
@@ -2062,14 +2093,16 @@ namespace DshBar
             HeadersVisibility = WpfControls.DataGridHeadersVisibility.Column,
             GridLinesVisibility = WpfControls.DataGridGridLinesVisibility.Horizontal,
             Background = Brushes.White,
-            BorderBrush = Ui.CardLine,
-            BorderThickness = new Thickness(1),
             MinHeight = 280,
             FontSize = 12.5,
         };
 
         public OverviewPage()
         {
+            Ui.Ref(_big, WpfControls.TextBlock.ForegroundProperty, Ui.InkKey);
+            Ui.Ref(_sub, WpfControls.TextBlock.ForegroundProperty, Ui.InkDimKey);
+            Ui.Ref(_waiting, WpfControls.TextBlock.ForegroundProperty, Ui.InkKey);
+            Ui.Ref(_grid, WpfControls.DataGrid.BorderBrushProperty, Ui.LineKey);
             AddColumn("项目", "Project", 150);
             AddColumn("状态", "StateLabel", 110);
             AddColumn("轮次", "TurnText", 80);
@@ -2081,13 +2114,13 @@ namespace DshBar
 
             var statusCard = new WpfControls.Border
             {
-                Background = Ui.CardBg,
-                BorderBrush = Ui.CardLine,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(14, 10, 14, 10),
                 Child = new WpfControls.Grid { Children = { _accent, new WpfControls.StackPanel { Margin = new Thickness(16, 0, 0, 0), Children = { _big, _sub } } } },
             };
+            Ui.Ref(statusCard, WpfControls.Border.BackgroundProperty, Ui.CardKey);
+            Ui.Ref(statusCard, WpfControls.Border.BorderBrushProperty, Ui.LineKey);
 
             Content = Ui.Column(
                 Ui.Heading("概览"),
@@ -2251,6 +2284,19 @@ namespace DshBar
 {
     internal sealed class AboutPage : WpfControls.ContentControl, IPanelPage
     {
+        static WpfControls.TextBlock Head(string text, double size, bool strong)
+        {
+            var tb = new WpfControls.TextBlock
+            {
+                Text = text,
+                FontSize = size,
+                FontWeight = strong ? FontWeights.SemiBold : FontWeights.Normal,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            Ui.Ref(tb, WpfControls.TextBlock.ForegroundProperty, strong ? Ui.InkKey : Ui.InkDimKey);
+            return tb;
+        }
+
         static readonly string[][] Notices =
         {
             new[] { "WPF-UI 4.2.0", "MIT", "© 2021-2025 Leszek Pomianowski and WPF UI Contributors", "控制台窗口外壳与表单控件" },
@@ -2272,11 +2318,13 @@ namespace DshBar
                 {
                     new WpfControls.StackPanel { Children =
                     {
-                        new WpfControls.TextBlock { Text = n[0] + "  ·  " + n[1], FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = Ui.Ink },
-                        new WpfControls.TextBlock { Text = n[2] + " — " + n[3], FontSize = 12, Foreground = Ui.InkDim, TextWrapping = TextWrapping.Wrap },
+                        Head(n[0] + "  ·  " + n[1], 13, true),
+                        Head(n[2] + " — " + n[3], 12, false),
                     } },
                 } });
-                rows.Children.Add(new WpfControls.Border { Height = 1, Background = Ui.CardLine, Margin = new Thickness(14, 0, 14, 0) });
+                var sep = new WpfControls.Border { Height = 1, Margin = new Thickness(14, 0, 14, 0) };
+                Ui.Ref(sep, WpfControls.Border.BackgroundProperty, Ui.LineKey);
+                rows.Children.Add(sep);
             }
 
             var openLicense = new UiControls.Button { Content = "打开 LICENSE", Padding = new Thickness(12, 5, 12, 5) };
