@@ -857,13 +857,9 @@ namespace DshBar
 
         private static void OpenLog()
         {
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(LogFile) { UseShellExecute = true });
-            }
-            catch
-            {
-            }
+            // 走 RevealInExplorer 而不是 ShellExecute(LogFile)：后者依赖 .log 的文件关联，
+            // 关联缺失时机器行为不可控（实测会落到系统的「选取应用」对话框，甚至什么都不弹）。
+            RevealInExplorer(LogFile);
         }
 
         private static void BuildTray()
