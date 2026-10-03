@@ -2015,8 +2015,12 @@ git commit -m "feat(panel): 余额页并入面板，移除独立的 KeyDialog"
    `Brushes.White` / `#E2E5EA` 在本任务换成 `Ui.CardKey` / `Ui.LineKey`。
    **同一个提交里**必须同步改掉所有以「纯白」为判据的像素门禁 ——
    清单见 `Pages.cs` 顶部注释与 plan Global Constraints（`shot_table_stats`、
-   `real_window_stats`、`row_data_gate`，**外加 Task 5 新加的「直达页=请求页」那条
-   `whites < 5000` 负证据**，它换刷后会从"能红"退化成"永远绿"，必须一起改正证据）。
+   `real_window_stats`、`row_data_gate` 等八处）。
+   **两条已核实的更新**（Task 5 轮 2 实测，别照旧账做）：
+   ① 「直达页=请求页」那条**已经不再依赖 `#FFFFFF`**（轮 2 改成了配色分布正证据，
+      实测换刷后旧口径的纯白像素=0、坏 Navigate 照样绿，所以它已退役），不要再去改它；
+   ② 清单里**「等帧」那两处**在换刷后会**卡到超时**（实测 `top=-1`），不是变红而是变慢死，
+      必须一并处理。
    改完必须证明：把表底换回白、而不同步改断言时，至少有一条断言会红。
 
 - [ ] **Step 1: 写状态标签与配色的前端映射**
