@@ -16,6 +16,7 @@ import collections
 import ctypes
 import ctypes.wintypes as wt
 import glob
+import hashlib
 import json
 import os
 import re
@@ -645,9 +646,15 @@ def shot_table_stats(path: str) -> dict | None:
     }
 
 
-def capture_bar(hwnd: int, out_path: str) -> tuple[int, int, bytes]:
-    """PrintWindow 抓状态栏自身像素：任务栏被全屏应用盖住时也能验，且直接证明
-    分层窗口真的合成了内容（README 记过「命中看得到、画面看不到」这一类坑）。"""
+def capture_bar(hwnd: int, out_path: str, scale: float = 1.0) -> tuple[int, int, bytes]:
+    """PrintWindow 抓窗口自身像素：任务栏被全屏应用盖住时也能验，且直接证明
+    分层窗口真的合成了内容（README 记过「命中看得到、画面看不到」这一类坑）。
+
+    `scale` 是给 DPI 感知窗口用的：本探测进程不感知 DPI，`GetWindowRect` 拿到的是**虚拟**
+    尺寸（960×640），而面板按 125% 实际占 1200×800 物理像素 —— 按虚拟尺寸建位图就只截到
+    左上角那 64%，右侧的滚动条和底下几行全在画面外（本机实测踩过）。状态栏那条窗口本来就是
+    按虚拟尺寸抓的，所以默认 1.0 不动它。
+    """
     u, g = _user32(), ctypes.windll.gdi32
 
     class BI(ctypes.Structure):
@@ -656,7 +663,7 @@ def capture_bar(hwnd: int, out_path: str) -> tuple[int, int, bytes]:
                     ("x", wt.LONG), ("y", wt.LONG), ("cm", wt.DWORD), ("imp", wt.DWORD)]
 
     left, top, right, bottom = rect_of(hwnd)
-    w, h = right - left, bottom - top
+    w, h = int(round((right - left) * scale)), int(round((bottom - top) * scale))
     if w <= 0 or h <= 0:
         return 0, 0, b""
     wdc = u.GetWindowDC(hwnd)
@@ -756,8 +763,8 @@ def run_shot(page: str, out_path: str):
         return None
 
 
-def fake_engine_source(rows: int) -> str:
-    """造一个「出一帧快照就退出」的假引擎源码，sessions 里放 rows 行。
+def fake_engine_source(rows: int, watch: bool = False) -> str:
+    """造一个假引擎源码，sessions 里放 rows 行。
 
     注入点是编译产物 bar/bin/Release/net10.0-windows/dsh_state.py（csproj 从仓库根拷的那份），
     所以生产代码里不需要任何测试钩子、dsh_state.py 源码全程未修改。
@@ -765,24 +772,36 @@ def fake_engine_source(rows: int) -> str:
     rows>0 每行都给成能落笔的真实形状（项目/工具/轮次/记录数都有字），
     「非白像素」「行分隔线」两个统计量才和本机真实数据同口径。
     行数由冒烟指定，本机 ~/.dsh 里是 0 个还是 29 个会话都跟断言无关。
+
+    `watch=True` 出的是**持续吐帧**的版本：状态栏起引擎用的是 `--watch`，
+    一次性写一行就退出会让面板停在空表、且父进程立刻重启引擎（真实窗口那段要等帧喂进来）。
+    每 0.5 秒重发同一帧、管道断了才收 —— 与真引擎的节律一致，也不会自己跑掉。
     """
     if rows <= 0:
         return 'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-injected"}\\n\')\n'
-    return (
-        'import json, sys\n'
+    body = (
         'rows = [{\n'
         '    "key": f"smoke-{i}", "project": f"proj-{i}", "title": f"会话 {i}",\n'
         '    "state": "idle", "turn": i, "step": i, "age_sec": 60.0 + i,\n'
         '    "last_event": "result", "last_tool": f"tool{i}", "end_reason": "success",\n'
         '    "records": i, "todo": None, "usage_total": None, "pending": None,\n'
         '} for i in range(%d)]\n'
-        'sys.stdout.write(json.dumps({"ok": True, "app_running": True, "state": "idle",\n'
+        'frame = json.dumps({"ok": True, "app_running": True, "state": "idle",\n'
         '    "label": "冒烟注入", "glyph": "·", "color": "#6B7280", "strip_left": "冒烟注入",\n'
         '    "strip_right": "--", "tooltip": "冒烟注入", "tip_lines": ["冒烟注入"],\n'
         '    "session": None, "balance": None, "waiting": [], "recent": [],\n'
-        '    "sessions_scanned": len(rows), "sessions": rows}, ensure_ascii=False) + "\\n")\n'
-        % rows
-    )
+        '    "sessions_scanned": len(rows), "sessions": rows}, ensure_ascii=False)\n'
+    ) % rows
+    if not watch:
+        return 'import json, sys\n' + body + 'sys.stdout.write(frame + "\\n")\n'
+    return ('import json, sys, time\n' + body +
+            'try:\n'
+            '    for _ in range(900):\n'
+            '        sys.stdout.write(frame + "\\n")\n'
+            '        sys.stdout.flush()\n'
+            '        time.sleep(0.5)\n'
+            'except (BrokenPipeError, ValueError, OSError):\n'
+            '    pass\n')
 
 
 def shot_dims(head: str) -> tuple[int, int, int]:
@@ -1159,6 +1178,249 @@ def check_bar_null_records() -> None:
             left_pids = python_pids() - before
         check("records:null 场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
         check("records:null 场景：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
+                ("dwFlags", wt.DWORD), ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT)]
+
+
+class _SENDINPUT(ctypes.Structure):
+    _fields_ = [("type", wt.DWORD), ("u", _INPUTUNION)]
+
+
+def send_wheel(delta: int, clicks: int) -> int:
+    """SendInput 发几次竖向滚轮（MOUSEEVENTF_WHEEL=0x0800），返回成功次数。
+
+    只发滚轮、不动光标 —— 光标由调用处 SetCursorPos 放到目标上，WPF 按光标命中路由滚轮。
+    delta 是 DWORD 字段，负数必须按无符号塞进去（本机踩过：直接传 -360 ctypes 会拒）。
+    """
+    u = _user32()
+    ok = 0
+    for _ in range(clicks):
+        ev = _SENDINPUT(0, _INPUTUNION(_MOUSEINPUT(0, 0, ctypes.c_uint(delta).value, 0x0800, 0, None)))
+        if u.SendInput(1, ctypes.byref(ev), ctypes.sizeof(ev)):
+            ok += 1
+        time.sleep(0.18)
+    return ok
+
+
+def row_hashes(rgb: bytes, w: int, h: int) -> list[str]:
+    """逐行指纹：判断「滚动之后画面哪些行变了」，两帧一比就知道从哪一行开始动。"""
+    return [hashlib.md5(rgb[y * w * 3:(y + 1) * w * 3]).hexdigest() for y in range(h)]
+
+
+def real_window_stats(rgb: bytes, w: int, h: int) -> dict:
+    """真实窗口一帧的结构量：表格顶沿、表头文字那条墨迹带、成排的横向分隔线、
+    最右条带里的整页滚动条滑块像素。
+
+    横向探测带取 30%~90%：左边避开 188 逻辑像素的侧栏，右边避开窗口最右那 1px 描边。
+    顶沿用「纯白占多数」认定 —— 那是 Pages.cs 里写死的 `Background = Brushes.White`，
+    Task 5 Step 0 把它换成主题刷时这条口径要跟着改；找不到顶沿返回 -1，
+    调用处记 ✗，不会静默假绿。
+
+    「分隔线」= 这一行被同一种非白色占掉一半以上，且上下 4 物理像素内**都**有白底行，
+    连续的线行归并成一条。两侧都要贴白底是必需的：表格下面那一大片主题底色
+    （本机 #FAFAFA）也是整行同色，不加这道限定空表会被数成 26 条「线」，
+    等待条件就成了摆设（本机实测）。125% 缩放下 1 逻辑像素的线会糊成两行
+    （实测 y=111 是 #F7F7F7、y=112 是 #E2E2E2），所以按连续段归并、允许几像素缓冲。
+
+    表头下沿**不能**拿「顶沿往下第一条线」当基准 —— 本机实测表头与第一行数据之间
+    根本不画线（GridLinesVisibility=Horizontal 只画行与行之间），第一条线在第一行
+    数据下面（y=111），拿它当基准会把第一行也圈进「不许动」，修好了照样红。
+    改成量表头**文字的墨迹带**：顶沿往下第一段连续墨迹（容 3 行空隙、撞线即停），
+    它的下沿才是判据②的基准线（本机实测 y=38..52）。
+    """
+    x0, x1 = int(w * 0.30), int(w * 0.90)
+    band = max(1, x1 - x0)
+    white, dom = [0] * h, [(b"", 0)] * h
+    for y in range(h):
+        base = y * w * 3
+        cnt: collections.Counter = collections.Counter()
+        for x in range(x0, x1):
+            cnt[rgb[base + x * 3:base + x * 3 + 3]] += 1
+        white[y] = cnt.get(b"\xff\xff\xff", 0)
+        del cnt[b"\xff\xff\xff"]
+        dom[y] = cnt.most_common(1)[0] if cnt else (b"", 0)
+
+    def is_white(y: int) -> bool:
+        return 0 <= y < h and white[y] * 5 >= band * 2
+
+    def is_line(y: int) -> bool:
+        return 0 <= y < h and dom[y][1] * 2 >= band
+
+    def near_white(y: int) -> bool:
+        return (any(is_white(y - k) for k in (2, 3, 4))
+                and any(is_white(y + k) for k in (2, 3, 4)))
+
+    def has_ink(y: int) -> bool:
+        """有文字墨迹：非白像素成把，但不是整行的线。"""
+        return 0 <= y < h and not is_line(y) and band - white[y] >= 40
+
+    top = next((y for y in range(h) if is_white(y)), -1)
+    groups, y = [], top + 1 if top >= 0 else h
+    while y < h:
+        if is_line(y) and near_white(y):
+            groups.append(y)
+            while y < h and is_line(y):
+                y += 1
+            continue
+        y += 1
+    head0 = next((y for y in range(max(0, top), h) if has_ink(y)), -1)
+    head1, gap = head0, 0
+    y = head0
+    while head0 >= 0 and y + 1 < h:
+        y += 1
+        if has_ink(y):
+            head1, gap = y, 0
+        elif is_line(y) or gap >= 3:
+            break
+        gap += 1
+    gray, gray_x0 = 0, -1
+    for y in range(max(0, top), h):
+        base = y * w * 3
+        for x in range(max(x0, w - 20), w - 2):
+            r0, g0, b0 = rgb[base + x * 3], rgb[base + x * 3 + 1], rgb[base + x * 3 + 2]
+            if abs(r0 - g0) <= 8 and abs(g0 - b0) <= 8 and 0x55 <= r0 <= 0xD0:
+                gray += 1
+                gray_x0 = x if gray_x0 < 0 else gray_x0
+    return {"top": top, "lines": len(groups), "first_line": groups[0] if groups else -1,
+            "head0": head0, "head1": head1, "gray": gray, "gray_x0": gray_x0}
+
+
+def check_panel_real_scroll() -> None:
+    """真实窗口这一侧：外壳必须给页面**有限高度**，让表头固定、只有表体滚动。
+
+    为什么离屏那两条（check_panel_row_data）守不住这件事：`--panel-shot` 是直接把页面
+    Measure/Arrange 到 900×620 上出图的，**压根不经过 PanelWindow 的外壳**。外壳一旦把
+    Host 包在 ScrollViewer 里，页面拿到的竖向约束就是无限高，表格按行数长到 ~1150px
+    再由整页滚动兜着 —— 表头跟着一起滚出视野、排版成本随行数线性上升，而离屏门禁全绿。
+    所以这一段起的是真窗口（`--panel`）、看的是真窗口里滚轮滚过之后的画面。
+
+    三条判据（本机实测数字见 task-4-report.md 轮 3）：
+      ① 往表体里发滚轮，画面必须真的动起来 —— 它是②的防空转：只看②的话
+         「什么都没滚」也满足「表头没变」，那正是假绿；
+      ② 动的那一段必须**从表头下方才开始**：表格顶沿到「表头文字墨迹带的下沿」
+         这一整条带一个像素都不许变。未修版实测第一条变化在 y=19（表头那一带），
+         修后是 y=85（第一行数据里）—— 整页滚动一动表头就花，这正是复核说的那半条；
+      ③ 外壳最右侧条带里不许有整页滚动条滑块 —— 页面拿到有限高度时它没有存在的理由。
+         未修版实测 2486 个中灰滑块像素（贴着窗口右沿 x=1189），修后 0。
+    """
+    print("\n== 真实窗口：表头固定、只有表体滚动 ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not check("真实窗口注入点就位", os.path.isfile(eng), eng):
+        return
+    with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
+        real = fh.read()
+    before = python_pids()
+    shot = os.path.join(ds.state_dir(), "smoke-panel-real.png")
+    u = _user32()
+    home = wt.POINT()
+    u.GetCursorPos(ctypes.byref(home))
+    try:
+        with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(fake_engine_source(29, watch=True))
+        subprocess.Popen([BAR_EXE, "--panel"], cwd=os.path.dirname(BAR_EXE))
+        hwnd, t0 = 0, time.time()
+        while time.time() - t0 < 25:
+            hwnd = top_window("dsh 控制台")
+            if hwnd:
+                break
+            time.sleep(0.4)
+        if not check("真实窗口：面板已打开（--panel 起真窗口）", bool(hwnd),
+                     "找不到标题为 dsh 控制台 的顶层窗口"):
+            return
+        # 滚轮消息 Windows 是发给**前台窗口**的，面板没到前台时整个实验会静默不动
+        u.SetForegroundWindow(hwnd)
+        time.sleep(0.6)
+        l, t, r, b = rect_of(hwnd)
+        scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
+        st0: dict | None = None
+        w = h = 0
+        rgb = b""
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            w, h, rgb = capture_bar(hwnd, shot, scale=scale)
+            if w:
+                st0 = real_window_stats(rgb, w, h)
+                if st0["top"] >= 0 and st0["head0"] > st0["top"] and st0["lines"] >= 4:
+                    break
+            time.sleep(1.0)
+        # 先证明「表格真的画上了数据行 + 表头那条墨迹带找得到」，
+        # 否则后面「滚不动」说不清是谁的锅，判据②也没有基准线。
+        if not check("真实窗口：概览页画出了数据行（滚动实验的前提）",
+                     bool(st0) and st0["top"] >= 0 and st0["head0"] > st0["top"]
+                     and st0["lines"] >= 4,
+                     f"抓取 {w}x{h}（缩放 {scale}），表格顶沿 y={st0 and st0['top']}、"
+                     f"表头墨迹带 y={st0 and st0['head0']}..{st0 and st0['head1']}、"
+                     f"横向分隔线 {st0 and st0['lines']} 条：等满 20 秒也没成排，"
+                     f"说明假引擎那 29 行没喂进面板"):
+            return
+        sig0 = row_hashes(rgb, w, h)
+        px, py = l + int((r - l) * 0.6), t + int((b - t) * 0.6)
+        u.SetCursorPos(px, py)
+        time.sleep(0.5)
+        sent = send_wheel(-120 * 3, 3)
+        time.sleep(1.0)
+        w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
+        if not check("真实窗口：滚动前后画面同尺寸可比",
+                     sent == 3 and (w2, h2) == (w, h) and bool(rgb2),
+                     f"滚轮发出 {sent}/3 次，抓帧 {w2}x{h2}（基线 {w}x{h}）"):
+            return
+        sig1 = row_hashes(rgb2, w2, h2)
+        changed = [y for y, (a, c) in enumerate(zip(sig0, sig1)) if a != c]
+        first_diff = changed[0] if changed else -1
+        in_head = sum(1 for y in changed if st0["top"] <= y <= st0["head1"])
+        st1 = real_window_stats(rgb2, w2, h2)
+        print(f"  基线：表格顶沿 y={st0['top']}、表头墨迹带 y={st0['head0']}..{st0['head1']}、"
+              f"分隔线 {st0['lines']} 条、最右条带滑块像素 {st0['gray']}（x0={st0['gray_x0']}）")
+        print(f"  滚轮 3 次 ×{-120 * 3} 后：变化行 {len(changed)} 条、第一条变化在 y={first_diff}、"
+              f"落在表头带 [y{st0['top']}, y{st0['head1']}] 里的有 {in_head} 条、"
+              f"分隔线 {st1['lines']} 条、最右条带滑块像素 {st1['gray']}")
+        check("真实窗口：滚轮在表体上滚得动（画面确实动了，不是什么都没发生）",
+              len(changed) >= 100,
+              f"{len(changed)} 行变化（阈值 100 行 ≈ 表体的一大截）；"
+              f"一行都没动就是滚轮被吞或没送达 —— 那 29 行在真实面板里根本够不着")
+        check("真实窗口：滚轮滚过之后表头没有被滚出视野",
+              first_diff > st0["head1"],
+              f"第一条变化的行在 y={first_diff}，判据要求 > 表头墨迹带下沿 y={st0['head1']}"
+              f"（顶沿 y={st0['top']}、表头文字 y={st0['head0']}..{st0['head1']}）："
+              f"顶沿到表头下沿之间就是表头，整页滚动一动它就花；"
+              f"变化行为 -1 就是压根没滚起来（见上一条）")
+        check("真实窗口：外壳没有整页滚动条（页面拿到的是有限高度）",
+              st0["gray"] <= 60,
+              f"最右侧 20 物理像素条带里 {st0['gray']} 个中灰滑块像素"
+              f"（最早出现在 x={st0['gray_x0']}，窗口宽 {w}）："
+              f"外壳把页面包进 ScrollViewer 时整页滚动条就贴着窗口右沿；"
+              f"有限高度下页面不需要它，那一条带只剩主题底色")
+    finally:
+        # 这一段会 SetCursorPos 把光标挪到表格上（滚轮要按光标命中路由），
+        # 不管前面走到哪一步、有没有抛，都得把用户的光标还回去。
+        u.SetCursorPos(home.x, home.y)
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        with open(eng, "wb") as fh:
+            fh.write(real)
+        check("真实窗口场景：注入后引擎拷贝已按仓库根还原",
+              open(eng, "rb").read() == real, eng)
+        if os.path.isfile(shot):
+            os.remove(shot)
+        left_pids = python_pids() - before
+        t2 = time.time()
+        while left_pids and time.time() - t2 < 20:
+            time.sleep(1)
+            left_pids = python_pids() - before
+        check("真实窗口场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
+        check("真实窗口场景：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
 
 
 def check_panel_window() -> None:
@@ -1734,6 +1996,9 @@ def main() -> int:
         # records:null 的帧要在**状态栏**上验（静默冻结是这条缺陷的表现，不是红），
         # 同样只碰那份引擎拷贝，还原完才轮到 check_gui。
         check_bar_null_records()
+        # 真实窗口那一侧的「有限高度」也借这份拷贝注入 29 行假引擎，
+        # 所以同样排在 check_gui 之前（check_gui 要拿真引擎起状态栏）。
+        check_panel_real_scroll()
         check_gui()
         check_panel_window()
         check_panel_cold_open()
