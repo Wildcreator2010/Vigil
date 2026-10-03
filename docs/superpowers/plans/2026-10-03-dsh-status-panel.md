@@ -12,6 +12,14 @@
 
 ## Global Constraints
 
+- **面板外壳不再代劳整页滚动**（Task 4 轮 2 的裁决：`PanelWindow.xaml` 去掉了包 `Host` 的
+  `ScrollViewer`，让 `Host` 直接占 `*` 行，这样概览页的表格才能表头固定、只滚表体）。
+  **因此每个需要整页滚动的页面必须自己在页内放 `ScrollViewer`** —— Task 5/6/7/9 的页内容都可能超
+  620px，不放就滚不动。占位页今天是一行文字所以不受影响，别误以为无事。
+- 若页面用到写死颜色做像素判据（`smoke_test.py:check_panel_real_scroll` 现在依赖表格的
+  `Brushes.White` 定顶沿、WPF-UI 滑块中灰定整页滚动条），换主题刷时必须同步改那条断言；
+  它的失效方式是记 ✗ 并打印现场，不会静默假绿。
+
 - 目标框架 `net10.0-windows`，`UseWPF` + `UseWindowsForms`，`Nullable=disable`，`ImplicitUsings=disable` —— 所有 C# 文件必须显式 `using`。
 - 引擎侧**只用 Python 3.14 标准库**，不得引入第三方包。
 - 编译门禁：`dotnet build -c Release` 必须 **0 error 0 warning**。跑构建时不要把输出接管道（`| tail` 会吞掉退出码），先重定向到文件再判 `$?`。
