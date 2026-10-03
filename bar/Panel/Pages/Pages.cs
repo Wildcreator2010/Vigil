@@ -33,6 +33,22 @@ namespace DshBar
     /// Records 是 int?：引擎那边 `"records": s.get("records")` 可以出 null，
     /// 非可空 int 会让整帧反序列化失败、状态栏静默停更（见 StateClient.SessionRow），
     /// null 时这一格和 Turn 一样留白 —— DataGridTextColumn 绑到 null 就是空串。
+    ///
+    /// 【Task 5 Step 0 #1 的明文豁免：表格白底暂留写死色】
+    /// `Brushes.White` / `#E2E5EA` 与 c35cfbf 的主题刷裁决确有冲突 —— 深色主题下这页是
+    /// 「深色外壳 + 白底表格」（Task 5 真窗口截图为证），本豁免承认这个过渡态，理由与边界：
+    /// ① 实测（Task 5 离屏取样）：候选主题键在浅底下合成 #FEFEFE 而非 #FFFFFF
+    ///   （CardBackgroundFillColorDefault = #B3FEFEFE 半透明白贴在 #FAFAFA 上），
+    ///   而 Task 4 签认的四条像素门禁（shot_table_stats 的 painted/ink/hlines/vscroll 的
+    ///   「非白」判据、real_window_stats 的顶沿/表头带/整页滚动条指纹、row_data_gate 的
+    ///   相对基线）全部钉在**逐字节 #FFFFFF** 上；换刷即八处口径集体失效，
+    ///   按 Global Constraints ② 必须同轮全部重derive —— 那正是 Task 8「概览页填实
+    ///   （交互与配色）」的验收面（3803390 已把顺延项落成 Task 8 显式验收项）。
+    /// ② 主题生效链路本身不靠这张表守：「theme=dark 与 light 的 appearance 四角取样必须
+    ///   不同」那条门禁（smoke_test.check_settings_roundtrip）在删掉字典合并或 ApplyTheme
+    ///   时翻红，白底豁免不会让 N3 缺口复发。
+    /// ③ 豁免范围只有这两个字面量。Task 8 换主题刷时，必须在同一提交里把
+    ///   smoke_test.py 的白口径改成「按当前主题现量纸色」或钉浅主题跑，两处一起走。
     /// </summary>
     internal sealed class OverviewPage : WpfControls.ContentControl, IPanelPage
     {
@@ -86,7 +102,7 @@ namespace DshBar
     }
 
     internal sealed class NotifyPage : PageBase { public NotifyPage() : base("通知") { } }
-    internal sealed class AppearancePage : PageBase { public AppearancePage() : base("外观") { } }
+    // AppearancePage 已在 Task 5 迁到 Pages/AppearancePage.cs（真实控件），这里别再留占位。
     internal sealed class RuntimePage : PageBase { public RuntimePage() : base("运行") { } }
     internal sealed class BalancePage : PageBase { public BalancePage() : base("余额") { } }
     internal sealed class AboutPage : PageBase { public AboutPage() : base("关于") { } }
