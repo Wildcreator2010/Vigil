@@ -1245,6 +1245,7 @@ $PTog = [System.Windows.Automation.TogglePattern]::Pattern
 $PInv = [System.Windows.Automation.InvokePattern]::Pattern
 $PVal = [System.Windows.Automation.ValuePattern]::Pattern
 $PScr = [System.Windows.Automation.ScrollPattern]::Pattern
+$PSel = [System.Windows.Automation.SelectionItemPattern]::Pattern
 $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Hwnd)
 if ($null -eq $root) { Write-Output 'ERR=NOROOT'; exit 3 }
 $rx = $root.Current.BoundingRectangle.X
@@ -1318,6 +1319,17 @@ switch ($Action) {
   'value' {
     if ($Index -ge $edits.Count) { Write-Output 'ERR=NOEDIT'; exit 4 }
     Write-Output ("VALUE=" + (Pat $edits[$Index] $PVal).Current.Value)
+  }
+  'item' {
+    # -Name = 项名子串。只读地看「这个窗口（资源管理器）里那个项有没有被选中」，
+    # 供现场用；列表项是虚拟化的，读不到不算产品坏，所以调用处**不拿它当判据**。
+    $lis = @($all | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::ListItem })
+    $hit = @($lis | Where-Object { $_.Current.Name -like ('*' + $Name + '*') })
+    if ($hit.Count -eq 0) { Write-Output ('ITEMMISS=' + $lis.Count); exit 0 }
+    $o = Pat $hit[0] $PSel
+    if ($null -eq $o) { Write-Output ('ITEMNOPAT=' + $hit[0].Current.Name); exit 0 }
+    Write-Output ('ITEM=' + $hit[0].Current.Name)
+    Write-Output ('SELECTED=' + $o.Current.IsSelected)
   }
   'scroll' {
     if ($scrolls.Count -eq 0) { Write-Output 'ERR=NOSCROLL'; exit 4 }
@@ -1758,7 +1770,7 @@ def check_panel_settings_live() -> None:
         check("运行页控件齐：数字框 1 / 数字框自带加减档 2 / 动作按钮 3 / 开关 1",
               cnt("EDITS") == 1 and cnt("BOXSPINS") == 2 and cnt("TOGGLES") == 1
               and sorted((res.get("BUTTONS") or [""])[0].split("|")) ==
-                  sorted(["重启检测进程", "打开日志", "打开数据目录"]),
+                  sorted(["重启检测进程", "打开日志位置", "打开数据目录"]),
               f"EDITS={cnt('EDITS')} BOXSPINS={cnt('BOXSPINS')} TOGGLES={cnt('TOGGLES')} "
               f"BUTTONS={(res.get('BUTTONS') or [''])[0]!r}")
         check("运行页自带整页滚动容器（页内有 ScrollViewer，外壳不再代劳）",
@@ -1818,30 +1830,37 @@ def check_panel_settings_live() -> None:
               f"（用户原状 {reg_had!r}）")
 
         # —— 两个目录入口：真的开了窗口，测试只关自己开出来的那几扇 ——
+        # 判据口径统一成「新窗口标题里出现数据目录名」，两条都是**资源管理器的文件夹窗口**，
+        # 不再依赖 `.log` 的文件关联（旧的那条把「系统的选取应用对话框」也算落点，
+        # 而关联归 shell 决定，同一份代码会时红时绿 —— 见 task-6-report 的 flaky 段）。
+        dirname = os.path.basename(ds.state_dir())
         base = {(h, t) for h, _c, t in list_top_windows()}
         uia(hwnd, "invoke", name="打开数据目录")
-        fresh = wait_new_windows(base, "dsh-status")
+        fresh = wait_new_windows(base, dirname)
         opened += [h for h, _t in fresh]
         check("「打开数据目录」真的开了那个目录（新窗口标题里有数据目录名）",
-              bool(fresh), f"数据目录 {os.path.basename(ds.state_dir())}，新窗口 {fresh}")
+              bool(fresh), f"数据目录 {dirname}，新窗口 {fresh}")
         print(f"  打开数据目录 → 新窗口 {fresh}")
         close_windows([h for h, _t in fresh])
         time.sleep(1.0)
         base = {(h, t) for h, _c, t in list_top_windows()}
-        uia(hwnd, "invoke", name="打开日志")
-        fresh = wait_new_windows(base, "bar.log", limit=8.0)
-        way = "bar.log"
-        if not fresh:
-            # 本机 .log 的打开方式指向一个已被移除的 AppX（UserChoice 里那个 ProgId 起不来），
-            # ShellExecute 于是落到系统的「选取应用」对话框 —— 那同样证明按钮真的把
-            # App.LogPath 交给了 shell 去开（App.OpenInExplorer 只在抛异常时才记日志，
-            # 而日志里没有「打开路径失败」）。两种落点都算数，但现场必须说清是哪一种。
-            fresh = wait_new_windows(base, "选取应用", limit=6.0)
-            way = "选取应用（.log 在本机没有可用的打开方式）"
+        uia(hwnd, "invoke", name="打开日志位置")
+        fresh = wait_new_windows(base, dirname, limit=8.0)
         opened += [h for h, _t in fresh]
-        check("「打开日志」真的去开 bar.log（新窗口是它的查看器，或系统的选取应用对话框）",
-              bool(fresh), f"新窗口 {fresh}，判据落点={way}")
-        print(f"  打开日志 → 新窗口 {fresh}（落点：{way}）")
+        # bar.log 就在数据目录里，所以「定位到它」开的也是这一族的文件夹窗口：
+        # 判据只钉「新窗口的标题里有数据目录名」这件必然发生的事。
+        check("「打开日志位置」真的用资源管理器定位到 bar.log（新窗口标题里有数据目录名，"
+              "判据不碰 .log 的打开方式）",
+              bool(fresh), f"数据目录 {dirname}，新窗口 {fresh}")
+        # 选中态只作现场、不进判据：资源管理器的列表项是虚拟化的，
+        # 「这一刻枚举不枚举得到 bar.log」由它的渲染时机决定，不由产品决定。
+        cls = {h: c for h, c, _t in list_top_windows()}
+        it = uia(fresh[0][0], "item", name="bar.log") if fresh else {"ERR": ["没有新窗口"]}
+        way = (f"{(it.get('ITEM') or ['?'])[0]} 选中={(it.get('SELECTED') or ['?'])[0]}"
+               if "ITEM" in it and "SELECTED" in it
+               else f"读不到（{it.get('ITEMMISS') or it.get('ITEMNOPAT') or it.get('ERR')}）")
+        print(f"  打开日志位置 → 新窗口 {fresh}"
+              f"（类名 {[cls.get(h) for h, _t in fresh]}，选中态现场：{way}）")
         close_windows([h for h, _t in fresh])
         time.sleep(1.0)
 
