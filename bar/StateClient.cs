@@ -54,6 +54,31 @@ namespace DshBar
         [JsonPropertyName("text")] public string Text { get; set; }
     }
 
+    public sealed class Usage
+    {
+        [JsonPropertyName("input")] public long Input { get; set; }
+        [JsonPropertyName("output")] public long Output { get; set; }
+        [JsonPropertyName("total")] public long Total { get; set; }
+    }
+
+    public sealed class SessionRow
+    {
+        [JsonPropertyName("key")] public string Key { get; set; }
+        [JsonPropertyName("project")] public string Project { get; set; }
+        [JsonPropertyName("title")] public string Title { get; set; }
+        [JsonPropertyName("state")] public string State { get; set; }
+        [JsonPropertyName("turn")] public int? Turn { get; set; }
+        [JsonPropertyName("step")] public int? Step { get; set; }
+        [JsonPropertyName("age_sec")] public double AgeSec { get; set; }
+        [JsonPropertyName("last_event")] public string LastEvent { get; set; }
+        [JsonPropertyName("last_tool")] public string LastTool { get; set; }
+        [JsonPropertyName("end_reason")] public string EndReason { get; set; }
+        [JsonPropertyName("records")] public int Records { get; set; }
+        [JsonPropertyName("todo")] public Todo Todo { get; set; }
+        [JsonPropertyName("usage_total")] public Usage Usage { get; set; }
+        [JsonPropertyName("pending")] public Pending Pending { get; set; }
+    }
+
     public sealed class Snapshot
     {
         [JsonPropertyName("ok")] public bool Ok { get; set; }
@@ -70,6 +95,10 @@ namespace DshBar
         [JsonPropertyName("balance")] public Balance Balance { get; set; }
         [JsonPropertyName("waiting")] public List<Brief> Waiting { get; set; }
         [JsonPropertyName("recent")] public List<Brief> Recent { get; set; }
+        // 会话表逐行快照（spec §4 的白名单行，无 path/cwd）。
+        // 可以是 null：--watch 的异常帧（ok:false）根本不带 sessions，
+        // 消费方（概览页）必须容忍空表，见 Pages.cs 的 Refresh。
+        [JsonPropertyName("sessions")] public List<SessionRow> Sessions { get; set; }
         [JsonPropertyName("error")] public string Error { get; set; }
     }
 

@@ -508,6 +508,127 @@ def _png(path: str, width: int, height: int, rgb: bytes) -> None:
             + chunk(b"IEND", b""))
     with open(path, "wb") as fh:
         fh.write(body)
+def read_png_rgba(path: str) -> tuple[int, int, bytes] | None:
+    """极简 PNG 解码：只认 PngBitmapEncoder 从 Pbgra32 出的那种 8 位 RGBA 非交错图。
+
+    离屏表格门禁要看的是**像素结构**（表格有没有把页面铺满、行分隔线有没有成排），
+    不是一个拍出来的色数；而本仓库只有 stdlib（Python 3.14），所以这里自带解码，
+    不引 Pillow。_png() 是写、这个是读，两个凑一对。
+    读不了（缺文件/不是 PNG/位深或色型不对/压缩流坏了/长度不够）一律返回 None，
+    由调用处记 ✗ —— 不能抛异常把整轮冒烟带崩。
+    """
+    import struct
+    import zlib
+
+    try:
+        raw = open(path, "rb").read()
+    except OSError:
+        return None
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    pos, ihdr, idat = 8, b"", bytearray()
+    while pos + 12 <= len(raw):
+        ln = struct.unpack(">I", raw[pos:pos + 4])[0]
+        tag = raw[pos + 4:pos + 8]
+        body = raw[pos + 8:pos + 8 + ln]
+        if tag == b"IHDR":
+            ihdr = body
+        elif tag == b"IDAT":
+            idat += body      # 分片要拼回去
+        elif tag == b"IEND":
+            break
+        pos += 12 + ln
+    if len(ihdr) != 13:
+        return None
+    w, h, depth, color, _comp, _filt, interlace = struct.unpack(">IIBBBBB", ihdr)
+    if depth != 8 or color != 6 or interlace != 0 or w <= 0 or h <= 0:
+        return None  # 只支持 8 位 RGBA；哪天出图格式变了，这里返回 None 让门禁记 ✗ 而不是假绿
+    ch, stride = 4, w * 4
+    try:
+        data = zlib.decompress(bytes(idat))
+    except zlib.error:
+        return None
+    if len(data) < h * (stride + 1):
+        return None
+    out = bytearray(h * stride)
+    prev = bytes(stride)
+    for y in range(h):
+        base = y * (stride + 1)
+        ft = data[base]
+        line = bytearray(data[base + 1:base + 1 + stride])
+        if ft == 0:
+            pass
+        elif ft == 1:      # Sub
+            for x in range(ch, stride):
+                line[x] = (line[x] + line[x - ch]) & 0xFF
+        elif ft == 2:      # Up
+            for x in range(stride):
+                line[x] = (line[x] + prev[x]) & 0xFF
+        elif ft == 3:      # Average
+            for x in range(stride):
+                left = line[x - ch] if x >= ch else 0
+                line[x] = (line[x] + ((left + prev[x]) >> 1)) & 0xFF
+        elif ft == 4:      # Paeth
+            for x in range(stride):
+                a = line[x - ch] if x >= ch else 0
+                b = prev[x]
+                c = prev[x - ch] if x >= ch else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[x] = (line[x] + pr) & 0xFF
+        else:
+            return None
+        out[y * stride:(y + 1) * stride] = line
+        prev = bytes(line)
+    return w, h, bytes(out)
+
+
+def shot_table_stats(path: str) -> dict | None:
+    """从离屏 PNG 数出表格的结构证据：绘制区、不透明像素、非白像素、成排的行分隔线。
+
+    「不透明」= alpha==255。占位页（PageBase 那一行文字）在 RenderTargetBitmap 上
+    是**整页透明**（本机实测 opaque=0/558000），只有文字那几个像素带 alpha；
+    表格会把 Background 铺满自己的区域，所以 opaque 是「画没画出一整块表」的分水岭，
+    比色数可靠。行分隔线按「同一行里被同一种非白不透明色占据 ≥600 像素」认定，
+    600 ≈ 六列列宽之和（150+110+60+80+130+80=610），比 600 窄就不像表头的列骨架。
+    """
+    got = read_png_rgba(path)
+    if got is None:
+        return None
+    w, h, buf = got
+    stride = w * 4
+    white = b"\xff\xff\xff\xff"
+    painted = ink = hlines = 0
+    x0, x1, y0, y1 = w, -1, h, -1
+    p = 0
+    for y in range(h):
+        row = buf[p:p + stride]
+        p += stride
+        cnt = collections.Counter()
+        first = last = -1
+        for x in range(w):
+            c = row[x * 4:x * 4 + 4]
+            cnt[c] += 1
+            if c[3] == 255:
+                if first < 0:
+                    first = x
+                last = x
+        op = sum(n for c, n in cnt.items() if c[3] == 255)
+        if op:
+            painted += op
+            ink += op - cnt.get(white, 0)
+            x0, x1 = min(x0, first), max(x1, last)
+            y0, y1 = min(y0, y), max(y1, y)
+        wide = [(c, n) for c, n in cnt.items() if n >= 600 and c != white and c[3] == 255]
+        if wide:
+            hlines += 1
+    return {
+        "w": w, "h": h, "total": w * h, "painted": painted, "ink": ink,
+        "x0": x0, "x1": x1, "y0": y0, "y1": y1, "hlines": hlines,
+    }
+
+
 def capture_bar(hwnd: int, out_path: str) -> tuple[int, int, bytes]:
     """PrintWindow 抓状态栏自身像素：任务栏被全屏应用盖住时也能验，且直接证明
     分层窗口真的合成了内容（README 记过「命中看得到、画面看不到」这一类坑）。"""
@@ -654,6 +775,42 @@ def check_panel_shell() -> dict[str, int]:
         shots[page] = colors
         print(f"  {page} 离屏颜色种类 {colors}")
 
+    # 概览页的门禁：表格骨架到底立起来没有，看像素结构，不看色数。
+    # 简报 Step 1 钉的是「离屏颜色种类 > 200」，那个数没有实测依据：本机实测 6 个占位页
+    # 各 7 色，填上表格骨架（表头 + 可见行 + 水平网格线，真实 29 行数据）之后是 40 色
+    # —— 一张灰阶抗锯齿的表本来就上不去 200。照原样钉是永久 ✗，为了让它过而给页面加装饰
+    # 更糟。所以换成三条量得出来的结构证据（口径见 shot_table_stats），阈值裁决交回控制器，
+    # 实测数与两种口径的对比见 task-4-report.md。
+    ov_shot = os.path.join(ds.state_dir(), "panel-overview.png")
+    st = shot_table_stats(ov_shot) if os.path.isfile(ov_shot) else None
+    if st is None:
+        check("概览页离屏 PNG 可读（表格门禁的前提）", False,
+              f"{ov_shot} 读不出像素，色数门禁会一起变成无从判定")
+    else:
+        pct = st["painted"] / st["total"]
+        span = st["x1"] - st["x0"] + 1
+        colors = shots.get("overview", 0)
+        print(f"  概览页离屏实测：颜色 {colors} 种，不透明 {st['painted']}/{st['total']}（{pct:.1%}），"
+              f"非白 {st['ink']} 像素，绘制区 x {st['x0']}..{st['x1']} y {st['y0']}..{st['y1']}，"
+              f"≥600px 横线 {st['hlines']} 条")
+        # 占位页在这三条上的实测值：7 色 / 0.0% 不透明（整页透明）/ 横向跨度不成立。
+        # 空表（Sessions 为 null 时）实测 41.9% 不透明、铺满 900 宽，所以这条不依赖数据量，
+        # 见 check_panel_empty_sessions()。
+        check("概览页已画出表格（不再是一行占位文字）",
+              pct >= 0.35 and span >= st["w"] - 2 and colors > 20,
+              f"colors={colors} painted={pct:.1%} x 跨度={span}/{st['w']}"
+              f"（占位页实测 7 色、0.0% 不透明）")
+        # 行分隔线成排 = 真的有数据行渲染出来，而不只是一块白底 + 表头。
+        # 与 check_cli() 用同一个跳过口径：没有会话文件就没有样本行，这条不该假红。
+        session_files = glob.glob(os.path.expanduser(ds.SESSION_GLOB))
+        if not session_files:
+            print("  （跳过：本机没有 dsh 会话文件，概览页行分隔线断言无样本）")
+        else:
+            check("概览页表格有数据行：行分隔线成排且宽度贴合六列之和",
+                  st["hlines"] >= 6 and st["ink"] >= 5000,
+                  f"横线 {st['hlines']} 条、非白像素 {st['ink']}"
+                  f"（本机 29 行数据实测 17 条 / 36627 像素，阈值各留 1/3 与 1/7 的余量）")
+
     # 非法页名必须非零退出。旧实现把未知 key 静默当 overview：`--panel-shot nonsense`
     # 照样回 `SHOT nonsense 900 620 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
     # 看不出渲染其实跑偏去了别的页。
@@ -664,6 +821,69 @@ def check_panel_shell() -> dict[str, int]:
         check("--panel-shot 非法页名非零退出", p.returncode != 0,
               f"退出码 {p.returncode} 输出 {((p.stdout or '').strip().splitlines() or [''])[0][:80]!r}")
     return shots
+
+
+def check_panel_empty_sessions() -> None:
+    """Sessions 缺席/null 时概览页要照常出图，不能崩 —— 空表是合法状态。
+
+    两条真实来源：
+      ① --watch 的异常帧（ok:false）根本不带 sessions 键，反序列化后 Snapshot.Sessions 是 null；
+      ② 面板在第一帧快照到达之前就打开（App.Latest 还是 null），Refresh(null) 走同一条路。
+    注入点：--panel-shot 取快照的引擎路径写死为 AppContext.BaseDirectory\\dsh_state.py
+    （那里没有才退回仓库根），而那份拷贝是编译产物 —— 所以冒烟可以把它临时换成一个假引擎，
+    让它只吐一行 `{"ok": false}`，或者干脆什么都不吐。生产代码里因此不需要任何测试钩子，
+    跑完必须按仓库根的字节还原回去（本函数最后一条断言就是还原成功）。
+    """
+    print("\n== 概览页对空 sessions 的容忍 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    src = os.path.join(HERE, "dsh_state.py")
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not check("引擎拷贝就位", os.path.isfile(eng), eng):
+        return
+    with open(src, "rb") as fh:
+        real = fh.read()
+    shot = os.path.join(ds.state_dir(), "panel-overview-empty.png")
+    fakes = {
+        # 假引擎 ①：一行 ok:false、没有 sessions 的异常帧 → Snapshot.Sessions == null
+        "ok:false 异常帧（无 sessions 键）":
+            'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-injected"}\\n\')\n',
+        # 假引擎 ②：什么都不输出 → LoadOneShotSnapshot 直接 return → _last 仍是 null
+        "空 stdout（快照整个是 null）":
+            'import sys\nsys.stdout.write("")\n',
+    }
+    try:
+        for label, fake in fakes.items():
+            with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(fake)
+            if os.path.isfile(shot):
+                os.remove(shot)
+            p = run_shot("overview", shot)
+            if p is None:
+                check(f"空表注入：{label}", False, "120 秒没返回")
+                continue
+            head = ((p.stdout or "").strip().splitlines() or [""])[0]
+            got = head.split()
+            colors = int(got[4]) if len(got) == 5 and got[4].lstrip("-").isdigit() else -1
+            st = shot_table_stats(shot) if os.path.isfile(shot) else None
+            # 断言的不是色数，是「没崩 + 表壳还在 + 没有数据行」：
+            # hlines 在真实 29 行数据下实测 17，这里必须掉下来，否则说明假引擎根本没生效。
+            check(f"空表注入：{label} 仍出图且退 0",
+                  p.returncode == 0 and colors > 20 and st is not None,
+                  f"退出码 {p.returncode} 输出 {head!r} err={(p.stderr or '')[-160:]!r}")
+            if st:
+                check(f"空表注入：{label} 表壳仍在但没有数据行",
+                      st["painted"] / st["total"] >= 0.35 and st["hlines"] < 6,
+                      f"不透明 {st['painted']}/{st['total']} 横线 {st['hlines']} 条"
+                      f"（真实 29 行数据实测 17 条，没掉下来就是注入没生效）")
+    finally:
+        with open(eng, "wb") as fh:
+            fh.write(real)
+        check("空表注入后引擎拷贝已按仓库根还原",
+              open(eng, "rb").read() == real, eng)
+        if os.path.isfile(shot):
+            os.remove(shot)
 
 
 def check_panel_window() -> None:
@@ -1209,6 +1429,9 @@ def main() -> int:
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
         panel_shots = check_panel_shell()
+        # 空 sessions 的容忍要在真实出图之后验（它借同一份产物目录注入假引擎），
+        # 也要在 GUI 那几轮之前还原干净 —— check_gui 会真的用这份拷贝起引擎。
+        check_panel_empty_sessions()
         check_gui()
         check_panel_window()
         check_panel_cold_open()
