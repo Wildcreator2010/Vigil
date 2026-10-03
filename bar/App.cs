@@ -478,7 +478,7 @@ namespace DshBar
 
                 // 第二个实例只写一个请求文件就退出，由这里（已在 UI 线程的消息循环里）唤起面板。
                 // 读失败就不唤起；开窗失败也不删文件 —— 请求留给下一轮重试，别把用户的点击吞掉。
-                // 重试按 PanelOpenTries 收敛，删除挪到了开窗成功之后，理由都写在 TryConsumePanelRequest 上。
+                // 重试按 PanelOpenTries 收敛、删除只删「刚打开的那一条」，理由都写在 TryConsumePanelRequest 上。
                 var req = PanelRequestFile;
                 if (File.Exists(req) && !_reqQueued)
                 {
@@ -497,7 +497,7 @@ namespace DshBar
         /// <summary>
         /// 面板请求的消费状态机。请求身份 = 文件内容 + 写入时间 + 长度，所以重试预算是按
         /// 「这一条请求」算的：用户再点一次会写一个新时间戳，预算随之重置，不会被上一条顶掉。
-        /// 收敛条件（两条，各自兜一种病）：
+        /// 收敛条件（三条，各自兜一种病）：
         ///   开窗失败 → 文件保留，同一请求最多试 PanelOpenTries=2 次；预算用完就记一条日志
         ///     并把文件删掉。之所以不是「永远留着」：面板构造失败通常是确定性的（XAML/资源/
         ///     首帧布局），无限重试只是每 2 秒白抢一次焦点；而永久留在磁盘上的请求会让每次
@@ -505,6 +505,10 @@ namespace DshBar
         ///     一次性资源紧张），第 2 次仍失败就该认输、记账、让用户再点一次。
         ///   开窗成功但删除失败 → 请求其实已经满足了，直接标记放弃，之后每轮只安静地试着删，
         ///     删得掉就清掉残留并记一行；绝不再次开窗，否则就是每 2 秒把面板弹到前台。
+        ///   开窗成功、但文件已经被新请求覆盖了 → 不删（见 SameRequest）。读请求和删请求之间
+        ///     隔着一次 dispatcher 跳跃和整个 PanelWindow 冷构造首帧（本机实测 185~245ms），
+        ///     这段时间第二个实例写进来的新请求要是被无条件删掉，就是一次彻底的静默丢失：
+        ///     面板停在第一页、日志一行没有、那条点击再也不会回来。
         /// </summary>
         private static void TryConsumePanelRequest(string req, string page)
         {
@@ -540,6 +544,14 @@ namespace DshBar
                 try
                 {
                     if (!OpenPanel(target)) return;   // 异常已在 OpenPanel 里记录，文件留给下一轮
+                    // 删之前复核身份：此刻文件里躺着的，可能已经是刚才这段冷构造期间
+                    // 另一个实例写进来的新请求了。不是刚打开的那一条就别删，留着让
+                    // 下一轮（2 秒内）按新身份重新开一次窗 —— 删了就等于把那次点击吞了。
+                    if (!SameRequest(req, stamp))
+                    {
+                        Log($"面板已打开，但请求文件在此期间被新请求覆盖，不删除，交给下一轮消费: {req}");
+                        return;
+                    }
                     if (!TryDeleteRequest(req))
                     {
                         Log($"面板已打开但请求文件删不掉，之后只清理不再重开: {req}");
@@ -555,6 +567,24 @@ namespace DshBar
                     _reqQueued = false;
                 }
             }));
+        }
+
+        /// <summary>
+        /// 文件里现在这条请求，还是刚刚打开面板时读到的那一条吗？
+        /// 按同样的口径重算一次身份（内容 + 写入时间 + 长度）。读不到就答 false：
+        /// 宁可多留一轮让下一条重开一次窗，也不能把没打开过的请求删掉。
+        /// </summary>
+        private static bool SameRequest(string req, string stamp)
+        {
+            try
+            {
+                return string.Equals(File.ReadAllText(req).Trim() + "|" + RequestStamp(req), stamp,
+                    StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>请求身份的一部分。元数据读不到就返回 "?"，宁可少一次重试也不丢请求。</summary>

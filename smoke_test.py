@@ -772,6 +772,33 @@ def unlock(path_handle: int) -> None:
         ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(path_handle))
 
 
+def request_write(path: str, page: str) -> int:
+    """写一条面板请求，返回写完之后立刻看到的 last-access 时间（读 oracle 的基线）。"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    return os.stat(path).st_atime_ns
+
+
+def wait_request_read(path: str, baseline_ns: int, limit: float) -> tuple[float | None, int | None]:
+    """等别的进程把这个文件读走。返回 (观察到的时刻, 新的 last-access 值)，没读到 (None, None)。
+
+    NTFS 的 last-access 时间会随一次真正的读刷新（这台机器 DisableLastAccess=2，
+    系统盘照常更新），而 os.stat / GetFileAttributesEx 只看元数据、不动它。
+    所以它是「Tick 刚把请求读进内存」这件事唯一的外部可见痕迹 ——
+    没有它就没法知道自己是不是把第二条请求写进了「读→删」那段窗口里。
+    """
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        try:
+            at = os.stat(path).st_atime_ns
+        except OSError:
+            return None, None  # 文件先没了：这一次读无从观察
+        if at != baseline_ns:
+            return time.time(), at
+        time.sleep(0.0002)
+    return None, None
+
+
 def log_tail(offset: int) -> str:
     """读 bar.log 从 offset 起新增的部分（检查函数自己那段时间窗）。"""
     log = os.path.join(ds.state_dir(), "bar.log")
@@ -826,6 +853,40 @@ def check_panel_request_guard() -> None:
     check("OpenPanel 内部兜住异常并返回布尔（N1）",
           "catch (Exception" in ob and "Log(" in ob and "return false;" in ob,
           "没找到 static bool OpenPanel(...) 或它没有 try/catch/Log/return false")
+
+    # ---- 重试预算 PanelOpenTries ----
+    # 这三条是**形状断言**，不是行为断言，原因和第 2 轮 N1 那半边一样：
+    # OpenPanel 只在 new PanelWindow() 抛的时候才返回 false，而那口锅只有程序集内嵌的
+    # BAML 和已在内存的字典能掀 —— 仓库外没有任何「必然让开窗失败」的注入点，
+    # 往生产代码塞测试钩子又是不允许的。所以「失败重试最多 2 次」这一支只能钉形态。
+    # 会假红的改动（语义没变也得连这条一起改）：把常数改名、把 2 内联进比较式、
+    # 给放弃那一支换写法（例如把 Log/删除挪进另一个方法）、把 _reqTries++ 挪到 BeginInvoke 之后。
+    # 守不住的改动（形状断言的天花板）：把 2 改成 3 并且连这条一起改 —— 它只钉住「预算是 2」
+    # 这个决定，不保证 2 是最佳值；以及在别处把 _reqTries 悄悄重置回 0（预算永远花不完），
+    # 那需要「开窗必然失败」的行为注入，而这一支恰恰没有可注入的点。
+    text = "\n".join(lines)
+    m = re.search(r"private const int PanelOpenTries\s*=\s*(\d+)", text)
+    check("重试预算是编译期常数且为 2（形状断言）", bool(m) and m.group(1) == "2",
+          "没找到 private const int PanelOpenTries = 2" if not m
+          else f"实得 PanelOpenTries = {m.group(1)}（改预算要连同这条一起改，别让它悄悄长大）")
+    gi = next((i for i, l in enumerate(lines) if "_reqTries >= PanelOpenTries" in l), -1)
+    gb = ""
+    if gi >= 0:
+        ind = len(lines[gi]) - len(lines[gi].lstrip())
+        for j in range(gi + 1, min(gi + 14, len(lines))):
+            s = lines[j]
+            if s.strip() == "}" and len(s) - len(s.lstrip()) == ind:
+                gb = "\n".join(lines[gi:j + 1])
+                break
+    check("预算用完就收手：记一行 + 标记放弃 + 删文件，且不再开窗（形状断言）",
+          bool(gb) and "Log(" in gb and "_reqGivenUp = true" in gb and "TryDeleteRequest(" in gb
+          and "BeginInvoke" not in gb and "OpenPanel(" not in gb,
+          "没找到 if (_reqTries >= PanelOpenTries) 那一支，或它缺了 Log/放弃标记/删文件，"
+          "或者用完还在开窗（那就是每 2 秒抢一次焦点）" if gb else "没有预算用完了那一支")
+    seg = "\n".join(lines[site:idx + 1]) if site >= 0 and idx > site else ""
+    check("预算按请求身份收敛：新身份清零、每次尝试先自增再排窗（形状断言）",
+          "_reqTries = 0" in seg and "_reqTries++" in seg and seg.find("_reqTries++") < seg.find("BeginInvoke"),
+          "没看到「身份一变就 _reqTries = 0」，或自增排到了 BeginInvoke 之后（那样第一条请求永远花不掉预算）")
 
 
 def check_panel_request_containment() -> None:
@@ -911,6 +972,95 @@ def check_panel_request_containment() -> None:
         if os.path.exists(req):
             os.remove(req)  # 放弃路径只在能删时才删；测试自己不留垃圾给下一轮
         check("消费失败测试后无残留",
+              not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
+              f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
+
+
+def check_panel_request_race() -> None:
+    """冷开窗期间到达的第二条请求，不能被第一条那次删除顺带吞掉。
+
+    Tick 把请求读进内存之后，还要跳一次 dispatcher、再把整个 PanelWindow 冷构造出来
+    （本机实测：读到 → 删掉之间 221ms）。第二个实例趁这段时间写进来的新请求，就是
+    「此刻躺在文件里的那一条」。不比对身份就 File.Delete，删掉的是一条从来没打开过的
+    请求：面板停在第一页，日志一行都没有。
+
+    时序不靠猜：
+      · 读到 = 文件 last-access 时间被别的进程刷新（见 wait_request_read）。
+      · 第二条确实写进了窗口 = 它写在「面板出现」之前，而 Show() 在删除之前，
+        所以 写第二条 < 面板出现 ≤ 删除，三段全是观测到的先后，不是估的。
+      · 没被吞掉 = 文件活到读后 1.5 秒还在。下一条最早只能在读后 2 秒（watchdog 周期）
+        被读到，所以 1.5 秒仍在那儿 = 那次删除没碰它。
+    """
+    print("\n== 冷开窗期间的第二条请求 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    req = os.path.join(ds.state_dir(), "panel.request")
+    if os.path.isfile(req):
+        os.remove(req)
+    check("竞态测试前无残留请求", not os.path.exists(req), req)
+    log_path = os.path.join(ds.state_dir(), "bar.log")
+    log_offset = os.path.getsize(log_path) if os.path.isfile(log_path) else 0
+    before = python_pids()
+    proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 25 and not find_bar_windows():
+            time.sleep(0.4)
+        check("常驻实例已起（不带 --panel）", proc.poll() is None and bool(find_bar_windows()),
+              f"存活={proc.poll() is None} 状态栏窗口={find_bar_windows()}")
+        time.sleep(3)  # 让 watchdog 跑过一轮：面板不是它自己冒出来的，窗口期才真的是冷的
+        if not check("竞态测试前面板不存在（开窗必然是冷构造）", not top_window("dsh 控制台"),
+                     "面板已经在了，OpenPanel 不再冷构造，这段窗口本来就不存在"):
+            return
+        base = request_write(req, "about")
+        t_read, _ = wait_request_read(req, base, 10.0)
+        if not check("第一条请求被读到（last-access 时间当读 oracle）", t_read is not None,
+                     "10 秒内没观察到任何读事件：这台机器关掉了访问时间更新，竞态无从判定"):
+            return
+        request_write(req, "notify")  # 第二条：赶在那次删除之前落地
+        t_second = time.time()
+        t_panel = t_gone = 0.0
+        still_there = False
+        t_end, probed = t_read + 8.0, False
+        while time.time() < t_end:
+            now = time.time()
+            if not t_panel and top_window("dsh 控制台"):
+                t_panel = now  # 记下的是「看到的时刻」，不是句柄：后面要拿它跟写入时刻比先后
+            if not probed and now - t_read >= 1.5:
+                still_there, probed = os.path.exists(req), True
+            if not t_gone and not os.path.exists(req):
+                t_gone = now
+            if t_panel and probed and t_gone:
+                break
+            time.sleep(0.0005)
+        if not probed:
+            still_there = os.path.exists(req)
+        ms = lambda t: f"{(t - t_read) * 1000:.0f}ms" if t else "从未"  # noqa: E731
+        check("第一条请求起了冷面板", bool(t_panel), "读后 8 秒里面板没出现，删不删都无从谈起")
+        check("第二条请求写在冷面板出现之前（确实撞进那次开窗）",
+              bool(t_panel) and t_second < t_panel,
+              f"第二条写于读后 {ms(t_second)}，面板出现于读后 {ms(t_panel)}")
+        check("第二条请求没有被那次开窗顺带删掉（删除前比对身份）", still_there,
+              f"文件在读后 {ms(t_gone)} 就消失了，而下一条最早也要读后 2 秒（watchdog 周期）"
+              "才会被读到 —— 删掉的是一条从来没打开过的请求，且日志没有任何交代")
+        check("第二条请求随后被消费，没有悬挂在磁盘上", t_gone != 0.0,
+              f"等满 8 秒文件还在（{req}），下一轮的预算会被这条吃掉")
+        tail = log_tail(log_offset)
+        check("让位给新请求时记了一行（不静默放行）", "被新请求覆盖" in tail,
+              tail[-260:] or "无新日志")
+        check("竞态后进程仍存活", proc.poll() is None, f"退出码 {proc.returncode}")
+        check("竞态后状态栏仍在任务栏里", bool(find_bar_windows()),
+              "Shell_TrayWnd 里已经没有 DshBar 子窗口")
+        check("竞态后面板可见", bool(top_window("dsh 控制台")), "面板跟着没了")
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        deadline = time.time() + 20
+        while time.time() < deadline and (bar_processes() or python_pids() - before):
+            time.sleep(1)
+        if os.path.exists(req):
+            os.remove(req)
+        check("竞态测试后无残留",
               not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
               f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
 
@@ -1045,6 +1195,7 @@ def main() -> int:
         check_panel_window()
         check_panel_cold_open()
         check_panel_request_containment()
+        check_panel_request_race()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")
 
