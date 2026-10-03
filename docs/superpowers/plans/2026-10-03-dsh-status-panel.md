@@ -19,6 +19,16 @@
 - 若页面用到写死颜色做像素判据（`smoke_test.py:check_panel_real_scroll` 现在依赖表格的
   `Brushes.White` 定顶沿、WPF-UI 滑块中灰定整页滚动条），换主题刷时必须同步改那条断言；
   它的失效方式是记 ✗ 并打印现场，不会静默假绿。
+- **Task 5 裁决（Step 0 #1 的明文豁免）**：概览页表格的 `Brushes.White` / `#E2E5EA` 两个写死值
+  暂留白底，深色主题下该页呈「深色外壳 + 白底表格」的过渡态（Task 5 真窗口截图为证）。
+  因由：实测候选主题键（`CardBackgroundFillColorDefaultBrush`）在浅底下合成 `#FEFEFE` 而非
+  `#FFFFFF`，Task 4 签认的八处像素口径（`shot_table_stats` 的 painted/ink/hlines/vscroll、
+  `real_window_stats` 的顶沿/表头带/滑块指纹、`row_data_gate` 的相对基线）全部钉在逐字节
+  `#FFFFFF` 上，换刷即集体翻红，其重derive属于 Task 8「概览页填实（交互与配色）」验收面
+  （3803390 已落成 Task 8 显式项）。主题生效链路由 Task 5 新增的
+  「深浅两张 `--panel-shot appearance` 四角取样必须不同」门禁守住（删字典合并或删
+  `ApplyTheme()` 调用都会翻红，见 task-5-report.md 的变异表），本豁免不会使 N3 缺口复发。
+  **Task 8 换主题刷时，必须在同一提交里把 smoke_test.py 的白口径一并改掉**（Global Constraints ②）。
 
 - 目标框架 `net10.0-windows`，`UseWPF` + `UseWindowsForms`，`Nullable=disable`，`ImplicitUsings=disable` —— 所有 C# 文件必须显式 `using`。
 - 引擎侧**只用 Python 3.14 标准库**，不得引入第三方包。
