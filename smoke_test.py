@@ -1122,16 +1122,34 @@ def check_gui() -> None:
                 hues = {rgb[i:i + 3] for i in range(0, len(rgb), 3)}
                 check("画面已合成出内容（非纯色）", len(hues) > 20,
                       f"只有 {len(hues)} 种颜色")
-                want = (parse_line(run("--json", "--no-balance").stdout.strip()) or {}).get("color", "")
-                try:
-                    tgt = bytes(int(want[j:j + 2], 16) for j in (1, 3, 5))
-                except Exception:
-                    tgt = b""
-                near = sum(1 for i in range(0, len(rgb), 3)
-                           if tgt and all(abs(rgb[i + k] - tgt[k]) <= 12 for k in range(3)))
+                # 「先抓帧、后取 want」是条必然撞上的竞态：状态栏的色来自 --watch 的最新帧，
+                # 落后引擎一个 interval（默认 2 秒），而本机这些会话的状态是被**正在干活的别的
+                # agent 会话**推着变的。Task 4 那一轮就红在这里：抓帧那一刻圆点是
+                # #0D9488（tool_running，实测 137 px），隔 2 秒探针取到的是 #D97706（thinking）
+                # —— 画面没错，是断言在拿 T1 的期望比 T0 的像素。
+                # 所以改成「取 want → 现抓 → 比对 → 没中就等一秒再来」，给状态栏最多 20 秒
+                # （约 10 个 interval）追平引擎；追不平才记 ✗。断言强度没降：圆点仍然必须真的
+                # 是引擎报出的那个色，只是不再靠抓帧撞上稳定窗口的那次运气。
+                want, near = "", 0
+                deadline = time.time() + 20.0
+                while True:
+                    want = (parse_line(run("--json", "--no-balance").stdout.strip()) or {}).get("color", "")
+                    try:
+                        tgt = bytes(int(want[j:j + 2], 16) for j in (1, 3, 5))
+                    except Exception:
+                        tgt = b""
+                    cw2, ch2, rgb2 = capture_bar(h, shot)
+                    if cw2 and ch2:
+                        rgb = rgb2
+                    near = sum(1 for i in range(0, len(rgb), 3)
+                               if tgt and all(abs(rgb[i + k] - tgt[k]) <= 12 for k in range(3)))
+                    if near >= 20 or time.time() >= deadline:
+                        break
+                    time.sleep(1.0)
                 top = collections.Counter(rgb[i:i + 3] for i in range(0, len(rgb), 3))
                 check(f"状态色 {want} 已画在圆点上", near >= 20,
-                      f"{near} 像素命中，画面主色 {[c[0].hex() for c in top.most_common(4)]}")
+                      f"{near} 像素命中（等满 20 秒状态栏也没追上引擎报的这个色），"
+                      f"画面主色 {[c[0].hex() for c in top.most_common(4)]}")
                 print(f"  画面存到 {shot}")
         check("引擎子进程已拉起", not python_pids() <= before, "没有新增 python 进程")
         try:
