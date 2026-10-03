@@ -566,7 +566,7 @@ def check_panel_shell() -> None:
 本任务**不**在这里断言颜色种类 > 200：此时 6 页还都是 `PageBase` 占位（一个 TextBlock，
 两三种颜色），那条门禁归各自填实该页的任务（Task 5~9）。这里只验「能离屏出图、尺寸对、落了盘」。
 
-
+```python
 def check_panel_window() -> None:
     print("\n== 控制台窗口 ==")
     if not os.path.isfile(BAR_EXE) or bar_processes():
