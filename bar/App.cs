@@ -107,7 +107,9 @@ namespace DshBar
             _window.HoverChanged += () => PlaceNow(new System.Windows.Interop.WindowInteropHelper(_window).Handle);
             _window.Show();
             var hwnd = new System.Windows.Interop.WindowInteropHelper(_window).Handle;
-            DockNow(hwnd);
+            // 启动路径也过一遍 showBar：true 就是原来的 DockNow；false 则 Undock 隐藏 ——
+            // 否则 Show() 出来的窗口只被 PlaceNow 挡着不落位，会带着初始坐标浮在屏上。
+            ApplyBarVisibility();
 
             BuildTray();
             if (demo != null) DemoOnce(demo);
@@ -138,6 +140,48 @@ namespace DshBar
         internal static void RequestBalanceRefresh() => RefreshBalance();
         internal static bool AutostartOn() => AutostartEnabled();
         internal static void SetAutostart(bool on) => ToggleAutostart(on);
+
+        /// <summary>
+        /// 把 Config.Theme 当场落到主题字典（机制就是换 Application.Resources.MergedDictionaries
+        /// 里那两份，见 ApplyFluentTheme 的注释 —— 前提的合并没做完时这里是空操作）。
+        /// backDrop 传 None 而不是简报写的 Mica：BarWindow 是嵌进任务栏的分层子窗口，
+        /// Apply 会去动已存在窗口的背景，Task 3 起就定死 None，本任务不翻案（记入报告）。
+        /// "system" 由 FluentTheme() 就地解析成当前系统深浅，与启动路径同一口径。
+        /// </summary>
+        internal static void ApplyTheme()
+        {
+            try
+            {
+                Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
+                    FluentTheme(), Wpf.Ui.Controls.WindowBackdropType.None, false);
+            }
+            catch (Exception ex) { Log($"应用主题失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// showBar 决定状态条停靠/消失。隐藏 = Native.Undock（SWP_HIDEWINDOW + 脱离任务栏父子关系），
+        /// 显示 = DockNow（PlaceNow 的 SetWindowPos 带 SWP_SHOWWINDOW，重新停靠顺带重新可见）。
+        /// 托盘、watchdog、面板唤起通路都不经过这里 —— 隐藏状态条不杀进程。
+        /// shot 路径 _window 为 null：静默返回（渲染离屏页不该改任务栏，也不该刷失败日志）。
+        /// </summary>
+        internal static void ApplyBarVisibility()
+        {
+            try
+            {
+                if (_window == null) return;
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(_window).Handle;
+                if (hwnd == IntPtr.Zero) return;
+                if (_settings != null && _settings.ShowBar) { DockNow(hwnd); }
+                else { Native.Undock(hwnd); }
+            }
+            catch (Exception ex) { Log($"切换状态条可见性失败: {ex.Message}"); }
+        }
+
+        internal static void SaveSettings()
+        {
+            try { _settings?.Save(SettingsFile); }
+            catch (Exception ex) { Log($"保存设置失败: {ex.Message}"); }
+        }
 
         internal static void OpenInExplorer(string path)
         {
@@ -247,8 +291,10 @@ namespace DshBar
             // 时才真的切字典，所以先 Add 再交给 Apply 定主题。
             if (!hasControls) merged.Add(new Wpf.Ui.Markup.ControlsDictionary());
             if (!hasThemes) merged.Add(new Wpf.Ui.Markup.ThemesDictionary());
-            Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
-                FluentTheme(), Wpf.Ui.Controls.WindowBackdropType.None, false);
+            // 深浅的落点收敛到 ApplyTheme() 这一处（Main / shot 两条路径都经过这里）：
+            // 删掉这行调用，--panel-shot appearance 的深浅两张取样会重新变得一模一样，
+            // 冒烟那条「主题真的生效」门禁当场翻红 —— 补上 Task 3 复核 N3 的缺口。
+            ApplyTheme();
         }
 
         /// <summary>settings.json 的 theme 是 light/dark/system；system 按当前系统主题就地解析。</summary>
@@ -404,6 +450,9 @@ namespace DshBar
 
         private static void PlaceNow(IntPtr hwnd)
         {
+            // showBar=false 时不再落位：Undock 之后窗口是脱离任务栏的隐藏 popup，
+            // 每 2 秒的 watchdog 若继续 PlaceNow，SetWindowPos(SWP_SHOWWINDOW) 会把它重新点亮。
+            if (_settings != null && !_settings.ShowBar) return;
             if (_taskbar == IntPtr.Zero) return;
             if (!Native.GetWindowRect(_taskbar, out Rect band)) return;
             var (left, right) = Native.FreeRange(band, 240);
@@ -467,7 +516,11 @@ namespace DshBar
             {
                 IntPtr tb = Native.TaskbarHandle();
                 if (tb == IntPtr.Zero) return;
-                if (tb != _taskbar)
+                // 隐藏状态条期间不做任何重停靠：简报在 PlaceNow 之前加的是整段 early-return，
+                // 那会把后面的 panel.request 消费一起吞掉 —— 「隐藏后仍可通过唤起回到面板」
+                // （托盘菜单「打开面板」与二次实例 --panel 走的是同一条 OpenPanel）就假了。
+                // 落位由 PlaceNow 自己的 showBar 守卫挡；这里只补重停靠这一半。
+                if (tb != _taskbar && _settings.ShowBar)
                 {
                     Log("任务栏窗口已重建，重新停靠");
                     _taskbar = tb;
