@@ -30,6 +30,9 @@ namespace DshBar
     /// 真的铺满了离屏画面（口径是像素结构，不是色数，见 smoke_test.py 的 shot_table_stats）。
     /// Refresh 里用 snap?.Sessions：面板可能在第一帧快照之前就被打开（App.Latest 还是 null），
     /// --watch 的异常帧也不带 sessions（Snapshot.Sessions 可为 null），空表是合法状态不是崩溃。
+    /// Records 是 int?：引擎那边 `"records": s.get("records")` 可以出 null，
+    /// 非可空 int 会让整帧反序列化失败、状态栏静默停更（见 StateClient.SessionRow），
+    /// null 时这一格和 Turn 一样留白 —— DataGridTextColumn 绑到 null 就是空串。
     /// </summary>
     internal sealed class OverviewPage : WpfControls.ContentControl, IPanelPage
     {
@@ -61,7 +64,22 @@ namespace DshBar
                     Width = new WpfControls.DataGridLength(c.Item3),
                 });
             }
-            Content = new WpfControls.StackPanel { Children = { _grid } };
+            Content = new WpfControls.Grid
+            {
+                // 表格必须拿到**有限高度**，它自己模板里那个 ScrollViewer 才生效。
+                // 之前这里套的是竖向 StackPanel：StackPanel 给子元素无限高度，
+                // DataGrid 于是按行数撑到 ~1150px 再被 620 的视口裁掉，
+                // ScrollViewer 的 extent == viewport → 永不滚动 → 第 16~60 行
+                // （SESSIONS_IN_SNAPSHOT 上限 60）在真实面板里既不能靠表格滚动、
+                // 排版成本还随行数线性上升。离屏出图同样只画到 620，像素门禁完全看不出来。
+                // 现在用一行 `*` 的行定义把父级的有限高度原样传给表格：
+                // 视口受限、多出的行落在表格自己的滚动里、表头固定在顶上。
+                RowDefinitions =
+                {
+                    new WpfControls.RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+                },
+                Children = { _grid },
+            };
         }
 
         public void Refresh(Snapshot snap) => _grid.ItemsSource = snap?.Sessions;

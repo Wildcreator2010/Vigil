@@ -73,7 +73,11 @@ namespace DshBar
         [JsonPropertyName("last_event")] public string LastEvent { get; set; }
         [JsonPropertyName("last_tool")] public string LastTool { get; set; }
         [JsonPropertyName("end_reason")] public string EndReason { get; set; }
-        [JsonPropertyName("records")] public int Records { get; set; }
+        // 可空：引擎侧是 "records": s.get("records")（dsh_state.py 的 _session_rows），
+        // 出 null 是合法的。这里写成非可空 int 的话，System.Text.Json 是在**整帧**上抛，
+        // 而 StateClient.ReadStdout 的 catch 只记一行「JSON 解析失败」就 continue ——
+        // 表现是状态栏从此静默冻结，而不是变红。null 时概览页那一格留白（与 Turn 同行为）。
+        [JsonPropertyName("records")] public int? Records { get; set; }
         [JsonPropertyName("todo")] public Todo Todo { get; set; }
         [JsonPropertyName("usage_total")] public Usage Usage { get; set; }
         [JsonPropertyName("pending")] public Pending Pending { get; set; }
