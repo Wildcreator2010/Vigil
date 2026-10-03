@@ -1290,6 +1290,15 @@ git commit -m "feat(panel): 快照会话行打通到概览页表格"
   - `App.ApplyBarVisibility()`（`showBar` 决定停靠/隐藏）。
   - `PageBase(string title)` 仍可用。
 
+- [ ] **Step 0: 承接 Task 4 复核的两条裁决（做不完就别往下走）**
+
+1. `bar/Panel/Pages.cs` 的概览页表格底色当前是硬编码 `Brushes.White` / `#E2E5EA`，
+   与 `c35cfbf` 的主题刷裁决冲突（切深色会变成"深色外壳 + 白底表格"）。
+   本步把它改成走主题资源键（`ThemeMaterialFillColorSecondary` 一类），或在 spec 里明文豁免白底并记因由。
+   **必须有一条断言守着**：`--panel-shot appearance` 在 `theme=dark` 与 `theme=light` 下
+   取样的背景色必须不同（否则"主题生效"仍是假功能，Task 3 复核 N3 的缺口就在这里）。
+2. 参照物更新：概览页已不再是 7 色（实测 40），"六页恒为 7"现在只剩五页成立。
+
 - [ ] **Step 1: 写 `bar/Panel/Ui.cs`**
 
 ```csharp
@@ -1964,6 +1973,15 @@ git commit -m "feat(panel): 余额页并入面板，移除独立的 KeyDialog"
 **Interfaces:**
 - Consumes: `Snapshot.Sessions`（Task 4）、`Snapshot.State/Label/Color/StripRight/TipLines/Waiting`、`STATES` 的中文标签与配色（前端自己映射，见 Step 1 的 `StateLabel`）。
 - Produces: 概览页 = 当前状态卡 + 会话表 + 待处理卡。
+
+- [ ] **Step 0: 承接 Task 4 复核顺延的两条（本任务不修就一直错着）**
+
+1. **`StackPanel` 套 `DataGrid` 已在本轮修掉**（`Content = _grid;` 或换成 `*` 行的 `Grid`）。
+   若发现仍是 `StackPanel`，先修它 —— 否则第 16~60 行永远不可见，而**像素门禁看不见这个缺陷**
+   （离屏裁切和真窗口一样）。补一条断言：表格区域的可滚动行数与 `sessions` 条数不匹配时，
+   必须存在可用的滚动视口（`ScrollViewer.CanContentScroll` 为真且高度受限）。
+2. 列绑定必须补 `StringFormat` 或走投影：`age_sec` 会出现 `133.9` 与 `30517` 混排且无单位。
+   本任务的 `SessionView` 已把 `AgeText` 格式化成 `Ns`，确认**没有**别的列还在直出原始值。
 
 - [ ] **Step 1: 写状态标签与配色的前端映射**
 
