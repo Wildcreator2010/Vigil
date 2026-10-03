@@ -776,6 +776,9 @@ def fake_engine_source(rows: int, watch: bool = False) -> str:
     `watch=True` 出的是**持续吐帧**的版本：状态栏起引擎用的是 `--watch`，
     一次性写一行就退出会让面板停在空表、且父进程立刻重启引擎（真实窗口那段要等帧喂进来）。
     每 0.5 秒重发同一帧、管道断了才收 —— 与真引擎的节律一致，也不会自己跑掉。
+    和真引擎一样按命令行分诊：只有 `--watch` 才循环（`App.LoadOneShotSnapshot` 走的是
+    `--json --no-balance`，吐完一帧必须自己退出，否则每次 `--panel-shot` 都要白等
+    `WaitForExit(5000)` 那 5 秒 —— 一段要出六张参照图的门禁会被它拖成半分钟）。
     """
     if rows <= 0:
         return 'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-injected"}\\n\')\n'
@@ -795,6 +798,9 @@ def fake_engine_source(rows: int, watch: bool = False) -> str:
     if not watch:
         return 'import json, sys\n' + body + 'sys.stdout.write(frame + "\\n")\n'
     return ('import json, sys, time\n' + body +
+            'if "--watch" not in sys.argv:\n'
+            '    sys.stdout.write(frame + "\\n")\n'
+            '    sys.exit(0)\n'
             'try:\n'
             '    for _ in range(900):\n'
             '        sys.stdout.write(frame + "\\n")\n'
@@ -849,6 +855,112 @@ def shot_opaque_count(path: str) -> int:
 
 def fmt_rgba(px: bytes) -> str:
     return f"#{px[0]:02X}{px[1]:02X}{px[2]:02X}{px[3]:02X}"
+
+
+# ---------------------------------------------------------------- 真窗口 vs 离屏参照的配色比对
+#
+# 「面板画的是不是**请求的那一页**」（check_panel_direct_page）需要一个不靠写死颜色的正证据：
+# 拿同一台机器、同一份 settings.json、同一个假引擎，把每页各出一张离屏参照
+# （`--panel-shot`，进程内 RenderTargetBitmap），再和真窗口抓帧的页面取样框比配色分布。
+# 两边由同一个 `PanelPages.TryCreate(key)` 造页、由同一套主题刷落笔，所以**换刷也不会失配**
+# （Task 8 把概览页白底换成主题刷时，这条跟着一起走，不像旧的「内容区纯白像素 < 5000」
+# 那样从「能红」退化成「永远绿」）。
+# 三条换算规则，缺一条就比不上：
+#   ① alpha：离屏图是 RGBA，Fluent 刷大半是「纯色 + 低 alpha」（概览页的表体、占位页整页
+#      都是 alpha<255），而 PrintWindow 抓到的是已经合成完的 RGB —— 所以参照侧要先按
+#      `外壳底色` 把 alpha 合成掉，占位页那种全透明像素才会落到窗口真正显示的那块底色上。
+#   ② 取样框：离屏是 900×620、真窗口页面区是 724×600 逻辑像素，**尺寸不同不能逐像素比**，
+#      比的是「每档颜色占多少比例」这个分布。
+#   ③ 通道漂移：同一个纯色在两条通路上实测会差 1~2 个 level（外观页卡片
+#      离屏 #FEFEFE、真窗口 #FDFDFD；文字侧 ClearType 与离屏灰阶抗锯齿更是各出各的中间色），
+#      所以每通道右移 2 位（4 级一档）再统计 —— #FDFDFD/#FEFEFE/#FFFFFF 落到相邻档但
+#      白色与 #FAFAFA 仍分得开（255→63、250→62），概览与外观不会因此混为一谈。
+
+PAGE_BOX_DIP = (216, 26, 930, 614)
+"""真窗口里**页面**的取样框（逻辑像素）：外壳是 nav 188 + Host 左边距 24 → 页面左沿 212，
+右沿 960-24=936，上沿 Host 上边距 20、下沿 640-20=620（FluentWindow 的内容区从客户区
+(0,0) 起算，标题栏是覆盖式的，本机实测表格顶沿 y=20.8）。往里各缩 4 像素避开 1px 描边。
+窗口尺寸变了这条就不成立 —— 所以那个尺寸本身是一条前提断言，不是默认值。"""
+
+BACKDROP_STRIP_DIP = (196, 100, 206, 600)
+"""侧栏右描边（x=188）与页面左沿（x=212）之间那条窗口底色带：
+半透明主题刷合成回底的基准。它在取样框**外面**，不会被页面内容污染。"""
+
+
+def quant_color(c: bytes) -> bytes:
+    """每通道右移 2 位：4 级一档，吸收离屏/上屏之间 1~2 个 level 的合成漂移。"""
+    return bytes((c[0] >> 2, c[1] >> 2, c[2] >> 2))
+
+
+def color_profile(colors: list[bytes], quantize: bool = True) -> dict[bytes, float]:
+    """颜色 → 占比。quantize=False 留给「同一张图内部」那种能逐字节对齐的场合。"""
+    cnt: collections.Counter = collections.Counter(
+        quant_color(c) if quantize else c for c in colors)
+    tot = max(1, len(colors))
+    return {c: n / tot for c, n in cnt.items()}
+
+
+def over_backdrop(px: bytes, bg: bytes) -> bytes:
+    """把离屏 RGBA 的一个像素按 alpha 合成到外壳底色上，得到它在真窗口里应当呈现的 RGB。"""
+    a = px[3]
+    if a == 255:
+        return bytes(px[:3])
+    return bytes(round((px[i] * a + bg[i] * (255 - a)) / 255) for i in range(3))
+
+
+def shot_profile(path: str, bg: bytes, stride: int = 2) -> dict[bytes, float] | None:
+    """离屏参照页的配色分布（已按外壳底色合成 alpha）；读不出 PNG 给 None。"""
+    got = read_png_rgba(path)
+    if got is None:
+        return None
+    w, h, buf = got
+    return color_profile([over_backdrop(buf[i * 4:i * 4 + 4], bg)
+                          for i in range(0, w * h, stride)])
+
+
+def box_profile(rgb: bytes, w: int, h: int, scale: float, stride: int = 2) -> dict[bytes, float]:
+    """真窗口抓帧里页面取样框的配色分布。"""
+    x0, y0, x1, y1 = box_px(w, h, scale)
+    return color_profile([rgb[y * w * 3 + x * 3:y * w * 3 + x * 3 + 3]
+                          for y in range(y0, y1, stride) for x in range(x0, x1, stride)])
+
+
+def box_hash(rgb: bytes, w: int, h: int, scale: float) -> str:
+    """取样框的逐行指纹（整块 md5）：证明「换了个请求就换了一屏内容」，零容差。"""
+    x0, y0, x1, y1 = box_px(w, h, scale)
+    md5 = hashlib.md5()
+    for y in range(y0, y1):
+        md5.update(rgb[y * w * 3 + x0 * 3:y * w * 3 + x1 * 3])
+    return md5.hexdigest()
+
+
+def box_px(w: int, h: int, scale: float) -> tuple[int, int, int, int]:
+    """把 DIP 常量按 DPI 缩放到抓帧像素，并夹进画面里（缩放手柄/描边各留 2 像素）。"""
+    x0, y0, x1, y1 = (int(v * scale) for v in PAGE_BOX_DIP)
+    return max(2, x0), max(2, y0), min(x1, w - 2), min(y1, h - 2)
+
+
+def strip_backdrop(rgb: bytes, w: int, h: int, scale: float) -> tuple[bytes, int]:
+    """侧栏与页面之间那条底色带的众数色与它的像素数（量不到就交给调用处记 ✗）。"""
+    x0, y0, x1, y1 = (int(v * scale) for v in BACKDROP_STRIP_DIP)
+    x0, x1 = max(2, x0), min(x1, w - 2)
+    y0, y1 = max(2, y0), min(y1, h - 2)
+    cnt: collections.Counter = collections.Counter(
+        rgb[y * w * 3 + x * 3:y * w * 3 + x * 3 + 3]
+        for y in range(y0, y1, 2) for x in range(x0, x1))
+    return cnt.most_common(1)[0] if cnt else (b"", 0)
+
+
+def profile_overlap(a: dict[bytes, float], b: dict[bytes, float]) -> float:
+    """两个配色分布的重合度 = Σ min(占比)。1.0 = 两屏内容同一种排布，0.0 = 完全不相干。"""
+    return sum(min(a.get(c, 0.0), b.get(c, 0.0)) for c in set(a) | set(b))
+
+
+def fmt_profile(pal: dict[bytes, float], top: int = 3) -> str:
+    """量化档写回可读的十六进制：后面的 `+0..3` 说的是这一档覆盖 4 个 level
+    （#FCFCFC+ = 252~255，白色与 #FDFDFD/#FEFEFE 都在这档里，见上面规则 ③）。"""
+    return " ".join(f"#{c[0] << 2:02X}{c[1] << 2:02X}{c[2] << 2:02X}+0..3×{v:.3f}"
+                    for c, v in sorted(pal.items(), key=lambda kv: -kv[1])[:top])
 
 
 def shot_with_fake_engine(source: str, out_path: str,
@@ -1236,6 +1348,10 @@ def send_wheel(delta: int, clicks: int) -> int:
 
     只发滚轮、不动光标 —— 光标由调用处 SetCursorPos 放到目标上，WPF 按光标命中路由滚轮。
     delta 是 DWORD 字段，负数必须按无符号塞进去（本机踩过：直接传 -360 ctypes 会拒）。
+
+    注意这条通路**要求面板是前台窗口**（滚轮发给前台），而本探测环境里前台锁归 IDE，
+    抢前台要靠 check_panel_real_scroll 里那层兜底 —— 全局输入副作用见那里的说明。
+    能用 post_wheel_to 就别用它。
     """
     u = _user32()
     ok = 0
@@ -1244,6 +1360,27 @@ def send_wheel(delta: int, clicks: int) -> int:
         if u.SendInput(1, ctypes.byref(ev), ctypes.sizeof(ev)):
             ok += 1
         time.sleep(0.18)
+    return ok
+
+
+def post_wheel_to(hwnd: int, x: int, y: int, delta: int, clicks: int) -> int:
+    """只往这一个 HWND 投 WM_MOUSEWHEEL（0x020A），返回投出去几条。
+
+    定向投递不进系统输入队列：**不抢前台、不给别的窗口（IDE）打键**，
+    所以本环境那条「SetForegroundWindow 返回 0 → 只能 ALT 抖动」的兜底在这儿没有存在的理由。
+    它自己也不动光标（调用处仍然把光标放到表体上，那是为了 hover 态与 Task 4 签认那张一致）。
+    wParam 高 16 位是有符号滚轮增量（-360 取 16 位无符号 0xFE98），
+    lParam 是命中点坐标 (x | y<<16) —— WPF 按 lParam 命中路由，本机实测点谁滚谁
+    （真窗口三条判据与 SendInput 那条通路同形：变化 334 行、第一条在 y=73 > 表头下沿 55）。
+    """
+    u = _user32()
+    ok = 0
+    for _ in range(clicks):
+        wp = ((delta & 0xFFFF) << 16)  # 低位是按住的鼠标键虚位，滚轮自己不算，给 0（本机实测口径）
+        lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+        if u.PostMessageW(hwnd, 0x020A, wp, lp):
+            ok += 1
+        time.sleep(0.2)
     return ok
 
 
@@ -1378,17 +1515,12 @@ def check_panel_real_scroll() -> None:
         if not check("真实窗口：面板已打开（--panel 起真窗口）", bool(hwnd),
                      "找不到标题为 dsh 控制台 的顶层窗口"):
             return
-        # 滚轮消息 Windows 是发给**前台窗口**的，面板没到前台时整个实验会静默不动。
-        # Task 5 起本探测环境（agent 后台终端，前台锁归 IDE）里裸 SetForegroundWindow
-        # 会返回 0 —— 红因正是 Task 4 §12.7 顾虑 2 预言的「面板抢不到前台 → 判据①
-        # 一行都没动」。补一层标准兜底：先 keybd_event 模拟一次 ALT 输入（Windows 允许
-        # 「刚收到输入事件的进程」改前台），再抢一次。只动送达，不动任何判据与阈值。
-        if not u.SetForegroundWindow(hwnd):
-            k = ctypes.windll.user32.keybd_event
-            k(0x12, 0, 0, 0)
-            k(0x12, 0, 2, 0)
-            u.SetForegroundWindow(hwnd)
-        time.sleep(0.6)
+        # 送达通路：只往面板自己的 HWND 投 WM_MOUSEWHEEL（post_wheel_to）。
+        # 定向投递不进系统输入队列，所以**不需要面板在前台**，也就不需要当年那层
+        # 「keybd_event 抖一下 ALT」的兜底 —— 那一下打在当时的前台窗口（本机是 IDE）上，
+        # 是一次无谓的全局输入副作用（Task 5 轮 2 复核事 2 的附带项）。
+        # 前台归属这个信号仍然保留：兜底通路（SendInput 真滚轮）需要它，且它一出现
+        # 就写进现场，「送达失败」与「表头被滚走」两种红因此形状不同（见下面三条判据的 detail）。
         l, t, r, b = rect_of(hwnd)
         scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
         st0: dict | None = None
@@ -1414,35 +1546,88 @@ def check_panel_real_scroll() -> None:
             return
         sig0 = row_hashes(rgb, w, h)
         px, py = l + int((r - l) * 0.6), t + int((b - t) * 0.6)
-        u.SetCursorPos(px, py)
+        u.SetCursorPos(px, py)  # 光标放表体上：hover 态与 Task 4 签认那张一致，finally 里归还
         time.sleep(0.5)
-        sent = send_wheel(-120 * 3, 3)
+
+        def diff_of(buf: bytes, ww: int, hh: int) -> list[int] | None:
+            """两帧逐行一比；尺寸对不上返回 None（这条实验作废，不是产品红）。"""
+            if (ww, hh) != (w, h) or not buf:
+                return None
+            return [y for y, (a, c) in enumerate(zip(sig0, row_hashes(buf, ww, hh))) if a != c]
+
+        posted = post_wheel_to(hwnd, px, py, -120 * 3, 3)
+        sent = posted
+        way = f"定向 PostMessage → HWND {hwnd}（不经前台），投出 {posted}/3"
+        fg_note, fg_blocked = "", False
         time.sleep(1.0)
         w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
-        if not check("真实窗口：滚动前后画面同尺寸可比",
-                     sent == 3 and (w2, h2) == (w, h) and bool(rgb2),
-                     f"滚轮发出 {sent}/3 次，抓帧 {w2}x{h2}（基线 {w}x{h}）"):
+        changed = diff_of(rgb2, w2, h2)
+        if posted == 3 and changed is not None and not changed:
+            # 定向通路三帧都投出去了却一行都没动 —— 才轮到那条要前台的真滚轮。
+            # 抢前台的结果**当场记下来**：本探测环境（agent 后台终端）前台锁归 IDE，
+            # 裸 SetForegroundWindow 返回 0，ALT 抖动兜底也不保证抢得回（本机实测两者都返回 0）。
+            # 兜底也失败时「送达自检」单独红并写明送达失败，不再伪装成「表头被滚走」那种产品缺陷。
+            got = bool(u.SetForegroundWindow(hwnd))
+            how = "裸 SetForegroundWindow"
+            if not got or u.GetForegroundWindow() != hwnd:
+                k = ctypes.windll.user32.keybd_event
+                k(0x12, 0, 0, 0)      # ALT 按下
+                k(0x12, 0, 2, 0)      # 抬起：Windows 放行「刚收到输入事件的进程」改前台
+                got = bool(u.SetForegroundWindow(hwnd))
+                how = "ALT 抖动后 SetForegroundWindow"
+            fg_note = ("前台归属："
+                       + ("面板已是前台窗口" if u.GetForegroundWindow() == hwnd
+                          else f"面板**不是**前台窗口（GetForegroundWindow={u.GetForegroundWindow()} ≠ {hwnd}）"
+                               "→ 真滚轮送不达，红因在送达不在产品"))
+            fg_blocked = u.GetForegroundWindow() != hwnd
+            sent = send_wheel(-120 * 3, 3)
+            way = (f"兜底 SendInput 真滚轮（{how} 返回 {int(got)}，投出 {sent}/3）；"
+                   f"定向通路 3/3 投出却没滚 → 两条通路都记在这里")
+            time.sleep(1.0)
+            w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
+            changed = diff_of(rgb2, w2, h2)
+        same_size = check("真实窗口：滚动前后画面同尺寸可比",
+                          sent == 3 and (w2, h2) == (w, h) and bool(rgb2),
+                          f"滚轮发出 {sent}/3 次（{way}），抓帧 {w2}x{h2}（基线 {w}x{h}）")
+        # 送达自检：只回答一件事——「滚轮有没有投给面板、当下走的这条通路可用不可用」。
+        # 它不看画面动了多少行（那是判据①②③的活），所以它绿而判据红 = 通道没问题、产品有问题；
+        # 它红 = 通道自己就没把消息送出去（投出数不足，或走了兜底通路却没抢到前台），
+        # 判据①②此时的「0 行变化 / first_diff=-1」全是它的下游，别按产品回归查
+        # ——Task 5 轮 1 的假红正是那个形状，复核事 2 点名的就是这里（选「加记录」不选「跳过」）。
+        n_changed = -1 if changed is None else len(changed)
+        check("真实窗口：滚轮送达通道自检（投给面板自己的 HWND、窗口仍在、走兜底时确实抢到前台；"
+              "这条红=送达失败不是产品回归）",
+              sent == 3 and bool(u.IsWindowVisible(hwnd)) and not fg_blocked,
+              f"通路={way}，面板可见={bool(u.IsWindowVisible(hwnd))}，抓帧变化 {n_changed} 行；"
+              f"{fg_note or '走的是定向通路，不需要抢前台（本环境那条前台锁因此不参与送达）'}。"
+              f"这条红而判据①也红 = 送达失败；这条绿而判据②红 = 表头被滚走 —— 两种红形状不同")
+        if not same_size or changed is None:
             return
-        sig1 = row_hashes(rgb2, w2, h2)
-        changed = [y for y, (a, c) in enumerate(zip(sig0, sig1)) if a != c]
         first_diff = changed[0] if changed else -1
         in_head = sum(1 for y in changed if st0["top"] <= y <= st0["head1"])
         st1 = real_window_stats(rgb2, w2, h2)
         print(f"  基线：表格顶沿 y={st0['top']}、表头墨迹带 y={st0['head0']}..{st0['head1']}、"
               f"分隔线 {st0['lines']} 条、最右条带滑块像素 {st0['gray']}（x0={st0['gray_x0']}）")
-        print(f"  滚轮 3 次 ×{-120 * 3} 后：变化行 {len(changed)} 条、第一条变化在 y={first_diff}、"
+        print(f"  滚轮 3 次 ×{-120 * 3} 后（{way}）：变化行 {len(changed)} 条、"
+              f"第一条变化在 y={first_diff}、"
               f"落在表头带 [y{st0['top']}, y{st0['head1']}] 里的有 {in_head} 条、"
               f"分隔线 {st1['lines']} 条、最右条带滑块像素 {st1['gray']}")
         check("真实窗口：滚轮在表体上滚得动（画面确实动了，不是什么都没发生）",
               len(changed) >= 100,
-              f"{len(changed)} 行变化（阈值 100 行 ≈ 表体的一大截）；"
-              f"一行都没动就是滚轮被吞或没送达 —— 那 29 行在真实面板里根本够不着")
+              f"{len(changed)} 行变化（阈值 100 行 ≈ 表体的一大截）；送达通路={way}；"
+              f"{fg_note or '定向通路不经前台'}；"
+              f"够不上 100 行就先看上面那条送达自检——它红是送达问题（本环境的前台锁那一类），"
+              f"它绿而这条红才是那 29 行在真实面板里够不着")
         check("真实窗口：滚轮滚过之后表头没有被滚出视野",
               first_diff > st0["head1"],
               f"第一条变化的行在 y={first_diff}，判据要求 > 表头墨迹带下沿 y={st0['head1']}"
               f"（顶沿 y={st0['top']}、表头文字 y={st0['head0']}..{st0['head1']}）："
               f"顶沿到表头下沿之间就是表头，整页滚动一动它就花；"
-              f"变化行为 -1 就是压根没滚起来（见上一条）")
+              + (f"送达通路={way}、变化行 {len(changed)} 条 —— 一条都没动是压根没滚起来，"
+                 f"先看上面那条「滚轮送达通道自检」，它红就是送达失败（本环境的前台锁那一类），"
+                 f"不是表头被滚走" if not changed
+                 else f"变化起点 {first_diff} 落在表头带内 {in_head} 条 —— "
+                      f"这是整页滚动把表头一起推走了，送达通路={way} 与此无关"))
         check("真实窗口：外壳没有整页滚动条（页面拿到的是有限高度）",
               st0["gray"] <= 60,
               f"最右侧 20 物理像素条带里 {st0['gray']} 个中灰滑块像素"
@@ -1450,7 +1635,8 @@ def check_panel_real_scroll() -> None:
               f"外壳把页面包进 ScrollViewer 时整页滚动条就贴着窗口右沿；"
               f"有限高度下页面不需要它，那一条带只剩主题底色")
     finally:
-        # 这一段会 SetCursorPos 把光标挪到表格上（滚轮要按光标命中路由），
+        # 这一段会 SetCursorPos 把光标挪到表格上（保持 hover 态与 Task 4 签认那张一致；
+        # 兜底那条 SendInput 通路也靠它命中），
         # 不管前面走到哪一步、有没有抛，都得把用户的光标还回去。
         u.SetCursorPos(home.x, home.y)
         subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
@@ -1507,6 +1693,163 @@ def check_panel_window() -> None:
         subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
         time.sleep(3)
         check("退出后无残留", not bar_processes(), str(bar_processes()))
+
+
+DIRECT_AGREE_MIN = 0.80
+"""真窗口页面取样框的配色分布，与**同一页**离屏参照的最低重合度。
+
+本机实测（假引擎 29 行、theme 走 settings.json 的默认浅）：
+概览 0.905、外观 0.950、四个占位页 0.9996 —— 正确侧最低 0.90，
+离阈值还有 0.10 缓冲（用户鼠标正好停在某一行上会多带走 3~4 个百分点的悬停底色）。
+把 Navigate 还原成 Task 3 的坏版本后实测：请求外观页却停在概览，
+与外观参照的重合度 0.175、与四个占位参照的 0.0002 —— 走错页那一侧离阈值也差四倍多。
+两侧都不靠「概览页是白底」这个写死事实，Task 8 换主题刷后照样成立（同一轮实测过）。"""
+
+
+def check_panel_direct_page() -> None:
+    """「请求了哪一页」必须等于「面板画了哪一页」，而且要用**正证据**判。
+
+    为什么重写（Task 5 轮 2 复核事 1）：旧那条挂在 check_showbar_hidden 里的
+    「面板真的切到了 appearance 页」判的是 `内容区纯白像素 < 5000` ——
+    ① 它的区分度**全部来自概览页那张写死的白底表格**（Step 0 #1 明文豁免的那个）。
+      Task 8 按计划把表底换成主题刷之后概览页也没有成片 #FFFFFF，这条就从「能红」
+      退化成「永远绿」——坏门禁不报错、只沉默，比红更糟；
+    ② 它躲在 showBar 场景里，是那个场景的副产品，重构 showBar 段就跟着一起消失。
+    现在它站在自己的段里，判据换成**同一 theme、同一份假引擎下，真窗口那一页的配色分布
+    必须等于该页离屏参照的配色分布**（离屏与上屏由同一个 `PanelPages.TryCreate(key)` 造页，
+    换刷时两边一起变，见上面 PAGE_BOX_DIP 那一段的三条换算规则），
+    外加一条零容差的「六个请求产生六种内容」。
+    概览页白底换成主题刷之后这两条仍然有效 —— 本轮的 (b) 组红→绿证据就是拿这个假设量出来的。
+
+    走的是 `--panel` 的两条直达通路：冷启动（`DshBar.exe --panel appearance`，
+    Task 5 复核里撞出的那条 Task 3 缺陷路径）与请求通路（二次实例写 panel.request →
+    常驻实例 ShowOn → Navigate）。两条都终点在同一个 Navigate 上。
+    """
+    print("\n== 直达页 = 请求页 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not check("直达段注入点就位", os.path.isfile(eng), eng):
+        return
+    with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
+        real = fh.read()
+    before = python_pids()
+    req = os.path.join(ds.state_dir(), "panel.request")
+    shot = os.path.join(ds.state_dir(), "smoke-panel-direct.png")
+    refs = {p: os.path.join(ds.state_dir(), f"panel-direct-{p}.png") for p in PANEL_PAGES}
+    u = _user32()
+    try:
+        # 一份假引擎同时喂两条通路：--panel-shot 走 --json（出一帧就退），面板走 --watch（持续吐帧）。
+        # 数据固定成 29 行，离屏那张与真窗口那张才是同一份内容的两种画法，
+        # 拿本机真实会话当基准的话，两次取样的行数都能对不上。
+        with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(fake_engine_source(29, watch=True))
+        for page in PANEL_PAGES:
+            if os.path.isfile(refs[page]):
+                os.remove(refs[page])
+            run_shot(page, refs[page])
+
+        # 冷启动直达非默认页：Task 3 的 Navigate 就是把这一步的渲染压掉的
+        # （导航条亮「外观」、Host 里还是概览页），默认页恰好是 0 号，冷开与旧冒烟都没暴露它。
+        subprocess.Popen([BAR_EXE, "--panel", "appearance"], cwd=os.path.dirname(BAR_EXE))
+        hwnd, t0 = 0, time.time()
+        while time.time() - t0 < 25:
+            hwnd = top_window("dsh 控制台")
+            if hwnd:
+                break
+            time.sleep(0.4)
+        if not check("冷启动直达：面板窗口已出现（--panel appearance）", bool(hwnd),
+                     "找不到标题为 dsh 控制台 的顶层窗口"):
+            return
+        scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
+        w0, h0, rgb0 = capture_bar(hwnd, shot, scale=scale)
+        bg, bg_n = strip_backdrop(rgb0, w0, h0, scale)
+        # 半透明主题刷要先合成回底才比得了（离屏图存的是 RGBA，PrintWindow 给的是合成完的 RGB），
+        # 所以这条底色带是整段比样地基；量不到就当场停，别拿猜出来的底色彩一条绿的过去。
+        if not check("外壳底色取样条量到了（半透明主题刷的合成基准）", bg_n >= 50,
+                     f"侧栏与页面之间那条带只有 {bg_n} 个像素可数，无从确定合成回底："
+                     f"{fmt_rgba(bg + bytes([255])) if bg else '空'}"):
+            return
+        check("取样框前提：面板窗口是外壳默认的 960×640",
+              (w0, h0) == (int(960 * scale), int(640 * scale)),
+              f"抓帧 {w0}x{h0}（缩放 {scale}），页面取样框 {PAGE_BOX_DIP} 是按这套外壳布局"
+              f"（nav 188 + Host 边距 24/20）算出来的，窗口尺寸一变就得重derive")
+        expect = {p: shot_profile(refs[p], bg) for p in PANEL_PAGES}
+        if not check("六页离屏参照都可解码（真窗口比样的基准）",
+                     all(v is not None for v in expect.values()),
+                     "读不出来的页：" + " ".join(p for p in PANEL_PAGES if expect[p] is None)):
+            return
+
+        def settle(page: str, limit: float = 12.0) -> tuple[float, str, str, float]:
+            """等这一页真的画上再判：快照是一帧一帧推进来的，抢在空屏上比必然假红。
+
+            重合度够到阈值就收手；不够就等到超时，把最后一次实测交给 check ——
+            走错页那种红等多久都不会变绿，等出来的红才是红。
+            """
+            t_start, last = time.time(), (0.0, "", "", 0.0)
+            while True:
+                cw, ch, buf = capture_bar(hwnd, shot, scale=scale)
+                if cw:
+                    prof = box_profile(buf, cw, ch, scale)
+                    ov = profile_overlap(prof, expect[page])
+                    last = (ov, fmt_profile(prof), box_hash(buf, cw, ch, scale),
+                            time.time() - t_start)
+                    if ov >= DIRECT_AGREE_MIN:
+                        break
+                if time.time() - t_start >= limit:
+                    break
+                time.sleep(1.0)
+            return last
+
+        def report(page: str, via: str, ov: float, prof: str, t_wait: float) -> bool:
+            print(f"  {via} → {page}：重合度 {ov:.4f}（阈值 {DIRECT_AGREE_MIN}，"
+                  f"等了 {t_wait:.1f}s）｜真窗口 {prof}｜参照 {fmt_profile(expect[page] or {})}")
+            return check(f"{via}：面板显示的就是 {page} 页（配色分布 = 该页离屏参照）",
+                         ov >= DIRECT_AGREE_MIN,
+                         f"重合度 {ov:.4f}（阈值 {DIRECT_AGREE_MIN}，等了 {t_wait:.1f}s）；"
+                         f"真窗口取样框现场 {prof} vs {page} 页离屏参照 "
+                         f"{fmt_profile(expect[page] or {})}；"
+                         f"参照图 {refs[page]}（同一 theme、同一份假引擎、同一个页面工厂）")
+
+        ov, prof, _hh, waited = settle("appearance")
+        report("appearance", "冷启动直达：--panel appearance", ov, prof, waited)
+
+        hashes: dict[str, str] = {}
+        for page in PANEL_PAGES:
+            if os.path.isfile(req):
+                os.remove(req)
+            subprocess.run([BAR_EXE, "--panel", page], cwd=os.path.dirname(BAR_EXE), timeout=30)
+            t1 = time.time()
+            while time.time() - t1 < 12 and os.path.isfile(req):
+                time.sleep(0.3)
+            consumed = not os.path.isfile(req)
+            ov, prof, hh, waited = settle(page)
+            hashes[page] = hh
+            report(page, f"二次实例 --panel {page}"
+                   f"{'（请求文件已消费）' if consumed else '（请求文件 12 秒没被消费！）'}",
+                   ov, prof, waited)
+        dup = [k for k, v in hashes.items() if list(hashes.values()).count(v) > 1]
+        check("六个直达请求产生六种内容（没有一个请求停在上一页上）",
+              len(set(hashes.values())) == len(hashes),
+              f"取样框指纹去重后 {len(set(hashes.values()))}/{len(hashes)}，"
+              f"画同一片内容的：{' '.join(dup)}（Navigate 不渲染时六次请求全是概览那一张表）")
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        time.sleep(3)
+        with open(eng, "wb") as fh:
+            fh.write(real)
+        check("直达段：注入后引擎拷贝已按仓库根还原", open(eng, "rb").read() == real, eng)
+        for p in list(refs.values()) + [shot]:
+            if os.path.isfile(p):
+                os.remove(p)
+        check("直达段：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
+        left_pids = python_pids() - before
+        t3 = time.time()
+        while left_pids and time.time() - t3 < 20:
+            time.sleep(1)
+            left_pids = python_pids() - before
+        check("直达段：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
 
 
 def check_settings_roundtrip() -> None:
@@ -1626,27 +1969,11 @@ def check_showbar_hidden() -> None:
             time.sleep(0.4)
         check("showBar=false：面板仍能打开（--panel 直达）", bool(hwnd),
               "找不到标题为 dsh 控制台 的顶层窗口")
-        # 内容证据：--panel appearance 必须真的切到外观页。Task 3 的 Navigate 把
-        # SelectedIndex 赋值和渲染一起压掉了（导航条亮「外观」、Host 里还是概览页），
-        # 概览页是整块 #FFFFFF 白底表格，外观页浅底下没有成片的纯白 —— 按纯白像素分得开。
-        if hwnd:
-            u = _user32()
-            scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
-            shot2 = os.path.join(ds.state_dir(), "smoke-showbar-panel.png")
-            cw, chh, rgb = capture_bar(hwnd, shot2, scale=scale)
-            whites = 0
-            if cw:
-                for y in range(int(chh * 0.06), int(chh * 0.96)):
-                    base = y * cw * 3
-                    for x in range(int(cw * 0.25), int(cw * 0.95)):
-                        if rgb[base + x * 3:base + x * 3 + 3] == b"\xff\xff\xff":
-                            whites += 1
-            check("面板真的切到了 appearance 页（不是停在概览白底表）",
-                  bool(cw) and whites < 5000,
-                  f"内容区纯白像素 {whites}（概览页表格实测成片几十万；外观页只有单选圈/滑块"
-                  f"高光这类零星纯白），抓帧 {cw}x{chh}")
-            if os.path.isfile(shot2):
-                os.remove(shot2)
+        # 「直达页 == 请求页」的证据不在这里。Task 5 轮 1 曾在这儿量过一片纯白像素，
+        # 它的区分度全来自概览页那张写死的白底表格（Step 0 #1 的明文豁免），
+        # Task 8 换主题刷后就会静默变成「永远绿」；而且它躲在 showBar 场景里，
+        # 重构这一段就会跟着一起消失。现在由 check_panel_direct_page() 独立成段，
+        # 拿同一 theme、同一份假引擎下的**离屏参照配色分布**做正证据。
         bars = find_bar_windows()
         check("showBar=false：任务栏里没有停靠的状态条（真的消失了）", not bars,
               f"Shell_TrayWnd 下仍挂着 {len(bars)} 个 DshBar 子窗口")
@@ -2237,6 +2564,10 @@ def main() -> int:
         check_panel_real_scroll()
         check_gui()
         check_panel_window()
+        # 「请求了哪一页 == 画了哪一页」的正证据段（真窗口比离屏参照）。
+        # 它和 check_panel_real_scroll 一样借引擎拷贝注入固定 29 行，所以排在 check_settings_roundtrip
+        # 之前：那两段都会改写 settings.json，比样必须在 settings 未被动的状态下量。
+        check_panel_direct_page()
         # theme/showBar 的落盘往返 + 「主题真的改像素」的取样门禁（Task 5 Step 0 #1，补 N3 缺口）。
         # 这两段都会改写 settings.json 并在 finally 里按备份还原，串行跑互不污染。
         check_settings_roundtrip()
