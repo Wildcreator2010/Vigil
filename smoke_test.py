@@ -815,6 +815,42 @@ def shot_dims(head: str) -> tuple[int, int, int]:
         return -1, -1, -1
 
 
+def shot_bg_samples(path: str) -> list[bytes] | None:
+    """appearance 页离屏图的四角背景取样（含 alpha）。
+
+    取 (2,2)、(w-3,2)、(2,h-3)、(w-3,h-3) 四个角像素 —— 那是页面底色必然覆盖、
+    而文字/控件永远到不了的位置。占位页整页透明，四角全 (0,0,0,0)，深浅两张一模一样；
+    外观页把主题刷画在页面上之后，深浅两张的角像素才可能不同。
+    这条门禁（Task 5 Step 0 #1 / Task 3 复核 N3）判的就是「theme 字段 →
+    ApplicationThemeManager.Apply → 主题字典 → 页面真的换色」整条链是不是通的：
+    字典合并被删、或 Apply 没调用时，SetResourceReference 解析不到东西 / 主题恒为浅色，
+    两张取样重新变回一模一样 —— 门禁当场变红，不是守形式。
+    含 alpha 是硬要求（与 C# 侧色数统计同理）：Fluent 刷多为「白色 + 低 alpha」，
+    丢了 alpha 深浅两张的 RGB 可能同为 FFFFFF 而假绿。
+    """
+    got = read_png_rgba(path)
+    if got is None:
+        return None
+    w, h, buf = got
+    def px(x: int, y: int) -> bytes:
+        i = (y * w + x) * 4
+        return buf[i:i + 4]
+    return [px(2, 2), px(w - 3, 2), px(2, h - 3), px(w - 3, h - 3)]
+
+
+def shot_opaque_count(path: str) -> int:
+    """图里 alpha==255 的像素数；读不出来给 -1。"""
+    got = read_png_rgba(path)
+    if got is None:
+        return -1
+    _w, _h, buf = got
+    return sum(1 for i in range(3, len(buf), 4) if buf[i] == 255)
+
+
+def fmt_rgba(px: bytes) -> str:
+    return f"#{px[0]:02X}{px[1]:02X}{px[2]:02X}{px[3]:02X}"
+
+
 def shot_with_fake_engine(source: str, out_path: str,
                           label: str) -> tuple[int, str, dict | None]:
     """把产物里的引擎临时换成 source，出一张概览页离屏图：返回 (退出码, stdout 首行, 像素统计)。
@@ -903,6 +939,8 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
     # —— 一张灰阶抗锯齿的表本来就上不去 200。照原样钉是永久 ✗，为了让它过而给页面加装饰
     # 更糟。所以换成三条量得出来的结构证据（口径见 shot_table_stats），阈值裁决交回控制器，
     # 实测数与两种口径的对比见 task-4-report.md。
+    # Task 5 后参照物更新：概览页早已不是 7 色（Task 4 轮 1 后实测 70），appearance 也
+    # 从占位变成真页（实测 240+ 色），「六页恒为 7」只剩 notify/runtime/balance/about 四页成立。
     ov_shot = shot_paths.get("overview", "")
     st = shot_table_stats(ov_shot) if ov_shot and os.path.isfile(ov_shot) else None
     if st is None:
@@ -1340,8 +1378,16 @@ def check_panel_real_scroll() -> None:
         if not check("真实窗口：面板已打开（--panel 起真窗口）", bool(hwnd),
                      "找不到标题为 dsh 控制台 的顶层窗口"):
             return
-        # 滚轮消息 Windows 是发给**前台窗口**的，面板没到前台时整个实验会静默不动
-        u.SetForegroundWindow(hwnd)
+        # 滚轮消息 Windows 是发给**前台窗口**的，面板没到前台时整个实验会静默不动。
+        # Task 5 起本探测环境（agent 后台终端，前台锁归 IDE）里裸 SetForegroundWindow
+        # 会返回 0 —— 红因正是 Task 4 §12.7 顾虑 2 预言的「面板抢不到前台 → 判据①
+        # 一行都没动」。补一层标准兜底：先 keybd_event 模拟一次 ALT 输入（Windows 允许
+        # 「刚收到输入事件的进程」改前台），再抢一次。只动送达，不动任何判据与阈值。
+        if not u.SetForegroundWindow(hwnd):
+            k = ctypes.windll.user32.keybd_event
+            k(0x12, 0, 0, 0)
+            k(0x12, 0, 2, 0)
+            u.SetForegroundWindow(hwnd)
         time.sleep(0.6)
         l, t, r, b = rect_of(hwnd)
         scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
@@ -1461,6 +1507,196 @@ def check_panel_window() -> None:
         subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
         time.sleep(3)
         check("退出后无残留", not bar_processes(), str(bar_processes()))
+
+
+def check_settings_roundtrip() -> None:
+    """settings.json 的 theme/showBar 必须真的被读回、被外观页用起来，并且主题真的改像素。
+
+    Task 3 复核 N3：`ControlsDictionary`+`ThemesDictionary` 的合并当时没有任何能红的门禁
+    （删掉合并调用全套照绿）。这条链在这里补上：
+    theme=dark 与 theme=light 各出一张 appearance 离屏图，四角背景取样必须不同。
+    占位页（Task 4 基线）整页透明、深浅两张一模一样，所以这条在未修版上是红的；
+    把 App.ApplyFluentTheme 里的字典合并删掉、或不挂 ScrollViewer 的主题底色，它也会翻红
+    —— 它守的是「theme 字段 → Apply → 主题字典 → 页面换色」整条链，不是形式。
+    showBar=False 一并写进每份临时 settings：shot 路径会构造外观页、ToggleSwitch 会读它，
+    顺带钉住「隐藏状态条时离屏渲染不崩」（ApplyBarVisibility 在没有真窗口时只记日志）。
+    """
+    print("\n== 设置往返 ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    f = os.path.join(ds.state_dir(), "settings.json")
+    backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
+    bg: dict[str, list[bytes] | None] = {}
+    colors: dict[str, int] = {}
+    opaque: dict[str, int] = {}
+    try:
+        for theme in ("dark", "system", "light"):
+            with open(f, "w", encoding="utf-8") as fh:
+                json.dump({"interval": 3, "notify": False, "repeatSec": 45,
+                           "theme": theme, "showBar": False}, fh)
+            out = os.path.join(ds.state_dir(), f"panel-appearance-{theme}.png")
+            if os.path.isfile(out):
+                os.remove(out)
+            p = run_shot("appearance", out)
+            rc = -1 if p is None else p.returncode
+            head = "" if p is None else ((p.stdout or "").strip().splitlines() or [""])[0]
+            tail = "" if p is None else (p.stdout + p.stderr)[-160:]
+            check(f"theme={theme} 能被读回并渲染", rc == 0 and "SHOT" in head,
+                  f"退出码 {rc} {tail!r}" if p else "120 秒没返回（离屏渲染卡死）")
+            if theme in ("dark", "light"):
+                bg[theme] = shot_bg_samples(out)
+                colors[theme] = shot_dims(head)[2]
+                opaque[theme] = shot_opaque_count(out)
+            if os.path.isfile(out):
+                os.remove(out)
+
+        # 非法 theme：Load 回退 light。除了不崩，还要求它的四角取样和 theme=light 一致——
+        # 「回退浅色」如果只回退了字段而渲染照旧，上面那条 SHOT 断言看不出来。
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write('{"theme": "nonsense", "interval": 0}')
+        out_bad = os.path.join(ds.state_dir(), "panel-appearance-bad.png")
+        p = run_shot("appearance", out_bad)
+        rc = -1 if p is None else p.returncode
+        head = "" if p is None else ((p.stdout or "").strip().splitlines() or [""])[0]
+        check("非法 theme 回退浅色且不崩", rc == 0 and "SHOT" in head,
+              f"退出码 {rc} {(p.stdout + p.stderr)[-160:]!r}" if p else "120 秒没返回")
+        bg_bad = shot_bg_samples(out_bad)
+        if os.path.isfile(out_bad):
+            os.remove(out_bad)
+        if check("非法 theme 场景的离屏图可解码（回退比样的前提）", bg_bad is not None, out_bad):
+            check("非法 theme 的渲染结果与 theme=light 一致（回退真的落到浅色）",
+                  bg_bad == bg.get("light"),
+                  f"非法={','.join(fmt_rgba(c) for c in bg_bad)} vs "
+                  f"light={','.join(fmt_rgba(c) for c in bg.get('light') or [b''])}")
+
+        dark_s, light_s = bg.get("dark"), bg.get("light")
+        if check("深浅两张 appearance 离屏图都可解码（主题生效门禁的前提）",
+                 dark_s is not None and light_s is not None,
+                 f"dark={dark_s is not None} light={light_s is not None}"):
+            check("theme=dark 与 theme=light 的 appearance 背景色不同（主题真的生效）",
+                  dark_s != light_s,
+                  f"dark={','.join(fmt_rgba(c) for c in dark_s)} vs "
+                  f"light={','.join(fmt_rgba(c) for c in light_s)}"
+                  "（占位页四角全透明、深浅一模一样，这条在 Task 4 基线必红；"
+                  "删掉 Fluent 字典合并或 ApplyTheme 挂掉时也会翻红 —— N3 的补口）")
+            # 色数与不透明只作地板值（Task 4 的裁决口径）：证明这张页真的画了东西，
+            # 而不是一块主题底色糊出来 3 个色。
+            check("appearance 页已画出内容（色数 > 20，Task 5 Step 5 的地板值）",
+                  colors.get("light", -1) > 20 and colors.get("dark", -1) > 20,
+                  f"light={colors.get('light')} dark={colors.get('dark')}")
+            check("appearance 页不再是透明占位（两张都画出了不透明像素）",
+                  opaque.get("dark", -1) > 0 and opaque.get("light", -1) > 0,
+                  f"不透明像素 dark={opaque.get('dark')} light={opaque.get('light')}"
+                  "（占位页实测 0）")
+    finally:
+        if backup is None:
+            if os.path.isfile(f):
+                os.remove(f)
+        else:
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(backup)
+
+
+def check_showbar_hidden() -> None:
+    """showBar=false 的真实行为：状态条从任务栏消失，但进程/托盘/watchdog 全部活着，
+    面板照常可被唤起；改回 true 再打开时重新停靠。
+
+    托盘图标本身没法从 Win32 层枚举（Win11 的托盘是 XAML 岛，没有逐图标 HWND），
+    所以「托盘仍在」用三重间接证据：进程活着 + watchdog 仍在消费 panel.request
+    （和托盘菜单「打开面板」走的是同一个 OpenPanel）+ 面板窗口仍在并可查询。
+    """
+    print("\n== showBar=false 隐藏状态条 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    f = os.path.join(ds.state_dir(), "settings.json")
+    backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
+    req = os.path.join(ds.state_dir(), "panel.request")
+    try:
+        with open(f, "w", encoding="utf-8") as fh:
+            json.dump({"interval": 2, "notify": False, "repeatSec": 90,
+                       "theme": "light", "showBar": False}, fh)
+        proc = subprocess.Popen([BAR_EXE, "--panel", "appearance"], cwd=os.path.dirname(BAR_EXE))
+        hwnd, t0 = 0, time.time()
+        while time.time() - t0 < 25:
+            hwnd = top_window("dsh 控制台")
+            if hwnd:
+                break
+            time.sleep(0.4)
+        check("showBar=false：面板仍能打开（--panel 直达）", bool(hwnd),
+              "找不到标题为 dsh 控制台 的顶层窗口")
+        # 内容证据：--panel appearance 必须真的切到外观页。Task 3 的 Navigate 把
+        # SelectedIndex 赋值和渲染一起压掉了（导航条亮「外观」、Host 里还是概览页），
+        # 概览页是整块 #FFFFFF 白底表格，外观页浅底下没有成片的纯白 —— 按纯白像素分得开。
+        if hwnd:
+            u = _user32()
+            scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
+            shot2 = os.path.join(ds.state_dir(), "smoke-showbar-panel.png")
+            cw, chh, rgb = capture_bar(hwnd, shot2, scale=scale)
+            whites = 0
+            if cw:
+                for y in range(int(chh * 0.06), int(chh * 0.96)):
+                    base = y * cw * 3
+                    for x in range(int(cw * 0.25), int(cw * 0.95)):
+                        if rgb[base + x * 3:base + x * 3 + 3] == b"\xff\xff\xff":
+                            whites += 1
+            check("面板真的切到了 appearance 页（不是停在概览白底表）",
+                  bool(cw) and whites < 5000,
+                  f"内容区纯白像素 {whites}（概览页表格实测成片几十万；外观页只有单选圈/滑块"
+                  f"高光这类零星纯白），抓帧 {cw}x{chh}")
+            if os.path.isfile(shot2):
+                os.remove(shot2)
+        bars = find_bar_windows()
+        check("showBar=false：任务栏里没有停靠的状态条（真的消失了）", not bars,
+              f"Shell_TrayWnd 下仍挂着 {len(bars)} 个 DshBar 子窗口")
+        check("showBar=false：进程仍活着（托盘与 watchdog 都在）", proc.poll() is None,
+              f"退出码 {proc.returncode}")
+        # 隐藏期间二次实例的转交必须仍被消费——它和托盘菜单「打开面板」是同一个 OpenPanel。
+        if os.path.isfile(req):
+            os.remove(req)
+        subprocess.run([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE), timeout=30)
+        t1 = time.time()
+        while time.time() - t1 < 10 and os.path.isfile(req):
+            time.sleep(0.4)
+        check("showBar=false：panel.request 仍被隐藏中的进程消费（唤起通路活着）",
+              not os.path.isfile(req), "10 秒后请求文件还在，watchdog 没干活")
+        check("showBar=false：面板窗口仍在（能从唤起回到面板）", bool(top_window("dsh 控制台")),
+              "请求消费了但窗口不在了")
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        t2 = time.time()
+        while time.time() - t2 < 20 and bar_processes():
+            time.sleep(0.5)
+        # 改回 showBar=true 再打开：必须重新停靠进任务栏。
+        with open(f, "w", encoding="utf-8") as fh:
+            json.dump({"interval": 2, "notify": False, "repeatSec": 90,
+                       "theme": "light", "showBar": True}, fh)
+        subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
+        hwnds: list[int] = []
+        t3 = time.time()
+        docked = False
+        while time.time() - t3 < 25:
+            hwnds = find_bar_windows()
+            if hwnds:
+                u = _user32()
+                tb = u.FindWindowW("Shell_TrayWnd", None)
+                style = u.GetWindowLongW(hwnds[0], -16)
+                if style & 0x10000000 and u.GetParent(hwnds[0]) == tb:
+                    docked = True
+                    break
+            time.sleep(0.4)
+        check("showBar=true 再打开时状态条重新停靠", docked,
+              f"找到 {len(hwnds)} 个子窗口，等满 25 秒也没出现可见且父子关系正确的状态条")
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        time.sleep(3)
+        if backup is None:
+            if os.path.isfile(f):
+                os.remove(f)
+        else:
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(backup)
+        check("showBar 场景：退出后无残留", not bar_processes(), str(bar_processes()))
 
 
 def check_panel_cold_open() -> None:
@@ -2001,6 +2237,10 @@ def main() -> int:
         check_panel_real_scroll()
         check_gui()
         check_panel_window()
+        # theme/showBar 的落盘往返 + 「主题真的改像素」的取样门禁（Task 5 Step 0 #1，补 N3 缺口）。
+        # 这两段都会改写 settings.json 并在 finally 里按备份还原，串行跑互不污染。
+        check_settings_roundtrip()
+        check_showbar_hidden()
         check_panel_cold_open()
         check_panel_request_containment()
         check_panel_request_race()
