@@ -750,6 +750,171 @@ def check_panel_cold_open() -> None:
               f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)}")
 
 
+def lock_against_delete(path: str) -> int:
+    """占住文件：自己能读、别的进程删不掉，制造一个确定性的「删除失败」。
+
+    共享模式给 FILE_SHARE_READ|WRITE 但不给 FILE_SHARE_DELETE —— 另一个进程的
+    File.ReadAllText（.NET 用 FileShare.Read）照样成功，File.Delete 必然撞
+    ERROR_SHARING_VIOLATION。不能用 Python 的 open()/os.open()：共享模式由 UCRT
+    决定，带不带 FILE_SHARE_DELETE 不可控，注入就成了薛定谔的注入。
+    返回 0 表示占用失败。
+    """
+    k32 = ctypes.windll.kernel32
+    k32.CreateFileW.restype = wt.HANDLE
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                wt.DWORD, wt.DWORD, wt.HANDLE]
+    h = k32.CreateFileW(path, 0x80000000, 0x00000003, None, 3, 0x80, None)
+    return 0 if (h is None or int(h) in (0, -1, 0xFFFFFFFFFFFFFFFF)) else int(h)
+
+
+def unlock(path_handle: int) -> None:
+    if path_handle:
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(path_handle))
+
+
+def log_tail(offset: int) -> str:
+    """读 bar.log 从 offset 起新增的部分（检查函数自己那段时间窗）。"""
+    log = os.path.join(ds.state_dir(), "bar.log")
+    try:
+        with open(log, encoding="utf-8-sig", errors="replace") as fh:
+            fh.seek(offset)
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def check_panel_request_guard() -> None:
+    """开窗兜底的源码门禁：委托体必须自带 try，且请求文件必须在开窗成功之后才删。
+
+    为什么用源码形状而不是行为：`new PanelWindow()` 的构造只吃已经在内存里的程序集
+    和内嵌 BAML，请求文件里的页名再离谱也会被 PanelPages.IndexOf 兜回概览页 —— 外部
+    没有任何「必然让开窗抛」的注入点，而往生产代码塞测试钩子是不允许的。行为侧能注入
+    的是「删不掉」，那条走 check_panel_request_containment()；这一条把「委托体没 try
+    就红」钉住（把 try 删掉立刻变红，见 Task 3 报告的第 2 轮反证）。
+    """
+    print("\n== 开窗兜底门禁 ==")
+    src = os.path.join(HERE, "bar", "App.cs")
+    if not os.path.isfile(src):
+        check("App.cs 可读", False, src)
+        return
+    with open(src, encoding="utf-8-sig", errors="replace") as fh:
+        lines = fh.read().splitlines()
+    # 站点定位：bar/App.cs 里有三处 BeginInvoke(new Action(...))，前两处是引擎快照回调
+    # （单行写法、本来就不该有 try），只有面板请求那一站是「排队到下一轮的开窗委托」。
+    # 所以从 TryConsumePanelRequest 之后找，别把 no-op 的那两处当成它。
+    site = next((i for i, l in enumerate(lines)
+                 if "private static void TryConsumePanelRequest(" in l), -1)
+    idx = next((i for i in range(site, min(site + 60, len(lines)))
+                if "Dispatcher.BeginInvoke(new Action(" in lines[i]), -1) if site >= 0 else -1
+    if not check("找到开窗委托站点", idx >= 0,
+                 "TryConsumePanelRequest 里没有 Dispatcher.BeginInvoke(new Action(...))"):
+        return
+    # 委托体 = BeginInvoke 那行到形如 `}));` 的行。修前那种单行写法没有结束标记，
+    # 扫到 40 行也找不到 —— 正好记 ✗，因为「没有独立成块的委托体」= 「委托体没被 try 包住」。
+    end = next((j for j in range(idx, min(idx + 40, len(lines)))
+                if lines[j].strip() == "}));"), -1)
+    block = "\n".join(lines[idx:end + 1]) if end >= 0 else ""
+    check("开窗委托体自带 try + catch + Log（N1）",
+          bool(block) and "try" in block and "catch (Exception" in block and "Log(" in block,
+          "委托体没有独立块或没有 try/catch/Log" if block else "委托体没找到结束标记 `}));`")
+    o, d = block.find("OpenPanel("), block.find("TryDeleteRequest(")
+    check("请求文件在开窗成功之后才删（N2）",
+          o >= 0 and d >= 0 and o < d, f"OpenPanel@{o} TryDeleteRequest@{d}")
+    # OpenPanel 自己也得兜住：--panel 启动和托盘菜单两个调用点同样没有外层 try。
+    oi = next((i for i, l in enumerate(lines) if l.strip().startswith("static bool OpenPanel(")), -1)
+    ob = "\n".join(lines[oi:oi + 18]) if oi >= 0 else ""
+    check("OpenPanel 内部兜住异常并返回布尔（N1）",
+          "catch (Exception" in ob and "Log(" in ob and "return false;" in ob,
+          "没找到 static bool OpenPanel(...) 或它没有 try/catch/Log/return false")
+
+
+def check_panel_request_containment() -> None:
+    """消费失败的反证：请求文件删不掉时，面板要照开、进程要照活、且不许无限重试。
+
+    修前的顺序是先删后开：删除一失败就 `本次不唤起`，于是「面板从没开过 + 每 2 秒
+    再撞一次删除」；修后开窗排在删除之前，删除失败只影响清理，不影响请求被满足。
+    这条断言盯的就是这个差别，顺带盯住重试收敛（同一请求只开一次窗，不抢焦点）。
+    """
+    print("\n== 面板请求消费失败 ==")
+    if not os.path.isfile(BAR_EXE) or bar_processes():
+        print("  （跳过：无产物或已有实例）")
+        return
+    req = os.path.join(ds.state_dir(), "panel.request")
+    if os.path.isfile(req):
+        os.remove(req)
+    check("消费失败测试前无残留请求", not os.path.exists(req), req)
+    log_offset = os.path.getsize(os.path.join(ds.state_dir(), "bar.log")) \
+        if os.path.isfile(os.path.join(ds.state_dir(), "bar.log")) else 0
+    before = python_pids()
+    proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
+    holder = 0
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 25 and not find_bar_windows():
+            time.sleep(0.4)
+        hwnds = find_bar_windows()
+        check("常驻实例已起（不带 --panel）", proc.poll() is None and bool(hwnds),
+              f"存活={proc.poll() is None} 状态栏窗口={hwnds}")
+        holder = 0
+        for _ in range(6):
+            # 写完再占是有一条毫秒级竞态的：watchdog 恰好在这一瞬读到请求就会把它消费掉，
+            # 于是 CreateFileW(OPEN_EXISTING) 失败。失败了就重写一遍，别把竞态留给门禁。
+            with open(req, "w", encoding="utf-8") as fh:
+                fh.write("about")
+            holder = lock_against_delete(req)
+            if holder and os.path.exists(req):
+                break
+            unlock(holder)
+            holder = 0
+            time.sleep(0.2)
+        if not check("请求文件已占成删不掉", holder != 0 and os.path.exists(req),
+                     "CreateFileW 占用失败，注入没成立"):
+            return
+        found, t1 = 0, time.time()
+        while time.time() - t1 < 25 and not (found := top_window("dsh 控制台")):
+            time.sleep(0.4)
+        check("删不掉请求文件时面板仍然打开（先开窗后删除，N2）", bool(found),
+              "删除排在开窗前面时，这条请求会被整个吞掉")
+        # 失败必须记账，但不能反复：只等第一条，再多看几轮确认没有第二条。
+        marker = "面板已打开但请求文件删不掉"
+        t2 = time.time()
+        while time.time() - t2 < 15 and marker not in log_tail(log_offset):
+            time.sleep(0.5)
+        tail = log_tail(log_offset)
+        check("消费失败走 Log 有记录（不抛异常）", marker in tail, tail[-200:] or "无新日志")
+        time.sleep(8)  # 再跑 4 轮 watchdog
+        tail2 = log_tail(log_offset)
+        check("同一请求只开一次窗，没有每 2 秒反复弹（重试已收敛）",
+              tail2.count(marker) == 1, f"命中 {tail2.count(marker)} 次")
+        check("开窗失败的请求不会被永久丢弃（文件仍在，等清理）",
+              os.path.exists(req), "请求文件不见了，下一轮没法重试")
+        check("消费失败后进程仍存活（N1）", proc.poll() is None, f"退出码 {proc.returncode}")
+        check("消费失败后状态栏仍在任务栏里（N1）", bool(find_bar_windows()),
+              "Shell_TrayWnd 里已经没有 DshBar 子窗口")
+        check("消费失败后面板仍可见", bool(top_window("dsh 控制台")), "面板跟着没了")
+        unlock(holder)
+        holder = 0
+        t3 = time.time()
+        while time.time() - t3 < 15 and os.path.exists(req):
+            time.sleep(0.5)
+        check("锁释放后残留请求被安静清理", not os.path.exists(req), req)
+        tail3 = log_tail(log_offset)
+        check("清理残留也记了一行", "已清理" in tail3, tail3[-200:] or "无新日志")
+        check("清理后进程仍存活", proc.poll() is None, f"退出码 {proc.returncode}")
+    finally:
+        if holder:
+            unlock(holder)  # 顺序不能反：先释放句柄，否则请求文件删不掉
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        deadline = time.time() + 20
+        while time.time() < deadline and (bar_processes() or python_pids() - before):
+            time.sleep(1)
+        if os.path.exists(req):
+            os.remove(req)  # 放弃路径只在能删时才删；测试自己不留垃圾给下一轮
+        check("消费失败测试后无残留",
+              not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
+              f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
+
+
 def check_gui() -> None:
     print("\n== 状态栏 GUI ==")
     if not os.path.isfile(BAR_EXE):
@@ -869,12 +1034,17 @@ def main() -> int:
         check_build()
     check_engine_copy()
     check_licenses()
+    # 纯读源码、无副作用，所以不放 --gui：默认那轮也要钉住「开窗委托体自带 try」
+    # 和「请求文件在开窗之后才删」这两条（外部没法让 PanelWindow 构造必然抛，
+    # 见 check_panel_request_guard 的注释）。
+    check_panel_request_guard()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
         panel_shots = check_panel_shell()
         check_gui()
         check_panel_window()
         check_panel_cold_open()
+        check_panel_request_containment()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")
 

@@ -40,6 +40,15 @@ namespace DshBar
         private static Rect _barRect;
         private static DateTime _hoverOut = DateTime.MinValue;
 
+        // ---- 面板请求的消费状态（见 TryConsumePanelRequest）----
+        // 请求文件改成「先开窗、开成了才删」，于是要回答「没删成要不要再来一次」：
+        // 无条件重试 = 每 2 秒弹一次面板抢焦点，所以按请求身份收敛。
+        private const int PanelOpenTries = 2;   // 同一条请求最多尝试开窗几次
+        private static string _reqStamp = "";   // 当前请求的身份：内容 + 写入时间 + 长度
+        private static int _reqTries;           // 该身份已尝试开窗的次数
+        private static bool _reqGivenUp;        // 该身份已放弃：不再开窗，只安静等文件可删时清掉
+        private static bool _reqQueued;         // 已排进 dispatcher、还没执行完（防重入）
+
         [STAThread]
         private static int Main(string[] args)
         {
@@ -146,10 +155,27 @@ namespace DshBar
             catch (Exception ex) { Log($"转交面板请求失败: {ex.Message}"); }
         }
 
-        static void OpenPanel(string page)
+        /// <summary>
+        /// 打开/唤起面板。返回 false 表示没开成，调用方据此决定要不要消费请求文件。
+        /// 这里必须自带 try：bar/ 里没有 DispatcherUnhandledException、Main 也没有外层 try，
+        /// 而 Task 3 之后这条路径第一次真的会 `new PanelWindow()`（XAML 加载、资源解析、
+        /// 首帧布局都可能抛）。让它逃出去的后果不是「面板打不开」，而是「常驻状态栏进程
+        /// 当场死亡、状态栏和托盘一起没」。三个调用点（watchdog 委托、--panel 启动、
+        /// 托盘菜单）都吃这个兜底。
+        /// </summary>
+        static bool OpenPanel(string page)
         {
-            if (_panel == null) _panel = new PanelWindow();
-            _panel.ShowOn(page);
+            try
+            {
+                if (_panel == null) _panel = new PanelWindow();
+                _panel.ShowOn(page);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"打开面板失败: {ex.GetType().Name} {ex.Message}");
+                return false;
+            }
         }
 
         static PanelWindow _panel;
@@ -451,36 +477,112 @@ namespace DshBar
                 _tray.Text = TooltipFor(_last);
 
                 // 第二个实例只写一个请求文件就退出，由这里（已在 UI 线程的消息循环里）唤起面板。
-                // 读失败就不删也不唤起，删失败就不唤起：留下文件让下一轮重试，
-                // 免得请求被吞掉，也免得同一请求被反复触发。
+                // 读失败就不唤起；开窗失败也不删文件 —— 请求留给下一轮重试，别把用户的点击吞掉。
+                // 重试按 PanelOpenTries 收敛，删除挪到了开窗成功之后，理由都写在 TryConsumePanelRequest 上。
                 var req = PanelRequestFile;
-                if (File.Exists(req))
+                if (File.Exists(req) && !_reqQueued)
                 {
                     string page = null;
                     try { page = File.ReadAllText(req).Trim(); }
                     catch (Exception ex) { Log($"读取面板请求失败，下一轮重试: {ex.Message}"); }
-                    if (page != null)
-                    {
-                        try { File.Delete(req); }
-                        catch (Exception ex)
-                        {
-                            Log($"删除面板请求失败，本次不唤起: {ex.Message}");
-                            page = null;
-                        }
-                    }
-                    if (page != null)
-                    {
-                        string target = string.IsNullOrEmpty(page) ? "overview" : page;
-                        // 走 OpenPanel 而不是 PanelWindow.Instance?.ShowOn：常驻实例通常是普通
-                        // DshBar.exe 起的，面板压根没创建过，Instance 一直是 null，
-                        // 那时 ShowOn 的调用会被 ?. 静默吃掉 —— 请求删了、窗口却没开。
-                        _window.Dispatcher.BeginInvoke(new Action(() => OpenPanel(target)));
-                    }
+                    if (page != null) TryConsumePanelRequest(req, page);
                 }
             }
             catch (Exception ex)
             {
                 Log($"watchdog 异常: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 面板请求的消费状态机。请求身份 = 文件内容 + 写入时间 + 长度，所以重试预算是按
+        /// 「这一条请求」算的：用户再点一次会写一个新时间戳，预算随之重置，不会被上一条顶掉。
+        /// 收敛条件（两条，各自兜一种病）：
+        ///   开窗失败 → 文件保留，同一请求最多试 PanelOpenTries=2 次；预算用完就记一条日志
+        ///     并把文件删掉。之所以不是「永远留着」：面板构造失败通常是确定性的（XAML/资源/
+        ///     首帧布局），无限重试只是每 2 秒白抢一次焦点；而永久留在磁盘上的请求会让每次
+        ///     启动状态栏都重放一遍同一场失败。2 次足够覆盖瞬时故障（例如首帧布局撞上的
+        ///     一次性资源紧张），第 2 次仍失败就该认输、记账、让用户再点一次。
+        ///   开窗成功但删除失败 → 请求其实已经满足了，直接标记放弃，之后每轮只安静地试着删，
+        ///     删得掉就清掉残留并记一行；绝不再次开窗，否则就是每 2 秒把面板弹到前台。
+        /// </summary>
+        private static void TryConsumePanelRequest(string req, string page)
+        {
+            string stamp = page + "|" + RequestStamp(req);
+            if (stamp != _reqStamp)
+            {
+                _reqStamp = stamp;
+                _reqTries = 0;
+                _reqGivenUp = false;
+            }
+            if (_reqGivenUp)
+            {
+                if (TryDeleteRequest(req)) Log("此前删不掉的面板请求文件已清理");
+                return;
+            }
+            if (_reqTries >= PanelOpenTries)
+            {
+                Log($"面板请求连续 {_reqTries} 次没能打开面板，放弃这条请求（再点一次会写新请求）");
+                _reqGivenUp = true;
+                TryDeleteRequest(req);
+                return;
+            }
+            _reqTries++;
+            _reqQueued = true;
+            string target = string.IsNullOrEmpty(page) ? "overview" : page;
+            // 走 OpenPanel 而不是 PanelWindow.Instance?.ShowOn：常驻实例通常是普通
+            // DshBar.exe 起的，面板压根没创建过，Instance 一直是 null，
+            // 那时 ShowOn 的调用会被 ?. 静默吃掉 —— 请求删了、窗口却没开。
+            // 开窗排到下一个 dispatcher 轮，本轮 Tick 的 try 罩不到委托体，
+            // 所以委托体必须自带 try（N1）：面板打不开只该是打不开，不该带走状态栏。
+            _window.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    if (!OpenPanel(target)) return;   // 异常已在 OpenPanel 里记录，文件留给下一轮
+                    if (!TryDeleteRequest(req))
+                    {
+                        Log($"面板已打开但请求文件删不掉，之后只清理不再重开: {req}");
+                        _reqGivenUp = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"面板请求开窗委托异常: {ex.GetType().Name} {ex.Message}");
+                }
+                finally
+                {
+                    _reqQueued = false;
+                }
+            }));
+        }
+
+        /// <summary>请求身份的一部分。元数据读不到就返回 "?"，宁可少一次重试也不丢请求。</summary>
+        private static string RequestStamp(string req)
+        {
+            try
+            {
+                var info = new FileInfo(req);
+                return info.LastWriteTimeUtc.Ticks.ToString("x") + "|" + info.Length;
+            }
+            catch
+            {
+                return "?";
+            }
+        }
+
+        /// <summary>删请求文件。成功时顺手把身份清空，让下一条同内容请求也能重新计预算。</summary>
+        private static bool TryDeleteRequest(string req)
+        {
+            try
+            {
+                File.Delete(req);
+                _reqStamp = "";
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
