@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+import winreg
 
 if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -1222,6 +1223,780 @@ def check_panel_row_data(empty_base: dict | None) -> None:
               f"样本不全：3 行={st3 is not None} 29 行={st29 is not None} 视口={viewport}")
 
 
+# ---------------------------------------------------------------- Task 6：通知页 / 运行页
+#
+# 这两页的可观察面分两类，各自挑了能真的红的判据：
+#   ① 离屏（--panel-shot）—— 页面画没画出真控件、设置值有没有被**画回控件上**；
+#   ② 真窗口 + UIA —— 改设置到底生没生效：不弹通知、重复提醒、重启引擎、写注册表、开目录。
+# ②为什么走 UIA 而不是鼠标：本探测环境有前台锁（`SetForegroundWindow` 与
+# `AttachThreadInput` 都返回 0，见 task-5-report.md §10.1），真点击要抢前台；
+# UIA 的 Toggle/Invoke/Value 模式不经前台、不打全局输入，是这里唯一能把「面板里改一下」
+# 这条路真走通的通路（Task 5 §12 记的「ToggleSwitch 点击通路未验」也由它补上）。
+# 通路本身是 Windows 自带的 UIAutomationClient + powershell.exe，不引入任何第三方包。
+
+UIA_DRIVER_PS = r'''
+param([Int64]$Hwnd, [string]$Action = 'count', [string]$Name = '', [int]$Index = 0, [string]$Value = '')
+$ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+function Pat($e, $t) { $o = $null; if ($e.TryGetCurrentPattern($t, [ref]$o)) { return $o } return $null }
+$PTog = [System.Windows.Automation.TogglePattern]::Pattern
+$PInv = [System.Windows.Automation.InvokePattern]::Pattern
+$PVal = [System.Windows.Automation.ValuePattern]::Pattern
+$PScr = [System.Windows.Automation.ScrollPattern]::Pattern
+$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Hwnd)
+if ($null -eq $root) { Write-Output 'ERR=NOROOT'; exit 3 }
+$rx = $root.Current.BoundingRectangle.X
+$all = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+                       [System.Windows.Automation.Condition]::TrueCondition))
+Write-Output ("COUNT=" + $all.Count)
+$toggles = @($all | Where-Object { $null -ne (Pat $_ $PTog) })
+$edits   = @($all | Where-Object { $_.Current.ClassName -eq 'TextBox' })
+$spins   = @($all | Where-Object { $_.Current.ClassName -eq 'RepeatButton' })
+# 页面自带的那个 ScrollViewer 在内容列里；侧栏 ListBox 模板里若也藏一个，不能算在页面头上。
+$scrolls = @($all | Where-Object { $_.Current.ClassName -eq 'ScrollViewer' -and
+                                   ($_.Current.BoundingRectangle.X - $rx) -gt 200 })
+$buttons = @($all | Where-Object { $_.Current.ClassName -eq 'Button' -and $_.Current.Name -ne '' -and
+                                   $null -ne (Pat $_ $PInv) })
+# 数字框自己的加减档：中心落在那个编辑框矩形里的那两颗。
+# 整页滚动条也是 RepeatButton（Name 是 CaretUp24/CaretDown24 加一颗翻页键），
+# 窗口收窄时它就贴着数字框右沿，只按「在不在数字框左边」分不开 —— 按中心点算才稳。
+function BoxSpins($box) {
+  if ($null -eq $box) { return @() }
+  $b = $box.Current.BoundingRectangle
+  return @($spins | Where-Object {
+      $r = $_.Current.BoundingRectangle
+      $cx = $r.X + $r.Width / 2; $cy = $r.Y + $r.Height / 2
+      $cx -ge $b.X -and $cx -le ($b.X + $b.Width) -and $cy -ge $b.Y -and $cy -le ($b.Y + $b.Height) })
+}
+Write-Output ("TOGGLES=" + $toggles.Count)
+Write-Output ("EDITS=" + $edits.Count)
+Write-Output ("SPINS=" + $spins.Count)
+Write-Output ("BOXSPINS=" + (BoxSpins $edits[0]).Count)
+Write-Output ("SCROLLERS=" + $scrolls.Count)
+$names = @($buttons | ForEach-Object { $_.Current.Name })
+Write-Output ("BUTTONS=" + ($names -join '|'))
+switch ($Action) {
+  'count' { }
+  'text' {
+    foreach ($e in $all) {
+      $n = $e.Current.Name
+      if ($n -ne '' -and ($Name -eq '' -or $n.Contains($Name))) { Write-Output ("TEXT=" + $n) }
+    }
+  }
+  'togstate' {
+    if ($Index -ge $toggles.Count) { Write-Output 'ERR=NOTOGGLE'; exit 4 }
+    Write-Output ("STATE=" + (Pat $toggles[$Index] $PTog).Current.ToggleState)
+  }
+  'toggle' {
+    if ($Index -ge $toggles.Count) { Write-Output 'ERR=NOTOGGLE'; exit 4 }
+    $t = Pat $toggles[$Index] $PTog
+    Write-Output ("BEFORE=" + $t.Current.ToggleState)
+    $t.Toggle()
+    Start-Sleep -Milliseconds 600
+    Write-Output ("AFTER=" + $t.Current.ToggleState)
+  }
+  'step' {
+    # -Index = 第几个数字框（按文档序），-Value = up（默认）/ down
+    if ($Index -ge $edits.Count) { Write-Output 'ERR=NOEDIT'; exit 4 }
+    $near = BoxSpins $edits[$Index]
+    $pick = 0
+    if ($Value -eq 'down') { $pick = 1 }
+    if ($near.Count -le $pick) { Write-Output 'ERR=NOSPIN'; exit 5 }
+    (Pat $near[$pick] $PInv).Invoke()
+    Write-Output ("STEPPED=" + $near.Count)
+    Start-Sleep -Milliseconds 600
+  }
+  'invoke' {
+    $hit = @($buttons | Where-Object { $_.Current.Name -eq $Name })
+    if ($hit.Count -eq 0) { Write-Output 'ERR=NOBUTTON'; exit 4 }
+    (Pat $hit[0] $PInv).Invoke()
+    Write-Output ("INVOKED=" + $Name)
+    Start-Sleep -Milliseconds 800
+  }
+  'value' {
+    if ($Index -ge $edits.Count) { Write-Output 'ERR=NOEDIT'; exit 4 }
+    Write-Output ("VALUE=" + (Pat $edits[$Index] $PVal).Current.Value)
+  }
+  'scroll' {
+    if ($scrolls.Count -eq 0) { Write-Output 'ERR=NOSCROLL'; exit 4 }
+    $s = Pat $scrolls[0] $PScr
+    if ($null -eq $s) { Write-Output 'ERR=NOSCROLLPATTERN'; exit 5 }
+    Write-Output ("VSCROLLABLE=" + $s.Current.VerticallyScrollable)
+    Write-Output ("EXTENT=" + [int]$s.Current.ExtentHeight)
+    Write-Output ("VIEWPORT=" + [int]$s.Current.ViewportHeight)
+    Write-Output ("PCT=" + [int]$s.Current.VerticalPercent)
+    if ($Value -eq 'down') {
+      $s.SetScrollPercent(-1, 100)
+      Start-Sleep -Milliseconds 800
+      Write-Output ("PCT2=" + [int]$s.Current.VerticalPercent)
+    }
+    if ($Value -eq 'up') {
+      $s.SetScrollPercent(-1, 0)
+      Start-Sleep -Milliseconds 800
+      Write-Output ("PCT0=" + [int]$s.Current.VerticalPercent)
+    }
+  }
+  default { Write-Output 'ERR=BADACTION'; exit 6 }
+}
+'''
+
+
+def uia_script() -> str | None:
+    """把 UIA 驱动脚本落到 %TEMP%（不进仓库）。
+
+    必须是 UTF-8 **带 BOM**：Windows PowerShell 5.1 把无 BOM 的 .ps1 按 ANSI 读，
+    脚本里的中文匹配串（按钮名）会先被读坏 —— 本机实测过。
+    """
+    d = os.environ.get("TEMP") or ds.state_dir()
+    p = os.path.join(d, "dsh-panel-uia-driver.ps1")
+    try:
+        with open(p, "w", encoding="utf-8-sig", newline="\r\n") as fh:
+            fh.write(UIA_DRIVER_PS.lstrip("\n"))
+        return p
+    except OSError:
+        return None
+
+
+def uia(hwnd: int, action: str, name: str = "", index: int = 0,
+        value: str = "") -> dict[str, list[str]]:
+    """跑一次 UIA 驱动，把 `KEY=值` 收成 dict（同名可多条）。
+
+    powershell 起不来 / 超时 / 没输出都归成 {'ERR': [...]}：调用处记 ✗，
+    不让一次 traceback 把整轮冒烟带崩（与 run_shot 同一口径）。
+    """
+    ps = uia_script()
+    if ps is None:
+        return {"ERR": ["UIA 驱动脚本写不出来（%TEMP% 不可写？）"]}
+    try:
+        r = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps,
+             "-Hwnd", str(hwnd), "-Action", action, "-Name", name, "-Index", str(index),
+             "-Value", value],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return {"ERR": [f"{type(ex).__name__}: {ex}"]}
+    out: dict[str, list[str]] = {}
+    for line in (r.stdout or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out.setdefault(k.strip(), []).append(v)
+    if not out:
+        out["ERR"] = [f"powershell 退出码 {r.returncode}：{(r.stderr or '')[-200:]}"]
+    return out
+
+
+def uia_ok(res: dict[str, list[str]]) -> bool:
+    return "ERR" not in res
+
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "dsh-status"
+
+
+def reg_run_value() -> str | None:
+    """HKCU\\...\\Run 里 dsh-status 的当前值；没有这一项（或读不到）都给 None。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            v, _ = winreg.QueryValueEx(k, RUN_VALUE)
+        return str(v)
+    except OSError:
+        return None
+
+
+def reg_run_write(val: str | None) -> None:
+    """把 Run 项还原成给定值（None = 删掉）。测试收尾用它归还用户原状。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if val is None:
+                winreg.DeleteValue(k, RUN_VALUE)
+            else:
+                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, val)
+    except OSError:
+        pass
+
+
+def list_top_windows() -> list[tuple[int, str, str]]:
+    """可见的顶层窗口 (hwnd, 类名, 标题)。「打开目录/日志」两个按钮用前后差集归因。"""
+    u = _user32()
+    hits: list[tuple[int, str, str]] = []
+    proto = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def cb(h, _l):
+        if not u.IsWindowVisible(h):
+            return True
+        n = u.GetWindowTextLengthW(h)
+        if not n:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        u.GetWindowTextW(h, buf, n + 1)
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetClassNameW(h, cls, 256)
+        hits.append((h, cls.value, buf.value))
+        return True
+
+    u.EnumWindows(proto(cb), 0)
+    return hits
+
+
+def write_settings(**fields) -> None:
+    """按 Settings 的五字段契约写一份完整的 settings.json（备份还原归调用处）。"""
+    base = {"interval": 2, "notify": True, "repeatSec": 90, "theme": "light", "showBar": True}
+    base.update(fields)
+    with open(os.path.join(ds.state_dir(), "settings.json"), "w", encoding="utf-8") as fh:
+        json.dump(base, fh)
+
+
+def shot_fp(page: str, tag: str) -> tuple[str, int, int]:
+    """出一张离屏图，返回（画面指纹, 色数, 不透明像素数）；PNG 看完就删，不留档。
+
+    指纹取的是解码后的 RGBA 字节（不是 PNG 文件字节）：两张图只要有一个像素不同就算不同。
+    """
+    out = os.path.join(ds.state_dir(), f"t6-{tag}.png")
+    if os.path.isfile(out):
+        os.remove(out)
+    p = run_shot(page, out)
+    if p is None:
+        check(f"{tag}：--panel-shot {page}", False, "120 秒没返回（离屏渲染卡死）")
+        return "", -1, -1
+    head = ((p.stdout or "").strip().splitlines() or [""])[0]
+    got = read_png_rgba(out)
+    if os.path.isfile(out):
+        os.remove(out)
+    if got is None:
+        check(f"{tag}：离屏 PNG 可读", False, f"{out} 解不出来，首行 {head!r}")
+        return "", -1, -1
+    w, h, buf = got
+    opaque = sum(1 for i in range(3, len(buf), 4) if buf[i] == 255)
+    return hashlib.md5(buf).hexdigest(), shot_dims(head)[2], opaque
+
+
+def fake_static_engine_source(ok: bool = True) -> str:
+    """一帧**定死**的快照（age_sec / label 都不随时间变），给「两张图只差一个设置项」的比对用。
+
+    为什么不用真引擎：运行页的阈值那一行跟着快照走（静默秒数每帧都在涨），
+    拿真引擎连出两张图必然不同 —— 那条门禁就退化成「什么都不断言」的摆设。
+    ok=False 出的是 `{"ok": false}`：反序列化后 Snapshot.Ok 为 false，
+    页面走「还没有可用快照」那一支（与面板在第一帧之前打开是同一条路）。
+    """
+    if not ok:
+        return 'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-static"}\\n\')\n'
+    return (
+        'import json, sys\n'
+        'frame = json.dumps({"ok": True, "app_running": True, "state": "idle",\n'
+        '    "label": "定格冒烟", "glyph": "·", "color": "#6B7280", "strip_left": "定格冒烟",\n'
+        '    "strip_right": "--", "tooltip": "定格冒烟", "tip_lines": ["定格冒烟"],\n'
+        '    "session": {"project": "定格项目", "title": "t", "state": "idle", "turn": 7,\n'
+        '        "step": 1, "age_sec": 42.0, "last_tool": "edit", "pending": None,\n'
+        '        "todo": None, "error": None},\n'
+        '    "balance": None, "waiting": [], "recent": [], "sessions_scanned": 3,\n'
+        '    "sessions": [\n'
+        '        {"key": "s%d" % i, "project": "proj-%d" % i, "title": "会话 %d" % i,\n'
+        '         "state": "idle", "turn": i, "step": i, "age_sec": 60.0 + i,\n'
+        '         "last_event": "result", "last_tool": "tool%d" % i, "end_reason": "success",\n'
+        '         "records": i, "todo": None, "usage_total": None, "pending": None}\n'
+        '        for i in range(3)]}, ensure_ascii=False)\n'
+        'sys.stdout.write(frame + "\\n")\n')
+
+
+def fake_action_engine_source(state: str = "needs_action", every: float = 0.5) -> str:
+    """持续吐**同一个状态**的帧，但 age_sec 每帧 +1 —— 那个涨法就是「帧还在进来」的证据。
+
+    通知/重复提醒的门禁全都需要一个「不然就是引擎压根没出帧」的反证，
+    而 age_sec 会原样出现在运行页阈值那一行的文字里（`静默 N 秒`），
+    所以读一次 UIA 文本就知道帧有没有在流，不用去猜、也不用抢前台。
+    --json 出一帧即退（`App.LoadOneShotSnapshot` 会 WaitForExit），--watch 才循环。
+    """
+    return (
+        'import json, sys, time\n'
+        'def frame(i):\n'
+        '    return json.dumps({\n'
+        '        "ok": True, "app_running": True, "state": "%s",\n'
+        '        "label": "等你操作", "glyph": "?", "color": "#D97706",\n'
+        '        "strip_left": "等你操作", "strip_right": "--",\n'
+        '        "tooltip": "冒烟：等你操作", "tip_lines": ["冒烟：等你操作"],\n'
+        '        "session": {"project": "冒烟项目", "title": "t", "state": "%s",\n'
+        '            "turn": 1, "step": 1, "age_sec": 3.0 + i, "last_tool": "ask_user_question",\n'
+        '            "pending": {"kind": "question", "tool": "ask_user_question",\n'
+        '                "text": "要不要先只改固件那套？", "options": ["只改固件"]},\n'
+        '            "todo": None, "error": None},\n'
+        '        "balance": None, "waiting": [], "recent": [], "sessions_scanned": 1,\n'
+        '        "sessions": []}, ensure_ascii=False)\n'
+        'if "--watch" not in sys.argv:\n'
+        '    sys.stdout.write(frame(0) + "\\n")\n'
+        '    sys.exit(0)\n'
+        'try:\n'
+        '    for i in range(1200):\n'
+        '        sys.stdout.write(frame(i) + "\\n")\n'
+        '        sys.stdout.flush()\n'
+        '        time.sleep(%s)\n'
+        'except (BrokenPipeError, ValueError, OSError):\n'
+        '    pass\n') % (state, state, every)
+
+
+def engine_swap(source: str) -> bytes | None:
+    """把编译产物里的引擎拷贝换成 source，返回原字节（没换成功返回 None）。
+
+    与 shot_with_fake_engine 同一注入点（bin 下那份 dsh_state.py），
+    但那段是一次性出图、这一段要**跨多次出图**保持注入状态，所以分开写，
+    生产代码里因此仍然没有任何测试钩子。还原必须放在 finally。
+    """
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not (os.path.isfile(BAR_EXE) and os.path.isfile(eng)):
+        return None
+    with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
+        real = fh.read()
+    with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(source)
+    return real
+
+
+def engine_restore(real: bytes) -> bool:
+    """按仓库根字节还原产物里的引擎拷贝。"""
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    with open(eng, "wb") as fh:
+        fh.write(real)
+    return open(eng, "rb").read() == real
+
+
+def check_pages_filled() -> None:
+    """Task 6 离屏面：两页画了真控件，且**设置值被画回控件上**（setting → UI 那一半）。
+
+    占位页的形状是「一行标题 + 整页透明」，实测 7 色 / 0 不透明像素 —— 那两条地板值
+    就是「填实没有」的分界（与 Task 5 给 appearance 定的口径同源）。
+    另一半（UI → setting，改了到底生不生效）在 check_panel_settings_live() 的真窗口段。
+    """
+    print("\n== 通知页与运行页（离屏） ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    f = os.path.join(ds.state_dir(), "settings.json")
+    backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
+    reg_had = reg_run_value()
+    real = engine_swap(fake_static_engine_source(True))
+    if not check("离屏门禁的引擎注入点就位（定死一帧，两张图只差被测的那个设置项）",
+                 real is not None, "bin 下没有 dsh_state.py 拷贝，注入无从下手"):
+        return
+    try:
+        # ① 画没画出真控件
+        write_settings(interval=2, notify=True, repeatSec=90, theme="light", showBar=True)
+        fp_n_on, c_n, o_n = shot_fp("notify", "notify-on")
+        check("notify 页已画出真实控件（离屏色数 > 20，占位页实测 7）", c_n > 20,
+              f"色数 {c_n}、不透明 {o_n}")
+        check("notify 页不再是透明占位（不透明像素 > 0）", o_n > 0, f"不透明像素 {o_n}")
+        fp_r_a, c_r, o_r = shot_fp("runtime", "runtime-a")
+        check("runtime 页已画出真实控件（离屏色数 > 20，占位页实测 7）", c_r > 20,
+              f"色数 {c_r}、不透明 {o_r}")
+        check("runtime 页不再是透明占位（不透明像素 > 0）", o_r > 0, f"不透明像素 {o_r}")
+
+        # ② 设置值有没有被画回控件：换掉那一项，画面必须跟着换
+        write_settings(notify=False)
+        fp_n_off, _, _ = shot_fp("notify", "notify-off")
+        check("notify 开关把设置画出来了（notify=true / false 两张离屏图不同）",
+            bool(fp_n_on) and fp_n_on != fp_n_off,
+              f"两张指纹 {'相同' if fp_n_on == fp_n_off else '不同'}"
+              f"（{fp_n_on[:8]}/{fp_n_off[:8]}）：相同就是开关压根没读 cfg.Notify")
+        write_settings(repeatSec=33)
+        fp_n_33, _, _ = shot_fp("notify", "notify-33")
+        check("repeatSec 数字框显示的是设置值（33 / 90 两张离屏图不同）",
+              bool(fp_n_33) and fp_n_33 != fp_n_on,
+              f"90→{fp_n_on[:8]}、33→{fp_n_33[:8]}")
+        write_settings(interval=7)
+        fp_r_7, _, _ = shot_fp("runtime", "runtime-int7")
+        check("interval 数字框显示的是设置值（2 / 7 两张离屏图不同）",
+              bool(fp_r_7) and fp_r_7 != fp_r_a,
+              f"2→{fp_r_a[:8]}、7→{fp_r_7[:8]}")
+
+        # ③ 阈值那一行是跟着快照走的（不是构造时写死的一行字）
+        with open(os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(fake_static_engine_source(False))
+        write_settings(interval=2, notify=True, repeatSec=90)
+        fp_r_no, _, _ = shot_fp("runtime", "runtime-nosnap")
+        fp_n_no, _, _ = shot_fp("notify", "notify-nosnap")
+        check("runtime 页的阈值行跟着快照变（有帧 / 无帧两张离屏图不同）",
+              bool(fp_r_no) and fp_r_no != fp_r_a,
+              f"有帧 {fp_r_a[:8]} vs 无帧 {fp_r_no[:8]}：相同就是那一行没接 Refresh")
+        check("对照：notify 页不含快照相关内容（换掉快照两张仍一致，差别不来自随机性）",
+              bool(fp_n_no) and fp_n_no == fp_n_on,
+              f"notify 有帧 {fp_n_on[:8]} vs 无帧 {fp_n_no[:8]}：不同说明离屏出图本身不稳定，"
+              "上面那几条「两张不同」就都不作数了")
+
+        # ④ 开机自启那一格读的是注册表现状，不是 settings.json
+        reg_run_write(f'"{BAR_EXE}"')
+        fp_r_reg, _, _ = shot_fp("runtime", "runtime-reg-on")
+        check("开机自启开关反映注册表现状（Run 项在 / 不在 两张离屏图不同）",
+              bool(fp_r_reg) and fp_r_reg != fp_r_a,
+              f"Run 不在 {fp_r_a[:8]} vs 在 {fp_r_reg[:8]}：相同就是没读 AutostartOn()")
+    finally:
+        ok = engine_restore(real)
+        check("离屏注入的引擎拷贝已按仓库根还原", ok, os.path.dirname(BAR_EXE))
+        reg_run_write(reg_had)
+        check("离屏场景的注册表 Run 项已还原到用户原状", reg_run_value() == reg_had,
+              f"现在是 {reg_run_value()!r}，用户原状 {reg_had!r}")
+        if backup is None:
+            if os.path.isfile(f):
+                os.remove(f)
+        else:
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(backup)
+        for tag in ("notify-on", "notify-off", "notify-33", "runtime-a", "runtime-int7",
+                    "runtime-nosnap", "notify-nosnap", "runtime-reg-on"):
+            p = os.path.join(ds.state_dir(), f"t6-{tag}.png")
+            if os.path.isfile(p):
+                os.remove(p)
+
+
+def engine_pid_after(tail: str) -> int | None:
+    """日志里最后一条「引擎已启动 PID=…」的 PID；没有给 None。
+
+    它是「换过引擎进程」的唯一外部凭据：interval 改值与手动重启都该让它变，
+    而 repeatSec / notify 这两项热生效项**不该**让它变 —— 同一条判据两边用。
+    """
+    pids = re.findall(r"引擎已启动 PID=(\d+)", tail)
+    return int(pids[-1]) if pids else None
+
+
+def thresholds_age(texts: list[str]) -> float | None:
+    """从运行页阈值那一行的文字里取出「静默 N 秒」。
+
+    那一行是 `当前判定：<label>｜会话 P｜静默 42 秒｜本次扫描 3 个会话`，
+    静默秒数直接来自引擎那一帧的 age_sec，所以它是「帧还在进来」最省事的凭据。
+    """
+    for t in texts:
+        m = re.search(r"静默\s*(\d+(?:\.\d+)?)\s*秒", t)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def close_windows(hwnds: list[int]) -> None:
+    """只关测试自己开出来的那几扇窗口（定向 WM_CLOSE，不动别家的窗口）。"""
+    u = _user32()
+    for h in hwnds:
+        u.PostMessageW(h, 0x0010, 0, 0)  # WM_CLOSE
+
+
+def wait_new_windows(base: set[tuple[int, str]], key: str, limit: float = 12.0
+                     ) -> list[tuple[int, str]]:
+    """等「标题里含 key 的新窗口」出现；返回 (hwnd, 标题) 列表，只含 base 里没有的那些。"""
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        fresh = [(h, t) for h, _c, t in list_top_windows() if (h, t) not in base and key in t]
+        if fresh:
+            return fresh
+        time.sleep(0.5)
+    return []
+
+
+def check_panel_settings_live() -> None:
+    """Task 6 真窗口面：面板里改的东西**到底生效没有**，全走 UIA（不经前台）。
+
+    为什么必须真点：spec §6 的生效矩阵（notify/repeatSec 热生效、interval 重启生效）
+    说的就是「面板里改完」那一刻之后的行为，只看 settings.json 变了不算数 ——
+    文件是 App.SaveSettings() 写的，而消费方读的是内存里那个 Settings 单例，
+    两者可以完全脱节（写盘了但没改内存，或改了内存没落盘）。
+    本环境有前台锁（task-5-report.md §10.1），真点击要抢前台，所以驱动通路选
+    Windows 自带的 UIAutomation：Toggle / Invoke / Value 三种模式都不需要窗口在前台，
+    也不往系统输入队列里打任何东西。
+
+    引擎用注入的假引擎（needs_action 持续吐帧、age_sec 每帧 +1），
+    于是「有没有弹通知」「帧还在不在流」「引擎进程换没换」三件事全都有外部凭据：
+      · 通知 → bar.log 里的「通知 […]」行（App.Balloon 真ShowBalloonTip 之后才记）；
+      · 帧在流 → 运行页阈值行里的静默秒数在涨；
+      · 进程换没换 → 日志里「引擎已启动 PID=…」。
+    """
+    print("\n== 通知页与运行页（真窗口 + UIA） ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    req = os.path.join(ds.state_dir(), "panel.request")
+    if os.path.isfile(req):
+        os.remove(req)
+    log_path = os.path.join(ds.state_dir(), "bar.log")
+    f = os.path.join(ds.state_dir(), "settings.json")
+    backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
+    reg_had = reg_run_value()
+    before_pids = python_pids()
+    real = engine_swap(fake_action_engine_source("needs_action"))
+    if not check("真窗口段的引擎注入点就位（needs_action 持续吐帧）", real is not None,
+                 "bin 下没有 dsh_state.py 拷贝"):
+        return
+    opened: list[int] = []
+    try:
+        write_settings(interval=2, notify=True, repeatSec=0, theme="light", showBar=True)
+        log_off = os.path.getsize(log_path) if os.path.isfile(log_path) else 0
+        subprocess.Popen([BAR_EXE, "--panel", "runtime"], cwd=os.path.dirname(BAR_EXE))
+        hwnd, t0 = 0, time.time()
+        while time.time() - t0 < 25:
+            hwnd = top_window("dsh 控制台")
+            if hwnd:
+                break
+            time.sleep(0.4)
+        if not check("真窗口：面板开在运行页", bool(hwnd), "找不到标题为 dsh 控制台 的顶层窗口"):
+            return
+        res = uia(hwnd, "count")
+        # 这条只钉「通路本身能用」（占位页也能枚举出 15 个元素，所以不拿元素数当门槛）：
+        # 通路红 = 环境问题，后面每一条都是它的下游；页面填没填实由下面那些判据各自红。
+        if not check("UIA 驱动通路可用（面板控件树枚举得出来）",
+                     uia_ok(res) and len(res.get("COUNT", [])) == 1
+                     and int(res["COUNT"][0]) >= 1,
+                     f"{res.get('ERR') or res.get('COUNT')}"):
+            return
+
+        def cnt(k: str) -> int:
+            return int((res.get(k) or ["0"])[0])
+
+        check("运行页控件齐：数字框 1 / 数字框自带加减档 2 / 动作按钮 3 / 开关 1",
+              cnt("EDITS") == 1 and cnt("BOXSPINS") == 2 and cnt("TOGGLES") == 1
+              and sorted((res.get("BUTTONS") or [""])[0].split("|")) ==
+                  sorted(["重启检测进程", "打开日志", "打开数据目录"]),
+              f"EDITS={cnt('EDITS')} BOXSPINS={cnt('BOXSPINS')} TOGGLES={cnt('TOGGLES')} "
+              f"BUTTONS={(res.get('BUTTONS') or [''])[0]!r}")
+        check("运行页自带整页滚动容器（页内有 ScrollViewer，外壳不再代劳）",
+              cnt("SCROLLERS") >= 1, f"内容列里的 ScrollViewer 数 = {cnt('SCROLLERS')}")
+
+        # —— 阈值只读行：跟着快照走，不是构造时写死的一行字 ——
+        t1 = uia(hwnd, "text", name="当前判定")
+        a1 = thresholds_age(t1.get("TEXT", []))
+        time.sleep(3.0)
+        t2 = uia(hwnd, "text", name="当前判定")
+        a2 = thresholds_age(t2.get("TEXT", []))
+        check("阈值只读行跟着快照走（静默秒数在涨，且带的是引擎那一帧的状态标签）",
+              a1 is not None and a2 is not None and a2 > a1
+              and any("等你操作" in x for x in t2.get("TEXT", [])),
+              f"静默 {a1}→{a2} 秒，文本 {t2.get('TEXT') or t1.get('TEXT')}")
+        print(f"  阈值行现场：{(t2.get('TEXT') or t1.get('TEXT') or ['—'])[0]!r}"
+              f"（静默 {a1}→{a2} 秒）")
+
+        # —— interval：改值 → 引擎进程重启（spec §6 的「重启生效」那一支）——
+        tail = log_tail(log_off)
+        pid0 = engine_pid_after(tail)
+        uia(hwnd, "step", index=0)
+        time.sleep(1.5)
+        tail = log_tail(log_off)
+        pid1 = engine_pid_after(tail)
+        got_interval = (json.loads(open(f, encoding="utf-8").read()).get("interval")
+                        if os.path.isfile(f) else None)
+        check("interval 步进一档真的写进了设置（settings.json 的 interval 变了）",
+              got_interval == 3, f"现在是 {got_interval}（步进前 2）")
+        check("interval 改值后日志出现新的「引擎已启动 PID=…」（重启生效，不是只改了文件）",
+              pid0 is not None and pid1 is not None and pid1 != pid0,
+              f"PID {pid0} → {pid1}；日志尾部 {tail[-200:]!r}")
+
+        # —— 手动重启按钮 ——
+        uia(hwnd, "invoke", name="重启检测进程")
+        time.sleep(1.5)
+        tail = log_tail(log_off)
+        pid2 = engine_pid_after(tail)
+        check("「重启检测进程」按钮真的又重启了一次（PID 再次变化）",
+              pid2 is not None and pid2 != pid1, f"PID {pid1} → {pid2}")
+        print(f"  引擎 PID：{pid0} →（interval 2→{got_interval}）{pid1} →（手动重启）{pid2}")
+
+        # —— 开机自启：注册表，测完还原用户原状 ——
+        uia(hwnd, "toggle", index=0)
+        time.sleep(0.8)
+        reg_on = reg_run_value()
+        check("开机自启开关真的写了 HKCU\\...\\Run（值就是当前这个 exe 的路径）",
+              reg_on == f'"{BAR_EXE}"', f"注册表里是 {reg_on!r}")
+        uia(hwnd, "toggle", index=0)
+        time.sleep(0.8)
+        # 要求「刚才确实写进去过」再要求现在没了：只钉「关」这一半的话，
+        # 占位页（一次都没写）也会因为「本来就没有」而假绿。
+        check("再关一次真的把该项删掉（不是「本来就没有」）",
+              reg_on == f'"{BAR_EXE}"' and reg_run_value() is None,
+              f"开的时候 {reg_on!r}，关之后 {reg_run_value()!r}")
+        print(f"  注册表 Run\\dsh-status：开={reg_on!r} → 关={reg_run_value()!r}"
+              f"（用户原状 {reg_had!r}）")
+
+        # —— 两个目录入口：真的开了窗口，测试只关自己开出来的那几扇 ——
+        base = {(h, t) for h, _c, t in list_top_windows()}
+        uia(hwnd, "invoke", name="打开数据目录")
+        fresh = wait_new_windows(base, "dsh-status")
+        opened += [h for h, _t in fresh]
+        check("「打开数据目录」真的开了那个目录（新窗口标题里有数据目录名）",
+              bool(fresh), f"数据目录 {os.path.basename(ds.state_dir())}，新窗口 {fresh}")
+        print(f"  打开数据目录 → 新窗口 {fresh}")
+        close_windows([h for h, _t in fresh])
+        time.sleep(1.0)
+        base = {(h, t) for h, _c, t in list_top_windows()}
+        uia(hwnd, "invoke", name="打开日志")
+        fresh = wait_new_windows(base, "bar.log", limit=8.0)
+        way = "bar.log"
+        if not fresh:
+            # 本机 .log 的打开方式指向一个已被移除的 AppX（UserChoice 里那个 ProgId 起不来），
+            # ShellExecute 于是落到系统的「选取应用」对话框 —— 那同样证明按钮真的把
+            # App.LogPath 交给了 shell 去开（App.OpenInExplorer 只在抛异常时才记日志，
+            # 而日志里没有「打开路径失败」）。两种落点都算数，但现场必须说清是哪一种。
+            fresh = wait_new_windows(base, "选取应用", limit=6.0)
+            way = "选取应用（.log 在本机没有可用的打开方式）"
+        opened += [h for h, _t in fresh]
+        check("「打开日志」真的去开 bar.log（新窗口是它的查看器，或系统的选取应用对话框）",
+              bool(fresh), f"新窗口 {fresh}，判据落点={way}")
+        print(f"  打开日志 → 新窗口 {fresh}（落点：{way}）")
+        close_windows([h for h, _t in fresh])
+        time.sleep(1.0)
+
+        # —— 整页滚动：外壳已不代劳，页面收到最小尺寸时必须自己滚 ——
+        u = _user32()
+        l, t, r, b = rect_of(hwnd)
+        u.SetWindowPos(hwnd, 0, l, t, 760, 500, 0x0004 | 0x0010)  # NOZORDER|NOACTIVATE
+        time.sleep(2.5)  # 等布局落定：不然「画面变了」会把重排算成滚动
+        sc = uia(hwnd, "scroll")
+        can = (sc.get("VSCROLLABLE") or ["False"])[0] == "True"
+        check("窗口收到最小尺寸时运行页真的可滚（页内 ScrollViewer 报 VerticallyScrollable=true）",
+              uia_ok(sc) and can,
+              f"VerticallyScrollable={can} extent={sc.get('EXTENT')} viewport={sc.get('VIEWPORT')}"
+              f"（WPF 的 ScrollViewerAutomationPeer 在本机把 extent/viewport 都报 0，"
+              f"所以这两值只作现场、不进判据；可滚性看 VerticallyScrollable）；{sc.get('ERR')}")
+        scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
+        shot = os.path.join(ds.state_dir(), "t6-scroll.png")
+        w0, h0, rgb0 = capture_bar(hwnd, shot, scale=scale)
+        moved, back_diff = -1, -1
+        sig0 = row_hashes(rgb0, w0, h0) if w0 else []
+        if w0:
+            sd = uia(hwnd, "scroll", value="down")
+            time.sleep(0.8)
+            w1, h1, rgb1 = capture_bar(hwnd, shot, scale=scale)
+            if (w1, h1) == (w0, h0) and rgb1:
+                moved = sum(1 for a, c in zip(sig0, row_hashes(rgb1, w1, h1)) if a != c)
+            uia(hwnd, "scroll", value="up")
+            time.sleep(0.8)
+            w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
+            if (w2, h2) == (w0, h0) and rgb2:
+                back_diff = sum(1 for a, c in zip(sig0, row_hashes(rgb2, w2, h2)) if a != c)
+            pct2 = (sd.get("PCT2") or ["-1"])[0]
+        else:
+            pct2 = "-1"
+        # 滚回顶部后**不要求逐行相同**：阈值那一行是活的（静默秒数每帧在涨），
+        # 十几行以内的差异就是它；真没滚回去的话差的是整屏布局，量级差几十倍。
+        check("滚到底之后画面真的动了、滚回顶部又回到原位置（内容在滚，不是被裁在视口外）",
+              moved >= 30 and 0 <= back_diff <= 12,
+              f"滚到底变化 {moved} 行（阈值 30：活的那行文字每帧只动 2~3 行，够不着 30）、"
+              f"滚回顶部后与基线差 {back_diff} 行（容 12 行 = 阈值行那点活字）；"
+              f"抓帧 {w0}x{h0}，moved=0 就是压根没滚（VerticalPercent 本机恒报 {pct2}，不进判据）")
+        print(f"  整页滚动现场：视口 {w0}x{h0}，滚到底变化 {moved} 行，滚回顶部与基线差 {back_diff} 行")
+        if os.path.isfile(shot):
+            os.remove(shot)
+
+        # —— 通知页：切过去（二次实例写请求 → 常驻实例导航）——
+        # 一次调用就够：驱动脚本在 switch 之前就把 TOGGLES/EDITS/BOXSPINS/BUTTONS 打全了，
+        # 「页面标题的文本」与「这页的控件数」因此来自**同一帧**控件树 —— 分两次调计时
+        # 会拿到切换前后的两帧（本轮实测踩过：count 还是运行页、text 已经是通知页）。
+        subprocess.run([BAR_EXE, "--panel", "notify"], cwd=os.path.dirname(BAR_EXE), timeout=30)
+        res2: dict[str, list[str]] = {}
+        t_n = ""
+        t0 = time.time()
+        while time.time() - t0 < 20:
+            res2 = uia(hwnd, "text", name="托盘气泡提醒")
+            if res2.get("TEXT"):
+                t_n = res2["TEXT"][0]
+                break
+            time.sleep(1.0)
+        if not check("面板已导航到通知页（托盘气泡提醒那一行在控件树里）", bool(t_n),
+                     f"{res2.get('ERR') or '等满 20 秒没出现'}"):
+            return
+
+        def cnt2(k: str) -> int:
+            return int((res2.get(k) or ["0"])[0])
+
+        check("通知页控件齐：开关 1 / 数字框 1 / 数字框自带加减档 2",
+              cnt2("TOGGLES") == 1 and cnt2("EDITS") == 1 and cnt2("BOXSPINS") == 2,
+              f"TOGGLES={cnt2('TOGGLES')} EDITS={cnt2('EDITS')} BOXSPINS={cnt2('BOXSPINS')} "
+              f"（SPINS 总数 {cnt2('SPINS')}：窗口收窄后整页滚动条的三颗翻页/箭头键也算 RepeatButton）")
+        check("通知页自带整页滚动容器（页内有 ScrollViewer，外壳不再代劳）",
+              cnt2("SCROLLERS") >= 1, f"内容列里的 ScrollViewer 数 = {cnt2('SCROLLERS')}")
+
+        # —— notify / repeatSec：热生效（引擎进程不变）——
+        tail = log_tail(log_off)
+        rep0 = tail.count("还在等你操作")
+        check("notify=true 时「需要操作」真的弹了通知（日志有那条提醒）",
+              "DeepSeek 在等你操作" in tail, tail[-300:] or "无新日志")
+        check("repeatSec=0 期间不重复提醒（帧一直在来，整段只弹了第一次那一条）",
+              rep0 == 0 and "DeepSeek 在等你操作" in tail,
+              f"重复提醒 {rep0} 条（这一段已经跑了 ~1 分钟 needs_action 帧）")
+        uia(hwnd, "step", index=0)  # repeatSec 0 → 1
+        time.sleep(0.8)
+        got_repeat = (json.loads(open(f, encoding="utf-8").read()).get("repeatSec")
+                      if os.path.isfile(f) else None)
+        val = uia(hwnd, "value", index=0)
+        check("repeatSec 步进一档生效（数字框读到 1，settings.json 也是 1）",
+              got_repeat == 1 and (val.get("VALUE") or [""])[0] in ("1", "1.0"),
+              f"文件里 {got_repeat}，控件显示 {(val.get('VALUE') or ['?'])[0]}")
+        time.sleep(4.0)
+        tail = log_tail(log_off)
+        rep1 = tail.count("还在等你操作")
+        pid3 = engine_pid_after(tail)
+        check("面板里把 repeatSec 从 0 改成 1 → 同一个引擎进程开始重复提醒（热生效，没重启）",
+              rep1 >= 2 and pid3 == pid2,
+              f"重复提醒 {rep1} 条，引擎 PID {pid2}→{pid3}"
+              "（相等才对：repeatSec 不该重启引擎）")
+        # 关闸。时间窗必须从**开关真的被拨过去之后**才开始算：一次 uia() 调用里含
+        # powershell 冷启动（~1.5s），拿调用前的日志长度当基线，会把关闸前那几条重复提醒算进来
+        # —— 本轮实测就是这么假红了 2 条。
+        tg = uia(hwnd, "toggle", index=0)
+        st_now = uia(hwnd, "togstate", index=0)
+        mark = os.path.getsize(log_path) if os.path.isfile(log_path) else 0
+        time.sleep(4.5)
+        after = log_tail(mark)
+        pid4 = engine_pid_after(log_tail(log_off))
+        check("面板里关掉通知总开关 → 提醒立刻停，引擎进程没换（热生效）",
+              (st_now.get("STATE") or [""]) [0] == "Off"
+              and "通知 [" not in after and pid4 == pid3,
+              f"开关现状={(st_now.get('STATE') or ['?'])[0]}（TogglePattern 读回），"
+              f"关闸后新增日志里通知 {after.count('通知 [')} 条（阈值 0），"
+              f"引擎 PID {pid3}→{pid4}；日志尾部 {after[-200:]!r}")
+        subprocess.run([BAR_EXE, "--panel", "runtime"], cwd=os.path.dirname(BAR_EXE), timeout=30)
+        a3 = None
+        t0 = time.time()
+        while time.time() - t0 < 20:
+            t3 = uia(hwnd, "text", name="当前判定")
+            a3 = thresholds_age(t3.get("TEXT", []))
+            if a3 is not None:
+                break
+            time.sleep(1.0)
+        check("关掉通知之后引擎帧仍在进来（上面那条「没通知」不是引擎停了造成的）",
+              a3 is not None and a2 is not None and a3 > a2,
+              f"静默秒数 {a2} → {a3}（读不到就是运行页没接上快照流）")
+        print(f"  通知现场：首次 {'有' if 'DeepSeek 在等你操作' in tail else '无'} 条；"
+              f"repeatSec=0 期间重复 {rep0} 条 → 改成 1 之后 {rep1} 条 → 关闸后 4.5 秒内 {after.count('通知 [')} 条；"
+              f"引擎 PID {pid2}→{pid3}→{pid4}；静默秒数 {a1}→{a2}→{a3}")
+    finally:
+        close_windows(opened)
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        ok = engine_restore(real)
+        check("真窗口段注入的引擎拷贝已按仓库根还原", ok, os.path.dirname(BAR_EXE))
+        reg_run_write(reg_had)
+        check("真窗口段的注册表 Run 项已还原到用户原状", reg_run_value() == reg_had,
+              f"现在是 {reg_run_value()!r}，用户原状 {reg_had!r}")
+        if backup is None:
+            if os.path.isfile(f):
+                os.remove(f)
+        else:
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(backup)
+        check("真窗口段的 settings.json 已还原",
+              (open(f, encoding="utf-8").read() if os.path.isfile(f) else None) == backup, f)
+        if os.path.exists(req):
+            os.remove(req)
+        left = python_pids() - before_pids
+        t1 = time.time()
+        while left and time.time() - t1 < 20:
+            time.sleep(1)
+            left = python_pids() - before_pids
+        check("真窗口段之后无残留（DshBar / 引擎子进程 / panel.request 都清干净）",
+              not bar_processes() and not left and not os.path.exists(req),
+              f"DshBar={sorted(bar_processes())} python={sorted(left)} req={os.path.exists(req)}")
+
+
 def check_bar_null_records() -> None:
     """引擎可以出 `"records": null`（dsh_state.py 的 _session_rows 走 s.get("records")），
     那时 `SessionRow.Records` 若是**非可空 int**，System.Text.Json 是在**整帧**上抛的，
@@ -1894,6 +2669,16 @@ def check_settings_roundtrip() -> None:
             if os.path.isfile(out):
                 os.remove(out)
 
+        # Task 6 Step 5：notify / repeatSec 这两个新页面读得走的字段，写进设置后面板仍正常。
+        # （它们「画回控件上」的正面证据在 check_pages_filled()，这里只钉「带着这两项出图不崩」。）
+        with open(f, "w", encoding="utf-8") as fh:
+            json.dump({"interval": 7, "notify": False, "repeatSec": 33,
+                       "theme": "light", "showBar": True}, fh)
+        p = run_shot("notify", "-")
+        check("notify/repeatSec 写进设置后面板仍正常",
+              p is not None and p.returncode == 0 and "SHOT" in p.stdout,
+              "" if p is None else (p.stdout + p.stderr)[-160:])
+
         # 非法 theme：Load 回退 light。除了不崩，还要求它的四角取样和 theme=light 一致——
         # 「回退浅色」如果只回退了字段而渲染照旧，上面那条 SHOT 断言看不出来。
         with open(f, "w", encoding="utf-8") as fh:
@@ -2556,6 +3341,8 @@ def main() -> int:
         # 行数与视口那两条也借同一份产物目录注入假引擎，
         # 所以整段都在 check_gui 之前 —— check_gui 会真的用这份拷贝起引擎。
         check_panel_row_data(empty_base)
+        # 通知页/运行页的离屏面：同样要借这份引擎拷贝注入「定死的一帧」，所以也排在 check_gui 前。
+        check_pages_filled()
         # records:null 的帧要在**状态栏**上验（静默冻结是这条缺陷的表现，不是红），
         # 同样只碰那份引擎拷贝，还原完才轮到 check_gui。
         check_bar_null_records()
@@ -2571,6 +3358,10 @@ def main() -> int:
         # theme/showBar 的落盘往返 + 「主题真的改像素」的取样门禁（Task 5 Step 0 #1，补 N3 缺口）。
         # 这两段都会改写 settings.json 并在 finally 里按备份还原，串行跑互不污染。
         check_settings_roundtrip()
+        # 面板里改的东西到底生效没有（UIA 驱动真窗口：不弹通知 / 重复提醒 / 重启引擎 /
+        # 写注册表 / 开目录 / 整页滚动）。它也会改写 settings.json，排在 showBar 那段之前一起走
+        # 「各自备份、各自还原」的串行口径。
+        check_panel_settings_live()
         check_showbar_hidden()
         check_panel_cold_open()
         check_panel_request_containment()
