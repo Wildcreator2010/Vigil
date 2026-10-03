@@ -12,7 +12,10 @@ namespace DshBar
     ///   · interval —— 引擎子进程的轮询周期是 StateClient 构造时定死的，
     ///     所以保存之后必须 App.RestartEngine()，日志会多出一行「引擎已启动 PID=…」；
     ///   · 开机自启 —— 复用已有的 ToggleAutostart()，写 HKCU\...\Run\dsh-status，不进 settings.json；
-    ///   · 两个目录入口 —— App.OpenInExplorer()，日志是文件、数据目录是目录。
+    ///   · 两个文件入口 —— 数据目录走 App.OpenInExplorer()（目录本来就能开），
+    ///     日志走 App.RevealInExplorer()：在资源管理器里把 bar.log 选中。
+    ///     后者刻意不用 ShellExecute 开文件 —— `.log` 没有可用的打开方式时那会落到系统的
+    ///     「选取应用」对话框，落点不归我们控制（spec §5 要的是日志目录，定位到文件是它的加强版）。
     /// 颜色、页内 ScrollViewer、先赋初值后订阅这三条与 NotifyPage 同源，理由也相同。
     /// </summary>
     internal sealed class RuntimePage : WpfControls.ContentControl, IPanelPage
@@ -70,8 +73,10 @@ namespace DshBar
                         PushButton("重启检测进程", () => App.RestartEngine()))),
                 Ui.Group("开机与文件",
                     Ui.Row("开机自动启动", "写入当前用户的注册表 Run 项，只影响本机这个账户。", autostart),
-                    Ui.Row("日志", "状态栏没出现、状态不对时先看它。",
-                        PushButton("打开日志", () => App.OpenInExplorer(App.LogPath))),
+                    Ui.Row("日志",
+                        "状态栏没出现、状态不对时先看它。按钮会在资源管理器里选中 bar.log —— " +
+                        "开的是它所在的文件夹，不需要 .log 先有一个可用的打开方式。",
+                        PushButton("打开日志位置", () => App.RevealInExplorer(App.LogPath))),
                     Ui.Row("数据目录", "settings.json、余额 Key、刷新标记都在这里。",
                         PushButton("打开数据目录", () => App.OpenInExplorer(App.DataDir)))));
             HorizontalContentAlignment = HorizontalAlignment.Stretch;

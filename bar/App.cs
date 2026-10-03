@@ -193,6 +193,42 @@ namespace DshBar
             catch (Exception ex) { Log($"打开路径失败 {path}: {ex.Message}"); }
         }
 
+        /// <summary>
+        /// 在资源管理器里定位到某个文件（把它选中）。走 `explorer.exe /select,"完整路径"`：
+        /// 开的是**所在文件夹**，全程不查文件关联 —— 与 OpenInExplorer(文件) 的分别就在这儿。
+        /// `.log` 这类扩展名在本机可能压根没有可用的打开方式（UserChoice 指向一个已被移除的
+        /// AppX），ShellExecute 于是落到系统的「选取应用」对话框，落点由 shell 决定、不由我们决定；
+        /// 面板上「打开日志位置」那颗按钮要的是恒定行为，所以不能用那条通路（spec §5 写的也是日志目录）。
+        /// 参数形态本机实测过：`/select,"路径"` 与 `/select,路径` 都能开对文件夹并选中它，
+        /// 而把整条参数再包一层引号（`"/select,路径"`）会退化成打开「文档」—— 不走那种拼法。
+        /// 路径不存在时退回定位它的父目录（`/select` 对不存在的路径会静默打开默认文件夹，
+        /// 那是「看起来成功了」的最坏形态），父目录也没有才记失败。
+        /// </summary>
+        internal static void RevealInExplorer(string path)
+        {
+            try
+            {
+                var full = Path.GetFullPath(path);
+                if (!File.Exists(full) && !Directory.Exists(full))
+                {
+                    var parent = Path.GetDirectoryName(full);
+                    if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
+                    {
+                        Log($"定位路径失败 {full}: 文件与所在目录都不存在");
+                        return;
+                    }
+                    full = parent;
+                }
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = "/select,\"" + full + "\"",
+                    UseShellExecute = false,
+                });
+            }
+            catch (Exception ex) { Log($"定位路径失败 {path}: {ex.Message}"); }
+        }
+
         static void RequestPanel(string page)
         {
             try { File.WriteAllText(PanelRequestFile, page ?? ""); }
