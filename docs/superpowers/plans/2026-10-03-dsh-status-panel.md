@@ -1069,8 +1069,10 @@ Expected: `0`，`0 个警告 0 个错误`。若报 CS0104，说明某文件同�
 - [ ] **Step 9: 跑 shot 模式确认渲染真的成立**
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot overview shot-probe.png; echo EXIT=$?`
-Expected: 输出形如 `SHOT overview 900 620 214`，`EXIT=0`，颜色种类 > 200。
-若颜色种类 ≤ 200 或报 `SHOT-FAIL`，**停下**：说明离屏渲染没走通，不要继续后面的页面任务。
+Expected: 输出形如 `SHOT overview 900 620 <N>`，`EXIT=0`。
+**判据是「有没有真的画出东西」，不是色数**（Task 4 实测：占位页 7 色 / 0 个不透明像素；
+表格骨架 40 色 / 99.99% 不透明像素 / 17 条分隔线跨度恰等于六列宽之和）。
+停下条件：报 `SHOT-FAIL`、或**不透明像素为 0**、或 PNG 解码失败 —— 这三条才说明离屏渲染没走通。
 
 Run: `rm -f shot-probe.png`
 
@@ -1156,7 +1158,7 @@ git commit -m "feat(panel): 引入 WPF-UI，加控制台外壳与离屏渲染门
 `shots` 字典已在 Task 3 的 `check_panel_shell()` 里采集好了。本任务在循环结束后加一条：
 
 ```python
-    check("概览页已画出表格（不再是一行占位文字）", shots.get("overview", 0) > 200,
+    check("概览页已画出表格（不再是一行占位文字）", shots.get("overview", 0) > 20,
           f"colors={shots.get('overview')}")
 ```
 
@@ -1192,7 +1194,7 @@ Expected: `概览页已画出表格（不再是一行占位文字）` 失败（�
         [JsonPropertyName("last_event")] public string LastEvent { get; set; }
         [JsonPropertyName("last_tool")] public string LastTool { get; set; }
         [JsonPropertyName("end_reason")] public string EndReason { get; set; }
-        [JsonPropertyName("records")] public int Records { get; set; }
+        [JsonPropertyName("records")] public int? Records { get; set; }
         [JsonPropertyName("todo")] public Todo Todo { get; set; }
         [JsonPropertyName("usage_total")] public Usage Usage { get; set; }
         [JsonPropertyName("pending")] public Pending Pending { get; set; }
@@ -1559,7 +1561,8 @@ Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep 
 Expected: `0`，无输出（0 警告 0 错误）。
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot appearance probe.png`
-Expected: `SHOT appearance 900 620 <colors>`，colors > 200。随后 `rm -f probe.png`。
+Expected: `SHOT appearance 900 620 <colors>`，colors > 20 **且不透明像素 > 0**。随后 `rm -f probe.png`。
+（阈值口径见 Task 4：色数只当地板值用，真正的判据是不透明像素与结构证据。）
 
 - [ ] **Step 6: 加设置往返断言并跑全量**
 
@@ -1744,7 +1747,7 @@ Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep 
 Expected: `0`，无输出。
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot notify p1.png && ./DshBar.exe --panel-shot runtime p2.png && rm -f p1.png p2.png`
-Expected: 两行 `SHOT ... 900 620 <colors>`，colors > 200。
+Expected: 两行 `SHOT ... 900 620 <colors>`，colors > 20 且不透明像素 > 0。
 
 - [ ] **Step 5: 加通知/运行设置的往返断言**
 
@@ -1937,7 +1940,7 @@ Expected: `0`，无输出。若有 `CS0246 KeyDialog` 说明还有调用点，�
 - [ ] **Step 5: 跑余额页渲染与 DPAPI 往返**
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot balance p.png && rm -f p.png`
-Expected: `SHOT balance 900 620 <colors>`，colors > 200。
+Expected: `SHOT balance 900 620 <colors>`，colors > 20 且不透明像素 > 0。
 
 Run: `python smoke_test.py`
 Expected: 退出码 0（`== 余额 Key 存取 ==` 5 项仍全过——那是引擎侧，不受本次改动影响）。
