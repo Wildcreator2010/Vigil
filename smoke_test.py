@@ -585,7 +585,8 @@ def read_png_rgba(path: str) -> tuple[int, int, bytes] | None:
 
 
 def shot_table_stats(path: str) -> dict | None:
-    """从离屏 PNG 数出表格的结构证据：绘制区、不透明像素、非白像素、成排的行分隔线。
+    """从离屏 PNG 数出表格的结构证据：绘制区、不透明像素、非白像素、成排的行分隔线、
+    靠右条带里最长的竖色连续段（滚动条滑块）。
 
     「不透明」= alpha==255。占位页（PageBase 那一行文字）在 RenderTargetBitmap 上
     是**整页透明**（本机实测 opaque=0/558000），只有文字那几个像素带 alpha；
@@ -623,9 +624,24 @@ def shot_table_stats(path: str) -> dict | None:
         wide = [(c, n) for c, n in cnt.items() if n >= 600 and c != white and c[3] == 255]
         if wide:
             hlines += 1
+    # 滚动证据：靠右 24px 条带（x ∈ [w-24, w-3)，绕开最右那 1px 描边）里
+    # 「同一个不透明非白色竖着连续」的最长像素数。滚动条滑块是一根几像素宽、
+    # 几百像素高的竖条；行分隔线只有孤立的 1~2 行高，两者在这一项上差两个数量级。
+    # 视口无限高（外层套 StackPanel）时表格根本不需要滚动条，这项实测 1~2。
+    vscroll = 0
+    for x in range(max(0, w - 24), max(0, w - 3)):
+        run, prev = 0, None
+        for y in range(h):
+            i = (y * w + x) * 4
+            c = buf[i:i + 4]
+            solid = c[3] == 255 and c != white
+            run = run + 1 if (solid and c == prev) else (1 if solid else 0)
+            prev = c if solid else None
+            vscroll = max(vscroll, run)
     return {
         "w": w, "h": h, "total": w * h, "painted": painted, "ink": ink,
         "x0": x0, "x1": x1, "y0": y0, "y1": y1, "hlines": hlines,
+        "vscroll": vscroll,
     }
 
 
@@ -740,7 +756,92 @@ def run_shot(page: str, out_path: str):
         return None
 
 
-def check_panel_shell() -> dict[str, int]:
+def fake_engine_source(rows: int) -> str:
+    """造一个「出一帧快照就退出」的假引擎源码，sessions 里放 rows 行。
+
+    注入点是编译产物 bar/bin/Release/net10.0-windows/dsh_state.py（csproj 从仓库根拷的那份），
+    所以生产代码里不需要任何测试钩子、dsh_state.py 源码全程未修改。
+    rows==0 走 --watch 异常帧的形状：ok:false 且不带 sessions 键 → Snapshot.Sessions 是 null；
+    rows>0 每行都给成能落笔的真实形状（项目/工具/轮次/记录数都有字），
+    「非白像素」「行分隔线」两个统计量才和本机真实数据同口径。
+    行数由冒烟指定，本机 ~/.dsh 里是 0 个还是 29 个会话都跟断言无关。
+    """
+    if rows <= 0:
+        return 'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-injected"}\\n\')\n'
+    return (
+        'import json, sys\n'
+        'rows = [{\n'
+        '    "key": f"smoke-{i}", "project": f"proj-{i}", "title": f"会话 {i}",\n'
+        '    "state": "idle", "turn": i, "step": i, "age_sec": 60.0 + i,\n'
+        '    "last_event": "result", "last_tool": f"tool{i}", "end_reason": "success",\n'
+        '    "records": i, "todo": None, "usage_total": None, "pending": None,\n'
+        '} for i in range(%d)]\n'
+        'sys.stdout.write(json.dumps({"ok": True, "app_running": True, "state": "idle",\n'
+        '    "label": "冒烟注入", "glyph": "·", "color": "#6B7280", "strip_left": "冒烟注入",\n'
+        '    "strip_right": "--", "tooltip": "冒烟注入", "tip_lines": ["冒烟注入"],\n'
+        '    "session": None, "balance": None, "waiting": [], "recent": [],\n'
+        '    "sessions_scanned": len(rows), "sessions": rows}, ensure_ascii=False) + "\\n")\n'
+        % rows
+    )
+
+
+def shot_dims(head: str) -> tuple[int, int, int]:
+    """解析 C# 侧的 `SHOT <page> <w> <h> <colors>`，解析不了给 (-1, -1, -1)。"""
+    parts = head.split()
+    if len(parts) != 5:
+        return -1, -1, -1
+    try:
+        return int(parts[2]), int(parts[3]), int(parts[4])
+    except ValueError:
+        return -1, -1, -1
+
+
+def shot_with_fake_engine(source: str, out_path: str,
+                          label: str) -> tuple[int, str, dict | None]:
+    """把产物里的引擎临时换成 source，出一张概览页离屏图：返回 (退出码, stdout 首行, 像素统计)。
+
+    换进去和还原都在这一个函数里，还原完当场断言按仓库根字节一致 ——
+    check_gui 与 check_engine_copy 都拿那份拷贝起真引擎，没还原干净不能往下走。
+    """
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not check(f"{label}：注入点就位", os.path.isfile(BAR_EXE) and os.path.isfile(eng), eng):
+        return -1, "", None
+    with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
+        real = fh.read()
+    try:
+        with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(source)
+        if os.path.isfile(out_path):
+            os.remove(out_path)
+        p = run_shot("overview", out_path)
+        if p is None:
+            check(f"{label}：--panel-shot", False, "120 秒没返回（离屏渲染卡死）")
+            return -1, "", None
+        head = ((p.stdout or "").strip().splitlines() or [""])[0]
+        return p.returncode, head, (shot_table_stats(out_path) if os.path.isfile(out_path) else None)
+    finally:
+        with open(eng, "wb") as fh:
+            fh.write(real)
+        check(f"{label}：引擎拷贝已按仓库根还原", open(eng, "rb").read() == real, eng)
+        if os.path.isfile(out_path):
+            os.remove(out_path)
+
+
+def row_data_gate(st: dict, base: dict) -> bool:
+    """「表里真的有数据行」：与空表那张做**差**，不钉绝对值。
+
+    注入实测（同一台机器、同一次运行、固定 96 DPI 离屏）：1 行 → 横线 +1 / 非白 +1576，
+    3 行 → +3 / +4594，29 行 → +15 / +25002。判据按最松的 1 行情形再留一半余量：
+    横线至少多 1 条、非白至少多 600 像素。
+    旧版钉的是 hlines >= 6 / ink >= 5000：前者在本机实测等价于「至少 4 个会话」
+    （hlines ≈ 2 + min(可见行数, 15)），只在零会话时才跳过，1~3 个会话的机器必假红；
+    后者真正的邻居是**负样本**基线（空表实测 3966，只差 25%），不是正样本 36432。
+    做差之后会话数、DPI、列宽三个变量一次性抵消。
+    """
+    return st["hlines"] - base["hlines"] >= 1 and st["ink"] - base["ink"] >= 600
+
+
+def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
     print("\n== 控制台面板 ==")
     shots: dict[str, int] = {}
     if not os.path.isfile(BAR_EXE):
@@ -749,8 +850,10 @@ def check_panel_shell() -> dict[str, int]:
     if bar_processes():
         check("启动前无残留实例", False, "已有 DshBar 在跑")
         return shots
+    shot_paths: dict[str, str] = {}
     for page in PANEL_PAGES:
         shot = os.path.join(ds.state_dir(), f"panel-{page}.png")
+        shot_paths[page] = shot
         if os.path.isfile(shot):
             os.remove(shot)
         p = run_shot(page, shot)
@@ -781,8 +884,8 @@ def check_panel_shell() -> dict[str, int]:
     # —— 一张灰阶抗锯齿的表本来就上不去 200。照原样钉是永久 ✗，为了让它过而给页面加装饰
     # 更糟。所以换成三条量得出来的结构证据（口径见 shot_table_stats），阈值裁决交回控制器，
     # 实测数与两种口径的对比见 task-4-report.md。
-    ov_shot = os.path.join(ds.state_dir(), "panel-overview.png")
-    st = shot_table_stats(ov_shot) if os.path.isfile(ov_shot) else None
+    ov_shot = shot_paths.get("overview", "")
+    st = shot_table_stats(ov_shot) if ov_shot and os.path.isfile(ov_shot) else None
     if st is None:
         check("概览页离屏 PNG 可读（表格门禁的前提）", False,
               f"{ov_shot} 读不出像素，色数门禁会一起变成无从判定")
@@ -802,14 +905,20 @@ def check_panel_shell() -> dict[str, int]:
               f"（占位页实测 7 色、0.0% 不透明）")
         # 行分隔线成排 = 真的有数据行渲染出来，而不只是一块白底 + 表头。
         # 与 check_cli() 用同一个跳过口径：没有会话文件就没有样本行，这条不该假红。
+        # 阈值是**相对空表那张**的量（见 row_data_gate），不再钉 hlines>=6 / ink>=5000：
+        # 那两个数把门禁和本机的会话数焊死在一起，1~3 个会话的机器必然假红。
         session_files = glob.glob(os.path.expanduser(ds.SESSION_GLOB))
         if not session_files:
             print("  （跳过：本机没有 dsh 会话文件，概览页行分隔线断言无样本）")
+        elif empty_base is None:
+            check("空表基线可用（数据行门禁的前提）", False,
+                  "上一轮假引擎注入没出图，相对阈值无从计算")
         else:
-            check("概览页表格有数据行：行分隔线成排且宽度贴合六列之和",
-                  st["hlines"] >= 6 and st["ink"] >= 5000,
-                  f"横线 {st['hlines']} 条、非白像素 {st['ink']}"
-                  f"（本机 29 行数据实测 17 条 / 36627 像素，阈值各留 1/3 与 1/7 的余量）")
+            check("概览页表格有数据行：行分隔线与非白像素都高出空表基线",
+                  row_data_gate(st, empty_base),
+                  f"本机 {len(session_files)} 个会话：横线 {empty_base['hlines']}→{st['hlines']}、"
+                  f"非白 {empty_base['ink']}→{st['ink']}"
+                  f"（判据：至少多 1 条横线、至少多 600 非白像素）")
 
     # 非法页名必须非零退出。旧实现把未知 key 静默当 overview：`--panel-shot nonsense`
     # 照样回 `SHOT nonsense 900 620 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
@@ -823,7 +932,7 @@ def check_panel_shell() -> dict[str, int]:
     return shots
 
 
-def check_panel_empty_sessions() -> None:
+def check_panel_empty_sessions(empty: tuple[int, str, dict | None]) -> None:
     """Sessions 缺席/null 时概览页要照常出图，不能崩 —— 空表是合法状态。
 
     两条真实来源：
@@ -832,58 +941,224 @@ def check_panel_empty_sessions() -> None:
     注入点：--panel-shot 取快照的引擎路径写死为 AppContext.BaseDirectory\\dsh_state.py
     （那里没有才退回仓库根），而那份拷贝是编译产物 —— 所以冒烟可以把它临时换成一个假引擎，
     让它只吐一行 `{"ok": false}`，或者干脆什么都不吐。生产代码里因此不需要任何测试钩子，
-    跑完必须按仓库根的字节还原回去（本函数最后一条断言就是还原成功）。
+    还原由 shot_with_fake_engine 的 finally 当场断言。
+    情形 ① 那张图同时是**空表基线**（empty 参数）：所有「有没有数据行」的门禁都拿它做差，
+    所以这里不再重复注入一次。
     """
     print("\n== 概览页对空 sessions 的容忍 ==")
-    if not os.path.isfile(BAR_EXE) or bar_processes():
-        print("  （跳过：无产物或已有实例）")
+    if not os.path.isfile(BAR_EXE):
+        # 与 check_panel_shell 同一口径：没产物是「跑不了」，不是「跑坏了」。
+        print("  （跳过：没有编译产物）")
         return
-    src = os.path.join(HERE, "dsh_state.py")
+    if bar_processes():
+        # 同口径的另一半：已有实例是**真事故**（上一轮没收拾干净），必须记 ✗ 而不是静默跳过。
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    rc, head, st = empty
+    # 断言的不是色数，是「没崩 + 表壳还在 + 没有数据行」：
+    # hlines 在真实 29 行数据下实测 17，这里必须掉下来，否则说明假引擎根本没生效。
+    colors = shot_dims(head)[2]
+    check("空表注入：ok:false 异常帧（无 sessions 键） 仍出图且退 0",
+          rc == 0 and colors > 20 and st is not None,
+          f"退出码 {rc} 输出 {head!r}")
+    if st:
+        check("空表注入：ok:false 异常帧（无 sessions 键） 表壳仍在但没有数据行",
+              st["painted"] / st["total"] >= 0.35 and st["hlines"] < 6,
+              f"不透明 {st['painted']}/{st['total']} 横线 {st['hlines']} 条"
+              f"（真实 29 行数据实测 17 条，没掉下来就是注入没生效）")
+    # 假引擎 ②：什么都不输出 → LoadOneShotSnapshot 直接 return → _last 仍是 null
+    rc2, head2, st2 = shot_with_fake_engine('import sys\nsys.stdout.write("")\n',
+                                            os.path.join(ds.state_dir(), "panel-overview-null.png"),
+                                            "空表注入：空 stdout")
+    colors2 = shot_dims(head2)[2]
+    check("空表注入：空 stdout（快照整个是 null） 仍出图且退 0",
+          rc2 == 0 and colors2 > 20 and st2 is not None, f"退出码 {rc2} 输出 {head2!r}")
+    if st2:
+        check("空表注入：空 stdout（快照整个是 null） 表壳仍在但没有数据行",
+              st2["painted"] / st2["total"] >= 0.35 and st2["hlines"] < 6,
+              f"不透明 {st2['painted']}/{st2['total']} 横线 {st2['hlines']} 条"
+              f"（真实 29 行数据实测 17 条，没掉下来就是注入没生效）")
+
+
+def check_panel_row_data(empty_base: dict | None) -> None:
+    """概览页表格的两条硬约束，都用**注入的固定行数**验，本机 ~/.dsh 里有几个会话都无关。
+
+    ① 「有数据行」必须是相对空表那张的量：1 / 3 / 29 行都得比基线高出一截。
+       旧版钉 hlines>=6 / ink>=5000 的绝对值，等价于要求本机至少 4 个会话；
+    ② 滚动视口必须**高度受限**：--panel-shot 给页面的是 900×620 的有限约束，
+       行数从 3 涨到 29 时绘制区高度必须还钉在视口下沿。
+       Content 外面套一层竖向 StackPanel 会把这层约束丢掉（StackPanel 给子元素无限高度），
+       DataGrid 于是按内容长到 ~1150px 再被 620 裁掉：画面看起来是满的、门禁完全隐形，
+       但表格自己的 ScrollViewer 拿不到有限高度 → 永不滚动，第 16~60 行
+       （SESSIONS_IN_SNAPSHOT 上限 60）在真实面板里只能靠整页滚动、表头也一起滚出视野。
+    """
+    print("\n== 概览页表格：数据行与滚动视口 ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    if empty_base is None:
+        check("空表基线可用（本段两条门禁的前提）", False, "上一轮 --panel-shot 注入没出图")
+        return
+    out = os.path.join(ds.state_dir(), "panel-overview-rows.png")
+    got: dict[int, tuple[int, str, dict | None]] = {}
+    for n in (1, 3, 29):
+        got[n] = shot_with_fake_engine(fake_engine_source(n), out, f"{n} 行注入")
+        st = got[n][2]
+        check(f"概览页 {n} 行注入出图", st is not None and shot_dims(got[n][1])[2] > 20,
+              f"退出码 {got[n][0]} 输出 {got[n][1]!r}")
+        if st:
+            print(f"  {n:2d} 行：不透明 {st['painted']}/{st['total']}"
+                  f"（{st['painted'] / st['total']:.1%}）非白 {st['ink']}，"
+                  f"绘制区 y {st['y0']}..{st['y1']}（高 {st['y1'] - st['y0'] + 1}px），"
+                  f"横线 {st['hlines']} 条、右侧最长竖段 {st['vscroll']}px"
+                  f" [空表基线 {empty_base['hlines']} 条 / {empty_base['ink']} 非白]")
+    # ① 数据行门禁在三种数据量下都不许假红（1 个会话的机器 / 3 个 / 满屏）
+    for n in (1, 3, 29):
+        st = got[n][2]
+        if st is None:
+            check(f"概览页 {n} 行的数据行证据高出空表基线", False, "那张图没读出来")
+            continue
+        check(f"概览页 {n} 行的数据行证据高出空表基线", row_data_gate(st, empty_base),
+              f"横线 {empty_base['hlines']}→{st['hlines']}（+{st['hlines'] - empty_base['hlines']}）、"
+              f"非白 {empty_base['ink']}→{st['ink']}（+{st['ink'] - empty_base['ink']}），"
+              f"判据：至少多 1 条横线、至少多 600 非白像素")
+    # 先证明确实多画了行，否则下面「两张一样高」会因为两张都是空表而假绿
+    st3, st29 = got[3][2], got[29][2]
+    check("注入确实画出了更多行（29 行的横线严格多于 3 行）",
+          bool(st3 and st29) and st29["hlines"] > st3["hlines"],
+          f"3 行 {st3 and st3['hlines']} 条 / 29 行 {st29 and st29['hlines']} 条")
+    # ② 视口高度受限：两张都必须铺满到视口下沿，且高度不随行数变
+    viewport = shot_dims(got[29][1])[1]
+    if st3 and st29 and viewport > 0:
+        h3 = st3["y1"] - st3["y0"] + 1
+        h29 = st29["y1"] - st29["y0"] + 1
+        check("概览页表格的滚动视口高度受限：行数从 3 到 29 不把画面撑长",
+              h3 >= viewport - 2 and h29 >= viewport - 2 and abs(h29 - h3) <= 2,
+              f"3 行绘制区高 {h3}px、29 行 {h29}px，视口 {viewport}px："
+              f"两张都该钉在视口下沿（多出的行走表格自己的 ScrollViewer）；"
+              f"3 行那张矮一截就是外层面板给了无限高度、表格按行数线性撑开再被裁掉")
+        # 装不下就得有滚动条：这是「多出的行落在滚动里」最直白的像素证据。
+        # 阈值 100 的两侧：修后 29 行实测滑块 302px；未修版（视口无限高，
+        # 表格压根不需要滚动条）与修后 3 行（内容装得下）都只有 1~2px 的描边。
+        check("概览页 29 行时表格右侧画出滚动条（装不下的行落在滚动里）",
+              st29["vscroll"] >= 100,
+              f"右侧 24px 条带里最长的同色竖段 {st29['vscroll']}px（滚动条滑块应有几百 px）；"
+              f"3 行那张 {st3['vscroll']}px 作对照 —— 竖段掉到个位数就是视口没被限住、"
+              f"行是被裁掉而不是被滚动")
+    else:
+        check("概览页表格的滚动视口高度受限：行数从 3 到 29 不把画面撑长", False,
+              f"样本不全：3 行={st3 is not None} 29 行={st29 is not None} 视口={viewport}")
+
+
+def check_bar_null_records() -> None:
+    """引擎可以出 `"records": null`（dsh_state.py 的 _session_rows 走 s.get("records")），
+    那时 `SessionRow.Records` 若是**非可空 int**，System.Text.Json 是在**整帧**上抛的，
+    而 StateClient.ReadStdout 的 catch 只记一行「JSON 解析失败」就 continue ——
+    表现是状态栏从此静默冻结，不是变红，谁也不会注意到。
+
+    所以 Records 必须是 int?（null 时表格那一格留白，与 Turn 同行为）。
+    验法：把产物里的引擎换成一个**只吐 records:null 帧**的 --watch 假引擎，起真状态栏，
+    假引擎第一帧圆点 #7C3AED、之后一直是 #16A34A；状态栏画得出第二帧的色，
+    才说明这一类帧既被收下、又还在持续被收下（不是碰巧第一帧侥幸）。
+    与 check_gui 同一条口径：抓帧失败就停，不拿旧帧空转到超时。
+    """
+    print("\n== records 为 null 的帧不整帧丢弃 ==")
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
     eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
-    if not check("引擎拷贝就位", os.path.isfile(eng), eng):
+    if not check("假引擎注入点就位", os.path.isfile(eng), eng):
         return
-    with open(src, "rb") as fh:
+    with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
         real = fh.read()
-    shot = os.path.join(ds.state_dir(), "panel-overview-empty.png")
-    fakes = {
-        # 假引擎 ①：一行 ok:false、没有 sessions 的异常帧 → Snapshot.Sessions == null
-        "ok:false 异常帧（无 sessions 键）":
-            'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-injected"}\\n\')\n',
-        # 假引擎 ②：什么都不输出 → LoadOneShotSnapshot 直接 return → _last 仍是 null
-        "空 stdout（快照整个是 null）":
-            'import sys\nsys.stdout.write("")\n',
-    }
+    log = os.path.join(ds.state_dir(), "bar.log")
+    log_offset = os.path.getsize(log) if os.path.isfile(log) else 0
+    before = python_pids()
+    shot = os.path.join(ds.state_dir(), "smoke-nullrec-bar.png")
+    # (0x16,0xA3,0x4A)：假引擎第二帧的圆点色，真实状态表里没有这个值
+    target = (22, 163, 74)
+    hit, frames, capped = 0, 0, False
     try:
-        for label, fake in fakes.items():
-            with open(eng, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(fake)
-            if os.path.isfile(shot):
-                os.remove(shot)
-            p = run_shot("overview", shot)
-            if p is None:
-                check(f"空表注入：{label}", False, "120 秒没返回")
-                continue
-            head = ((p.stdout or "").strip().splitlines() or [""])[0]
-            got = head.split()
-            colors = int(got[4]) if len(got) == 5 and got[4].lstrip("-").isdigit() else -1
-            st = shot_table_stats(shot) if os.path.isfile(shot) else None
-            # 断言的不是色数，是「没崩 + 表壳还在 + 没有数据行」：
-            # hlines 在真实 29 行数据下实测 17，这里必须掉下来，否则说明假引擎根本没生效。
-            check(f"空表注入：{label} 仍出图且退 0",
-                  p.returncode == 0 and colors > 20 and st is not None,
-                  f"退出码 {p.returncode} 输出 {head!r} err={(p.stderr or '')[-160:]!r}")
-            if st:
-                check(f"空表注入：{label} 表壳仍在但没有数据行",
-                      st["painted"] / st["total"] >= 0.35 and st["hlines"] < 6,
-                      f"不透明 {st['painted']}/{st['total']} 横线 {st['hlines']} 条"
-                      f"（真实 29 行数据实测 17 条，没掉下来就是注入没生效）")
+        fake = (
+            'import json, sys, time\n'
+            'row = {"key": "smoke-nullrec", "project": "冒烟空记录", "title": "records 是 null",\n'
+            '       "state": "idle", "turn": 3, "step": 1, "age_sec": 12.5,\n'
+            '       "last_event": "result", "last_tool": "Bash", "end_reason": None,\n'
+            '       "records": None, "todo": None, "usage_total": None, "pending": None}\n'
+            'def frame(color):\n'
+            '    return {"ok": True, "app_running": True, "state": "idle",\n'
+            '            "label": "冒烟空记录", "glyph": "·", "color": color,\n'
+            '            "strip_left": "冒烟空记录", "strip_right": "--",\n'
+            '            "tooltip": "冒烟空记录", "tip_lines": ["冒烟空记录"],\n'
+            '            "session": None, "balance": None, "waiting": [], "recent": [],\n'
+            '            "sessions_scanned": 1, "sessions": [row]}\n'
+            'def emit(color):\n'
+            '    sys.stdout.write(json.dumps(frame(color), ensure_ascii=False) + "\\n")\n'
+            '    sys.stdout.flush()\n'
+            'try:\n'
+            '    emit("#7C3AED")\n'
+            '    for _ in range(240):\n'
+            '        emit("#16A34A")\n'
+            '        time.sleep(0.5)\n'
+            'except (BrokenPipeError, ValueError, OSError):\n'
+            '    pass\n'
+        )
+        with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(fake)
+        proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
+        hwnds: list[int] = []
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            hwnds = find_bar_windows()
+            if hwnds and proc.poll() is None:
+                break
+            time.sleep(0.4)
+        if not check("records:null 场景：状态栏起来了", bool(hwnds) and proc.poll() is None,
+                     f"窗口 {len(hwnds)} 个，进程退出码 {proc.returncode}"):
+            return
+        deadline = time.time() + 20.0
+        while True:
+            cw, ch, rgb = capture_bar(hwnds[0], shot)
+            frames += 1
+            if not (cw and ch):
+                capped = True      # 抓不到画面就停，绝不能拿上一帧的 rgb 继续比
+                break
+            hit = sum(1 for i in range(0, len(rgb), 3)
+                      if all(abs(rgb[i + k] - target[k]) <= 12 for k in range(3)))
+            if hit >= 20 or time.time() >= deadline:
+                break
+            time.sleep(1.0)
+        tail = log_tail(log_offset)
+        check("records:null 帧仍被状态栏接收（圆点画成第二帧的 #16A34A）",
+              hit >= 20,
+              f"{hit} 像素命中（抓帧 {frames} 次"
+              + ("，capture_bar 失败已停手" if capped else "，等满 20 秒也没追上第二帧")
+              + f"）；日志新增 {len(tail)} 字，JSON 解析失败出现 "
+                f"{'1 次以上' if 'JSON 解析失败' in tail else '0 次'}")
+        check("records:null 帧不触发整帧 JSON 解析失败",
+              "JSON 解析失败" not in tail,
+              f"日志尾巴：{tail[-240:]!r}（非可空 int 撞上 null 就是这一行，然后整帧被丢掉）")
     finally:
+        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
         with open(eng, "wb") as fh:
             fh.write(real)
-        check("空表注入后引擎拷贝已按仓库根还原",
+        check("records:null 注入后引擎拷贝已按仓库根还原",
               open(eng, "rb").read() == real, eng)
         if os.path.isfile(shot):
             os.remove(shot)
+        left_pids = python_pids() - before
+        t0 = time.time()
+        while left_pids and time.time() - t0 < 20:
+            time.sleep(1)
+            left_pids = python_pids() - before
+        check("records:null 场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
+        check("records:null 场景：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
 
 
 def check_panel_window() -> None:
@@ -960,7 +1235,16 @@ def check_panel_cold_open() -> None:
             time.sleep(0.4)
         check("冷打开：--panel 唤起面板", bool(found),
               "常驻实例的 PanelWindow.Instance 是 null，请求文件被删掉却没人开窗")
-        check("冷打开：请求文件已消费", not os.path.exists(req), req)
+        # 「先开窗、开成了才删」是 Task 3 定的语义，于是文件天生比窗口晚一步落地：
+        # 本机 tight-poll 实测窗口可见 → 文件消失稳定差 0.21~0.23s（Activate + 复核身份 + Delete）。
+        # 原来这里在看见窗口的那一刻就采样一次，0.4s 的轮询相位一撞进这 0.2s 的空档就假红
+        # ——断言要的是「请求最终被消费掉」，那就等到它没了为止，超时才算失败。
+        t2 = time.time()
+        while time.time() - t2 < 10 and os.path.exists(req):
+            time.sleep(0.2)
+        check("冷打开：请求文件已消费", not os.path.exists(req),
+              f"{req}（开窗后 {time.time() - t2:.1f} 秒仍未删除；"
+              f"实测正常删除就在开窗后 0.2 秒上下）")
     finally:
         subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
         deadline = time.time() + 20
@@ -1351,6 +1635,7 @@ def check_gui() -> None:
                 # （约 10 个 interval）追平引擎；追不平才记 ✗。断言强度没降：圆点仍然必须真的
                 # 是引擎报出的那个色，只是不再靠抓帧撞上稳定窗口的那次运气。
                 want, near = "", 0
+                lost = False
                 deadline = time.time() + 20.0
                 while True:
                     want = (parse_line(run("--json", "--no-balance").stdout.strip()) or {}).get("color", "")
@@ -1359,8 +1644,13 @@ def check_gui() -> None:
                     except Exception:
                         tgt = b""
                     cw2, ch2, rgb2 = capture_bar(h, shot)
-                    if cw2 and ch2:
-                        rgb = rgb2
+                    if not (cw2 and ch2):
+                        # 抓不到就停手。旧写法 `if cw2 and ch2: rgb = rgb2` 在失败那一轮会**沿用上一帧**
+                        # 继续比，最坏拿旧帧空转到 20 秒超时，报出来的 ✗ 说的是「没追上引擎报的色」，
+                        # 而现场其实是「PrintWindow 这一轮失败了」——红因写错了比不红更糟。
+                        lost = True
+                        break
+                    rgb = rgb2
                     near = sum(1 for i in range(0, len(rgb), 3)
                                if tgt and all(abs(rgb[i + k] - tgt[k]) <= 12 for k in range(3)))
                     if near >= 20 or time.time() >= deadline:
@@ -1368,8 +1658,9 @@ def check_gui() -> None:
                     time.sleep(1.0)
                 top = collections.Counter(rgb[i:i + 3] for i in range(0, len(rgb), 3))
                 check(f"状态色 {want} 已画在圆点上", near >= 20,
-                      f"{near} 像素命中（等满 20 秒状态栏也没追上引擎报的这个色），"
-                      f"画面主色 {[c[0].hex() for c in top.most_common(4)]}")
+                      (f"{near} 像素命中（capture_bar 这一轮失败，已停手不再拿旧帧比对），"
+                       if lost else f"{near} 像素命中（等满 20 秒状态栏也没追上引擎报的这个色），")
+                      + f"画面主色 {[c[0].hex() for c in top.most_common(4)]}")
                 print(f"  画面存到 {shot}")
         check("引擎子进程已拉起", not python_pids() <= before, "没有新增 python 进程")
         try:
@@ -1428,10 +1719,21 @@ def main() -> int:
     check_panel_request_guard()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
-        panel_shots = check_panel_shell()
-        # 空 sessions 的容忍要在真实出图之后验（它借同一份产物目录注入假引擎），
-        # 也要在 GUI 那几轮之前还原干净 —— check_gui 会真的用这份拷贝起引擎。
-        check_panel_empty_sessions()
+        # 「空表那张」先用假引擎量好：它是本段所有「有没有数据行」门禁的基线
+        # （check_panel_shell 的绝对阈值换成做差，见 row_data_gate），
+        # check_panel_empty_sessions 也直接复用这张图、不再注入第二次。
+        empty_shot = shot_with_fake_engine(
+            fake_engine_source(0),
+            os.path.join(ds.state_dir(), "panel-overview-empty.png"), "空表基线")
+        empty_base = empty_shot[2]
+        panel_shots = check_panel_shell(empty_base)
+        check_panel_empty_sessions(empty_shot)
+        # 行数与视口那两条也借同一份产物目录注入假引擎，
+        # 所以整段都在 check_gui 之前 —— check_gui 会真的用这份拷贝起引擎。
+        check_panel_row_data(empty_base)
+        # records:null 的帧要在**状态栏**上验（静默冻结是这条缺陷的表现，不是红），
+        # 同样只碰那份引擎拷贝，还原完才轮到 check_gui。
+        check_bar_null_records()
         check_gui()
         check_panel_window()
         check_panel_cold_open()
