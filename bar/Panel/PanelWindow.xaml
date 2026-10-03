@@ -25,8 +25,14 @@
                  SelectionChanged="OnNavChanged" />
       </StackPanel>
     </Border>
-    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" Padding="24,20,24,20">
-      <ContentControl x:Name="Host" />
-    </ScrollViewer>
+    <!-- 内容列必须是**有限高度**。这里原来把 Host 包在 ScrollViewer(VerticalScrollBarVisibility=Auto)
+         里，而 ScrollViewer 给内容的竖向约束是无限高：概览页那个 `*` 行于是拿不到「视口高」，
+         DataGrid 按行数长到 ~1150px 再由整页滚动兜着 —— 滚轮是滚得动的，但滚的是整页，
+         表头跟着一起滚出视野（真窗口实测：滚轮后第一条变化的行在 y=19，正是表头那一带），
+         排版成本也随行数线性上升。现在 Host 直接占 `*` 列的有限高度：
+         表头固定、只有表体滚（实测变化从 y=85 才开始，表头那一条带一个像素没动）。
+         页面契约随之明确 —— 需要整页滚动的页自己在页内放 ScrollViewer，外壳不再代劳；
+         这条契约由 smoke_test.py 的 check_panel_real_scroll() 在真窗口上钉住。 -->
+    <ContentControl x:Name="Host" Grid.Column="1" Margin="24,20,24,20" />
   </Grid>
 </ui:FluentWindow>
