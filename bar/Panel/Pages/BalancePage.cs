@@ -3,7 +3,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 余额页：余额 Key 的录入 / 清除，和余额本身的状态与手动刷新。

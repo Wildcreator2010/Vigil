@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using Win = System.Windows;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// PanelWindow 必须是 public：WPF 标记编译器为 x:Class 生成的那半个分部写死了
     /// `public partial class`，代码侧声明成 internal 会撞 CS0262（分部可访问性冲突）。
@@ -22,6 +22,9 @@ namespace DshBar
             for (int i = 0; i < PanelPages.Keys.Length; i++)
                 Nav.Items.Add(new WpfControls.ListBoxItem { Content = PanelPages.Labels[i], Tag = PanelPages.Keys[i] });
             Nav.SelectedIndex = 0;
+            // 版本代号写在侧栏底部：用户要的是「版本号叫 Vachellia farnesiana」，
+            // 它得在界面上看得见，不能只躺在 csproj 里。
+            VersionLine.Text = App.VersionText;
             Instance = this;
             App.SnapshotChanged += OnSnapshotChanged;
             // 新建的窗口不会自己继承上次 ApplyTheme 时设过的材质，得当场补一次；
@@ -94,7 +97,7 @@ namespace DshBar
             if (Nav.SelectedIndex == idx) { Render(idx); return; }
             // _navigating 只用来压掉 SelectedIndex 赋值同步触发的 OnNavChanged（防双份 Render）；
             // 真正的渲染必须在这里自己做。Task 3 起的写法把赋值和渲染一起压掉了 ——
-            // `DshBar.exe --panel appearance` 导航条亮在「外观」、Host 里却还躺着构造时
+            // `Vigil.exe --panel appearance` 导航条亮在「外观」、Host 里却还躺着构造时
             // Render(0) 塞进去的概览页（真窗口截图实证）。默认页恰好是 0 号，
             // 所以冷打开与旧冒烟从没暴露过它。
             _navigating = true;

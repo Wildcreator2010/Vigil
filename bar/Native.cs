@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace DshBar
+namespace Vigil
 {
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect

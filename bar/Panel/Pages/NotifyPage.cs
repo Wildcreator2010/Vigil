@@ -3,7 +3,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 通知页：系统通知总开关 + 「需要操作」的重复提醒间隔。

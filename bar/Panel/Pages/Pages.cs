@@ -2,7 +2,7 @@ using System.Windows;
 using System.Windows.Media;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>控制台里的一页。Task 5~8 填实，本文件只保证可编译可渲染。</summary>
     internal class PageBase : WpfControls.ContentControl, IPanelPage

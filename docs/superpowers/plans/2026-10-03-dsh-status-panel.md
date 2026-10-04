@@ -4,7 +4,7 @@
 
 **Goal:** 给 dsh-status 增加一个 AF-Media-Bar 风格的桌面控制台窗口（实时状态 + 全部会话 + 设置），并把项目自身与全部第三方（含传递依赖）的许可证写清楚。
 
-**Architecture:** 面板是 DshBar.exe 同进程内的第二扇窗口，复用已有的 `StateClient`（常驻 `python dsh_state.py --watch` 子进程）与 `Settings` 内存单例，零 IPC。唯一后端改动是让引擎快照多吐一个 `sessions` 数组。窗口外壳用 XAML + WPF-UI 的 `FluentWindow`，6 个页面全部用 C# 构建（与仓库现有 `BarWindow.cs` 的全代码风格一致）。
+**Architecture:** 面板是 Vigil.exe 同进程内的第二扇窗口，复用已有的 `StateClient`（常驻 `python dsh_state.py --watch` 子进程）与 `Settings` 内存单例，零 IPC。唯一后端改动是让引擎快照多吐一个 `sessions` 数组。窗口外壳用 XAML + WPF-UI 的 `FluentWindow`，6 个页面全部用 C# 构建（与仓库现有 `BarWindow.cs` 的全代码风格一致）。
 
 **Tech Stack:** C# / .NET 10 WPF + WinForms、WPF-UI 4.2.0（MIT）、Python 3.14 标准库、无 pytest（用仓库自有的断言脚本）。
 
@@ -59,7 +59,7 @@
 **Files:**
 - Create: `LICENSE`
 - Create: `THIRD-PARTY-NOTICES.md`
-- Modify: `bar/DshBar.csproj`
+- Modify: `bar/Vigil.csproj`
 - Modify: `README.md`（删「编译不需要联网」；新增「开源协议」「致谢」；文件清单补两行）
 - Test: `smoke_test.py`（新增 `check_licenses()`）
 
@@ -228,7 +228,7 @@ def check_licenses() -> None:
     lic = os.path.join(root, "LICENSE")
     tpn = os.path.join(root, "THIRD-PARTY-NOTICES.md")
     readme_p = os.path.join(root, "README.md")
-    csproj_p = os.path.join(root, "bar", "DshBar.csproj")
+    csproj_p = os.path.join(root, "bar", "Vigil.csproj")
     check("LICENSE 存在", os.path.isfile(lic), lic)
     check("THIRD-PARTY-NOTICES.md 存在", os.path.isfile(tpn), tpn)
     # 缺文件 / 非 UTF-8 一律记 ✗：合规段会被后续任务的 --all 复用，不能让整段 traceback 退出。
@@ -330,7 +330,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - [ ] **Step 5: 补 csproj 元数据并改 README**
 
-`bar/DshBar.csproj` 的 `<PropertyGroup>` 内追加（`Version` 保持 `1.0.0`，它是版本号唯一来源）：
+`bar/Vigil.csproj` 的 `<PropertyGroup>` 内追加（`Version` 保持 `1.0.0`，它是版本号唯一来源）：
 
 ```xml
     <AssemblyTitle>dsh 任务栏状态栏</AssemblyTitle>
@@ -355,7 +355,7 @@ Expected: `0`，且 `0 个警告 0 个错误`。
 - [ ] **Step 7: 提交**
 
 ```bash
-git add LICENSE THIRD-PARTY-NOTICES.md bar/DshBar.csproj README.md smoke_test.py
+git add LICENSE THIRD-PARTY-NOTICES.md bar/Vigil.csproj README.md smoke_test.py
 git commit -m "docs: 补齐 MIT 许可证与第三方声明（含 WPF-UI 传递依赖）"
 ```
 
@@ -537,7 +537,7 @@ git commit -m "feat(engine): 快照输出 sessions 数组供控制台会话表�
 ### Task 3: 引入 WPF-UI + 面板外壳可开可关
 
 **Files:**
-- Modify: `bar/DshBar.csproj`（加 `PackageReference`）
+- Modify: `bar/Vigil.csproj`（加 `PackageReference`）
 - Create: `bar/Panel/PanelWindow.xaml`
 - Create: `bar/Panel/PanelWindow.xaml.cs`
 - Modify: `bar/App.cs`（解析 `--panel`、`--panel-shot`；托盘与右键入口；`internal` 门面）
@@ -568,7 +568,7 @@ def check_panel_shell() -> None:
         print("  （跳过：没有编译产物）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     shots = {}
     for page in PANEL_PAGES:
@@ -604,11 +604,11 @@ def check_panel_window() -> None:
         u = _user32()
         found, t0 = None, time.time()
         while time.time() - t0 < 25:
-            found = top_window("dsh 控制台")
+            found = top_window("Vigil 控制台")
             if found:
                 break
             time.sleep(0.4)
-        check("面板窗口已出现", bool(found), "找不到标题为 dsh 控制台 的顶层窗口")
+        check("面板窗口已出现", bool(found), "找不到标题为 Vigil 控制台 的顶层窗口")
         if found:
             style = u.GetWindowLongW(found, -16)
             l, t, r, b = rect_of(found)
@@ -619,15 +619,15 @@ def check_panel_window() -> None:
         u.PostMessage(found, 0x0010, 0, 0)  # WM_CLOSE
         time.sleep(1.5)
         check("关窗后进程仍在（只是隐藏，没销毁）", bool(bar_processes()), "进程跟着退出了")
-        check("关窗后面板不再可见", not top_window("dsh 控制台"), "窗口还看得见")
+        check("关窗后面板不再可见", not top_window("Vigil 控制台"), "窗口还看得见")
         subprocess.run([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE),
                        timeout=30)
         t1 = time.time()
-        while time.time() - t1 < 20 and not top_window("dsh 控制台"):
+        while time.time() - t1 < 20 and not top_window("Vigil 控制台"):
             time.sleep(0.4)
-        check("再次请求能重新打开面板", bool(top_window("dsh 控制台")), "面板没能再打开")
+        check("再次请求能重新打开面板", bool(top_window("Vigil 控制台")), "面板没能再打开")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         time.sleep(3)
         check("退出后无残留", not bar_processes(), str(bar_processes()))
 ```
@@ -664,7 +664,7 @@ Expected: 失败，`--panel-shot overview` 报退出码非 0 或输出为空（�
 
 - [ ] **Step 3: csproj 加包引用**
 
-`bar/DshBar.csproj` 末尾 `</Project>` 前加：
+`bar/Vigil.csproj` 末尾 `</Project>` 前加：
 
 ```xml
   <ItemGroup>
@@ -692,11 +692,11 @@ Expected: `0`。
 - [ ] **Step 5: 写 `bar/Panel/PanelWindow.xaml`**
 
 ```xml
-<ui:FluentWindow x:Class="DshBar.PanelWindow"
+<ui:FluentWindow x:Class="Vigil.PanelWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-        Title="dsh 控制台"
+        Title="Vigil 控制台"
         Width="960" Height="640"
         MinWidth="760" MinHeight="500"
         WindowStartupLocation="CenterScreen"
@@ -709,7 +709,7 @@ Expected: `0`。
     </Grid.ColumnDefinitions>
     <Border Grid.Column="0" Background="White" BorderBrush="#E2E5EA" BorderThickness="0,0,1,0">
       <StackPanel Margin="10,14,10,0">
-        <TextBlock Text="dsh 控制台" FontSize="17" FontWeight="SemiBold"
+        <TextBlock Text="Vigil 控制台" FontSize="17" FontWeight="SemiBold"
                    Foreground="#1A1D23" Margin="4,0,0,12" />
         <ListBox x:Name="Nav" BorderThickness="0" Background="Transparent"
                  SelectionChanged="OnNavChanged" />
@@ -729,7 +729,7 @@ using System;
 using System.Collections.Generic;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     internal sealed partial class PanelWindow : Wpf.Ui.Controls.FluentWindow
     {
@@ -834,7 +834,7 @@ using System.Windows;
 using System.Windows.Media;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>控制台里的一页。Task 5~8 填实，本文件只保证可编译可渲染。</summary>
     internal class PageBase : WpfControls.ContentControl, IPanelPage
@@ -895,7 +895,7 @@ namespace DshBar
 紧接着的日志行改成同时带上面板参数：
 
 ```csharp
-            Log($"DshBar 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
+            Log($"Vigil 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
 ```
 
 **在 `_mutex = new Mutex(...)` 之前**插入 shot 模式（它不开窗口、不抢单实例，状态栏正在跑时也能出图）：
@@ -1098,7 +1098,7 @@ Expected: `0`，`0 个警告 0 个错误`。若报 CS0104，说明某文件同�
 
 - [ ] **Step 9: 跑 shot 模式确认渲染真的成立**
 
-Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot overview shot-probe.png; echo EXIT=$?`
+Run: `cd bar/bin/Release/net10.0-windows && ./Vigil.exe --panel-shot overview shot-probe.png; echo EXIT=$?`
 Expected: 输出形如 `SHOT overview 724 600 <N>`，`EXIT=0`。
 **判据是「有没有真的画出东西」，不是色数**（Task 4 实测：占位页 7 色 / 0 个不透明像素；
 表格骨架 40 色 / 99.99% 不透明像素 / 17 条分隔线跨度恰等于六列宽之和）。
@@ -1167,7 +1167,7 @@ Expected: 退出码 0，`PrintWindow 抓到状态栏画面` / `画面已合成�
 - [ ] **Step 12: 提交**
 
 ```bash
-git add bar/DshBar.csproj bar/Panel/ bar/App.cs bar/Settings.cs smoke_test.py
+git add bar/Vigil.csproj bar/Panel/ bar/App.cs bar/Settings.cs smoke_test.py
 git commit -m "feat(panel): 引入 WPF-UI，加控制台外壳与离屏渲染门禁"
 ```
 
@@ -1337,7 +1337,7 @@ using System.Windows;
 using System.Windows.Media;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>控制台的分组建块：白卡片 + 分隔线，行是「标题/说明 + 右侧控件」。
     /// 对齐 AF-Media-Bar 的 SettingsGroup / SettingsRow 词汇，但全部自绘，
@@ -1457,7 +1457,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     internal sealed class AppearancePage : WpfControls.ContentControl, IPanelPage
     {
@@ -1600,7 +1600,7 @@ Expected: 至少各一处命中。零命中就**停下来报 BLOCKED**，不要�
 Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep -a ": warning\|: error" ../b.log | head`
 Expected: `0`，无输出（0 警告 0 错误）。
 
-Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot appearance probe.png`
+Run: `cd bar/bin/Release/net10.0-windows && ./Vigil.exe --panel-shot appearance probe.png`
 Expected: `SHOT appearance 724 600 <colors>`，colors > 20 **且不透明像素 > 0**。随后 `rm -f probe.png`。
 （阈值口径见 Task 4：色数只当地板值用，真正的判据是不透明像素与结构证据。）
 
@@ -1672,7 +1672,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     internal sealed class NotifyPage : WpfControls.ContentControl, IPanelPage
     {
@@ -1720,7 +1720,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     internal sealed class RuntimePage : WpfControls.ContentControl, IPanelPage
     {
@@ -1787,7 +1787,7 @@ namespace DshBar
 Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep -a ": warning\|: error" ../b.log | head`
 Expected: `0`，无输出。
 
-Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot notify p1.png && ./DshBar.exe --panel-shot runtime p2.png && rm -f p1.png p2.png`
+Run: `cd bar/bin/Release/net10.0-windows && ./Vigil.exe --panel-shot notify p1.png && ./Vigil.exe --panel-shot runtime p2.png && rm -f p1.png p2.png`
 Expected: 两行 `SHOT ... 724 600 <colors>`，colors > 20 且不透明像素 > 0。
 
 - [ ] **Step 5: 加通知/运行设置的往返断言**
@@ -1888,7 +1888,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     internal sealed class BalancePage : WpfControls.ContentControl, IPanelPage
     {
@@ -1981,7 +1981,7 @@ Expected: `0`，无输出。若有 `CS0246 KeyDialog` 说明还有调用点，�
 
 - [ ] **Step 5: 跑余额页渲染与 DPAPI 往返**
 
-Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot balance p.png && rm -f p.png`
+Run: `cd bar/bin/Release/net10.0-windows && ./Vigil.exe --panel-shot balance p.png && rm -f p.png`
 Expected: `SHOT balance 724 600 <colors>`，colors > 20 且不透明像素 > 0。
 
 Run: `python smoke_test.py`
@@ -2090,7 +2090,7 @@ using System.Windows;
 using System.Windows.Media;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     internal sealed class OverviewPage : WpfControls.ContentControl, IPanelPage
     {
@@ -2258,7 +2258,7 @@ Expected: 退出码 0，且 `概览页比关于页更丰富（会话表已填上
 
 - [ ] **Step 5: 人工目视**
 
-Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel overview`
+Run: `cd bar/bin/Release/net10.0-windows && ./Vigil.exe --panel overview`
 Expected: 任务栏状态条照常；面板居中打开，浅色白底，左侧 6 项导航可点，概览页顶部大字显示当前状态、会话表有行、余额非空或显示 `--`。看完托盘「退出」。
 
 - [ ] **Step 6: 提交**
@@ -2279,7 +2279,7 @@ git commit -m "feat(panel): 概览页填实（当前状态卡 + 全部会话表 
 **Files:**
 - Create: `bar/Panel/Pages/AboutPage.cs`
 - Modify: `bar/Panel/Pages/Pages.cs`（删 `AboutPage` 占位）
-- Modify: `bar/DshBar.csproj`（把 `assets/logo.png` 作为 Resource 嵌入）
+- Modify: `bar/Vigil.csproj`（把 `assets/logo.png` 作为 Resource 嵌入）
 - Modify: `bar/App.cs`（托盘图标改用 `assets/dsh.ico`；新增 `App.RepoRoot` / `VersionText` / 清单解析）
 - Test: `smoke_test.py`
 
@@ -2349,21 +2349,21 @@ def check_panel_handoff() -> None:
     try:
         u = _user32()
         t0 = time.time()
-        while time.time() - t0 < 25 and not top_window("dsh 控制台"):
+        while time.time() - t0 < 25 and not top_window("Vigil 控制台"):
             time.sleep(0.3)
-        check("首个实例未开面板", not top_window("dsh 控制台"), "不该自动打开面板")
+        check("首个实例未开面板", not top_window("Vigil 控制台"), "不该自动打开面板")
         p = subprocess.Popen([BAR_EXE, "--panel", "balance"], cwd=os.path.dirname(BAR_EXE))
         rc = p.wait(timeout=30)
         check("第二个实例静默退出且码为 0", rc == 0, f"退出码 {rc}")
         check("第二个实例没有常驻", not bar_processes() or len(bar_processes()) == 1,
               str(bar_processes()))
         t1 = time.time()
-        while time.time() - t1 < 20 and not top_window("dsh 控制台"):
+        while time.time() - t1 < 20 and not top_window("Vigil 控制台"):
             time.sleep(0.4)
-        check("原实例收到请求并打开面板", bool(top_window("dsh 控制台")), "面板没出现")
+        check("原实例收到请求并打开面板", bool(top_window("Vigil 控制台")), "面板没出现")
         check("请求文件已被消费掉", not os.path.isfile(req), req)
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         time.sleep(3)
         check("收尾无残留", not bar_processes(), str(bar_processes()))
 ```
@@ -2401,7 +2401,7 @@ Expected: `EXIT=0`，全部 ✓，无「跳过」。
 
 - [ ] **Step 5: README 收尾**
 
-README 新增 `## 控制台面板` 一节：三个入口（托盘「打开面板」/ 状态栏右键 / `DshBar.exe --panel [页名]`）、6 页各自做什么、`--panel-shot` 是给冒烟用的离屏渲染。文件清单表补 `bar/Panel/` 一行。
+README 新增 `## 控制台面板` 一节：三个入口（托盘「打开面板」/ 状态栏右键 / `Vigil.exe --panel [页名]`）、6 页各自做什么、`--panel-shot` 是给冒烟用的离屏渲染。文件清单表补 `bar/Panel/` 一行。
 
 - [ ] **Step 6: 提交**
 

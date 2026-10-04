@@ -56,12 +56,12 @@ dsh-status 现在只有一个嵌在 Windows 任务栏里的状态条，唯一的
 
 ## 3. 架构：进程与窗口拓扑
 
-面板是 **DshBar.exe 同进程内的第二扇窗口**，不新增可执行文件。理由：`StateClient`
+面板是 **Vigil.exe 同进程内的第二扇窗口**，不新增可执行文件。理由：`StateClient`
 （常驻 python 子进程）、`Settings`（内存单例）、托盘、余额 Key 存取全都在这个进程里，
 同进程即零 IPC、零状态同步问题。
 
 ```
-DshBar.exe
+Vigil.exe
 ├── BarWindow        现有任务栏状态条（纯 C# 分层窗口，本次不动其视觉树）
 ├── PanelWindow      新增 FluentWindow + NavigationView
 │   └── Pages/       概览 · 通知 · 外观 · 运行 · 余额 · 关于
@@ -70,9 +70,9 @@ DshBar.exe
 ```
 
 打开面板的三个入口：托盘菜单「打开面板」、状态栏右键菜单（复用同一个 ContextMenuStrip）、
-`DshBar.exe --panel [page]`。
+`Vigil.exe --panel [page]`。
 
-**二次实例行为变更**：现在再启动一个 DshBar.exe 会弹「状态栏已经在运行了。」后退出。
+**二次实例行为变更**：现在再启动一个 Vigil.exe 会弹「状态栏已经在运行了。」后退出。
 改为：写 `%LOCALAPPDATA%\dsh-status\panel.request`（内容是页签名，空为默认页），然后静默退出；
 已在跑的实例由 watchdog（每 2 秒 tick）发现该文件 mtime 变化，删除它并打开/聚焦面板。
 不引入具名管道或 WCF——一个文件加一次 mtime 比较就够，且和现有的 `refresh.token` 是同一套路。
@@ -187,7 +187,7 @@ DshBar.exe
    声明为"任务栏停靠与设置界面布局的设计参照，未复制其源代码"
 4. .NET 10 Windows Desktop Runtime、Python 3.14 标准库 —— 运行时依赖，不随附其代码，注明版本要求
 
-`DshBar.csproj` 补元数据并对齐 AF-Media-Bar 的做法（`Version` 作为版本号唯一来源，
+`Vigil.csproj` 补元数据并对齐 AF-Media-Bar 的做法（`Version` 作为版本号唯一来源，
 运行期从程序集读）：`PackageLicenseExpression=MIT`、`Authors`、`Copyright`、
 `RepositoryUrl`、`Description`、`Product`。
 
@@ -237,7 +237,7 @@ README 改动：新增「开源协议」与「致谢」两节；**删除「编�
 面板全部收在 `bar/Panel/` 下，避免把 18 个新文件平铺进现在只有 9 个 `.cs` 的 `bar/`；
 `UseWPF=true` 时 SDK 按 `**/*.xaml` 递归收集，子目录不影响构建。
 
-修改：`bar/DshBar.csproj`（WPF-UI 引用 + 元数据）、`bar/App.cs`（面板入口、`--panel`、
+修改：`bar/Vigil.csproj`（WPF-UI 引用 + 元数据）、`bar/App.cs`（面板入口、`--panel`、
 panel.request 轮询、showBar 处理）、`bar/Settings.cs`（两个新字段）、
 `bar/StateClient.cs`（`Snapshot.Sessions` 与 `SessionRow`）、
 `dsh_state.py`（`sessions` 输出）、`test_dsh_state.py`、`smoke_test.py`、`README.md`
@@ -335,7 +335,7 @@ panel.request 轮询、showBar 处理）、`bar/Settings.cs`（两个新字段�
 
 1. **身份区**：Logo 大图 + 项目名 + 版本 + 作者 **Wildcreator** + 仓库链接。
 2. **开源许可清单**：条目 = 名称 / 版本 / SPDX / 项目地址 / 用途说明。
-   **必须与 `THIRD-PARTY-NOTICES.md` 和 `DshBar.csproj` 的真实依赖逐项一致** ——
+   **必须与 `THIRD-PARTY-NOTICES.md` 和 `Vigil.csproj` 的真实依赖逐项一致** ——
    AF-Media-Bar 自己的注释就写着「否则这一节就是装饰」。落地方式：清单从
    `THIRD-PARTY-NOTICES.md` 解析出来，而不是在 C# 里再手抄一份（手抄必然漂移）。
 3. **运行时与素材声明**：.NET 运行时、Segoe Fluent Icons 这类**非 MIT** 项单独标出。

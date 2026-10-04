@@ -4,7 +4,7 @@ cd /d "%~dp0bar"
 dotnet build -c Release --nologo
 if errorlevel 1 goto fail
 echo.
-echo 已生成：bin\Release\net10.0-windows\DshBar.exe
+echo 已生成：bin\Release\net10.0-windows\Vigil.exe
 echo 双击 start-bar.bat 启动。
 exit /b 0
 :fail

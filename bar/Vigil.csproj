@@ -7,19 +7,25 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <AssemblyName>DshBar</AssemblyName>
-    <RootNamespace>DshBar</RootNamespace>
+    <AssemblyName>Vigil</AssemblyName>
+    <RootNamespace>Vigil</RootNamespace>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>1.0.0</Version>
-    <AssemblyTitle>dsh 任务栏状态栏</AssemblyTitle>
-    <Product>dsh-status</Product>
-    <Description>DeepSeek Harness Desktop 任务栏状态检测与控制台</Description>
+    <AssemblyTitle>Vigil · dsh 任务栏状态栏</AssemblyTitle>
+    <Product>Vigil</Product>
+    <Description>Vigil —— 嵌在任务栏里的 dsh 会话守望条与控制台（版本代号 Vachellia farnesiana）</Description>
     <Authors>Wildcreator</Authors>
     <Copyright>Copyright (c) 2026 Wildcreator</Copyright>
     <RepositoryUrl>https://github.com/Wildcreator2010/dsh-status</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <!-- exe 文件图标与托盘图标共用这一份多尺寸 ico；WPF 里画 Logo 用下面那条 Resource -->
+    <ApplicationIcon>assets\dsh.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="assets\logo.png" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Include="..\dsh_state.py" Link="dsh_state.py" CopyToOutputDirectory="PreserveNewest" />

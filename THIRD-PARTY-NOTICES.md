@@ -1,6 +1,6 @@
 # 第三方声明与开源许可（Third-Party Notices）
 
-dsh-status（Wildcreator）本身以 **MIT 许可证** 发布，全文见仓库根目录的 [`LICENSE`](LICENSE)。
+Vigil（Wildcreator）本身以 **MIT 许可证** 发布，全文见仓库根目录的 [`LICENSE`](LICENSE)。
 
 本文件列出项目中用到的第三方组件、素材与参考项目，每条给出**用途 + 上游地址 + 许可证 + 版权行**；
 **凡随产物分发的条目**（第 1、2、3 节）都按上游要求附上许可证原文（不是只给链接），
@@ -16,7 +16,7 @@ dsh-status（Wildcreator）本身以 **MIT 许可证** 发布，全文见仓库�
 ## 1. WPF-UI 4.2.0 — MIT
 
 - **用途**：控制台面板窗口的 Fluent 外壳与表单控件（按规划在后续任务以 `PackageReference` 引入；
-  截至本文件写成时，`bar/DshBar.csproj` 尚未引用该包）。
+  截至本文件写成时，`bar/Vigil.csproj` 尚未引用该包）。
 - **上游**：https://github.com/lepoco/wpfui ｜ NuGet 包 `WPF-UI` 4.2.0，`authors = lepo.co`
 - **许可证**：MIT（nuspec `<license type="expression">MIT</license>`，且 `requireLicenseAcceptance = true`）
 - **版权行**（nuspec `<copyright>`）：`Copyright (C) 2021-2025 Leszek Pomianowski and WPF UI Contributors`
@@ -255,7 +255,7 @@ SOFTWARE.
 
 ### 4.1 .NET 10 Windows Desktop Runtime
 
-- **用途**：`DshBar.exe`（WPF + WinForms）的运行环境。
+- **用途**：`Vigil.exe`（WPF + WinForms）的运行环境。
 - **上游**：https://dotnet.microsoft.com/download/dotnet （MIT / 微软社区许可证）
 - **版本下限**：**.NET 10 Windows Desktop Runtime**。目标框架 `net10.0-windows`，
   低于该版本无法启动；本项目发布产物不自带运行时（framework-dependent）。

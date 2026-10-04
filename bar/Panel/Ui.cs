@@ -4,7 +4,7 @@ using System.Windows;
 using System.Windows.Media;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 控制台的分组建块：主题卡片 + 分隔线，行是「标题/说明 + 右侧控件」。

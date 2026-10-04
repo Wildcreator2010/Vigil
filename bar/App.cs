@@ -11,18 +11,40 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
-namespace DshBar
+namespace Vigil
 {
     internal static class App
     {
         private static readonly Dictionary<string, Icon> IconCache = new Dictionary<string, Icon>();
+        // 2026-10-04 产品改名 Vigil，数据目录与开机自启的注册表值名一起换。
+        // 上游 dsh 的会话目录（~/.dsh）不是我们的，一个字符都不动。
+        private const string StateDirName = "Vigil";
+        private const string LegacyStateDirName = "dsh-status";
         private static readonly string StateDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-status");
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), StateDirName);
         private static readonly string LogFile = Path.Combine(StateDir, "bar.log");
         private static readonly string SettingsFile = Path.Combine(StateDir, "settings.json");
         private static readonly string RefreshToken = Path.Combine(StateDir, "refresh.token");
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string RunValue = "dsh-status";
+        private const string RunValue = "Vigil";
+        private const string LegacyRunValue = "dsh-status";
+
+        /// <summary>
+        /// 版本号。`VersionText` 是给人看的那一行；数字版本仍归 csproj 的 &lt;Version&gt;，
+        /// 种加词式的代号（Vachellia farnesiana = 甜金合欢，本仓库所在目录的名字）
+        /// 是用户指定的发布标识，不参与任何比较逻辑。
+        /// </summary>
+        internal const string ProductName = "Vigil";
+        internal const string VersionCodename = "Vachellia farnesiana";
+        internal static string VersionText
+        {
+            get
+            {
+                var v = typeof(App).Assembly.GetName().Version;
+                string num = v == null ? "0.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
+                return $"{ProductName} {num} · {VersionCodename}";
+            }
+        }
 
         private static Settings _settings;
         private static BarWindow _window;
@@ -50,10 +72,78 @@ namespace DshBar
         private static bool _reqQueued;         // 已排进 dispatcher、还没执行完（防重入）
 
         [STAThread]
+        /// <summary>
+        /// 改名带来的一次性搬迁：老数据目录里的文件搬进新目录，老注册表自启项挪到新值名。
+        ///
+        /// 三条纪律：
+        /// ① **只搬新目录里还没有的**。C# 与引擎两边都可能先启动，谁先到谁搬，
+        ///    后到的看见目标已存在就跳过 —— 不会把新产生的设置盖回旧的。
+        /// ② 老目录本身不删。真搬坏了用户还能自己回去找。
+        /// ③ 注册表那一步只在「旧值存在」时才动，且写完新值才删旧值；
+        ///    中途失败最坏是自启多关一次，不会出现两个值都没了。
+        /// </summary>
+        private static void MigrateLegacyData()
+        {
+            try
+            {
+                string baseDir = Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData);
+                string legacy = Path.Combine(baseDir, LegacyStateDirName);
+                if (Directory.Exists(legacy))
+                {
+                    var moved = new List<string>();
+                    // 这里**刻意不列 Key 那个文件**：C# 侧对它的唯一正确姿势是不碰 ——
+                    // 不读、不写、也不搬。引擎的 state_dir() 里有同一份迁移，
+                    // 由它连 Key 一起搬走；C# 先启动时也只搬自己这三个，
+                    // 谁先到谁搬、后到的看见目标已存在就跳过。
+                    foreach (var name in new[] { "settings.json", "bar.log", "refresh.token" })
+                    {
+                        string src = Path.Combine(legacy, name);
+                        string dst = Path.Combine(StateDir, name);
+                        if (File.Exists(src) && !File.Exists(dst))
+                        {
+                            try { File.Move(src, dst); moved.Add(name); }
+                            catch (IOException) { }
+                        }
+                    }
+                    if (moved.Count > 0)
+                    {
+                        try
+                        {
+                            File.AppendAllText(Path.Combine(StateDir, "MIGRATED"),
+                                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} from {legacy}: " +
+                                string.Join(", ", moved) + Environment.NewLine,
+                                Encoding.UTF8);
+                        }
+                        catch (IOException) { }
+                        Log("数据目录已从 " + LegacyStateDirName + " 迁到 " + StateDirName +
+                            "：" + string.Join(", ", moved));
+                    }
+                }
+            }
+            catch (Exception ex) { Log($"数据目录迁移失败: {ex.Message}"); }
+
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true);
+                if (key == null) return;
+                object oldVal = key.GetValue(LegacyRunValue);
+                if (oldVal is string old && !string.IsNullOrWhiteSpace(old))
+                {
+                    if (key.GetValue(RunValue) == null)
+                        key.SetValue(RunValue, old);
+                    key.DeleteValue(LegacyRunValue, false);
+                    Log($"开机自启项已从 {LegacyRunValue} 迁到 {RunValue}");
+                }
+            }
+            catch (Exception ex) { Log($"开机自启迁移失败: {ex.Message}"); }
+        }
+
         private static int Main(string[] args)
         {
             Native.SetProcessDpiAwarenessContext((IntPtr)(-4));
             Directory.CreateDirectory(StateDir);
+            MigrateLegacyData();
 
             string demo = null, panel = null, shotPage = null, shotOut = null;
             for (int i = 0; i < args.Length; i++)
@@ -77,7 +167,7 @@ namespace DshBar
             // shot 模式不开窗口、不抢单实例，状态栏正在跑时也能出图，所以在互斥体之前就返回。
             if (shotPage != null) return RenderShot(shotPage, shotOut);
 
-            _mutex = new Mutex(false, @"Local\dsh-status-bar-mutex");
+            _mutex = new Mutex(false, @"Local\Vigil-bar-mutex");
             bool owned = false;
             try
             {
@@ -94,7 +184,7 @@ namespace DshBar
             }
 
             _settings = Settings.Load(SettingsFile);
-            Log($"DshBar 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
+            Log($"Vigil 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
 
             var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             // 趁一个窗口都还没建，把 Fluent 资源挂上：BarWindow 是嵌进任务栏的分层窗口，
@@ -526,8 +616,8 @@ namespace DshBar
                 // 排版之前不把快照交进去，占位页也许看不出来，但填实以后 --panel-shot
                 // 渲染的永远是空表，spec §9「概览页色数显著高于关于页」那条门禁无从判定。
                 if (root is IPanelPage pp) pp.Refresh(_last);
-                // 必须全限定：本命名空间下有 DshBar.Rect（Win32 用的那个），App.cs 又同时
-                // using 了 System.Drawing 与 System.Windows，裸写 Size / Rect 会撞 CS0104 或绑到 DshBar.Rect。
+                // 必须全限定：本命名空间下有 Vigil.Rect（Win32 用的那个），App.cs 又同时
+                // using 了 System.Drawing 与 System.Windows，裸写 Size / Rect 会撞 CS0104 或绑到 Vigil.Rect。
                 root.Measure(new System.Windows.Size(w, h));
                 root.Arrange(new System.Windows.Rect(0, 0, w, h));
                 root.UpdateLayout();
@@ -779,7 +869,7 @@ namespace DshBar
             _reqQueued = true;
             string target = string.IsNullOrEmpty(page) ? "overview" : page;
             // 走 OpenPanel 而不是 PanelWindow.Instance?.ShowOn：常驻实例通常是普通
-            // DshBar.exe 起的，面板压根没创建过，Instance 一直是 null，
+            // Vigil.exe 起的，面板压根没创建过，Instance 一直是 null，
             // 那时 ShowOn 的调用会被 ?. 静默吃掉 —— 请求删了、窗口却没开。
             // 开窗排到下一个 dispatcher 轮，本轮 Tick 的 try 罩不到委托体，
             // 所以委托体必须自带 try（N1）：面板打不开只该是打不开，不该带走状态栏。
@@ -862,7 +952,7 @@ namespace DshBar
 
         private static string TooltipFor(Snapshot snap)
         {
-            if (snap == null) return "dsh 状态检测";
+            if (snap == null) return "Vigil · 正在盯 dsh 会话";
             string tip = (snap.Tooltip ?? snap.Label ?? "").Replace('\n', ' ');
             tip = System.Text.RegularExpressions.Regex.Replace(tip, @"\s+", " ").Trim();
             return tip.Length <= 63 ? tip : tip.Substring(0, 62) + "…";
@@ -1044,7 +1134,7 @@ namespace DshBar
             _tray = new NotifyIcon
             {
                 Icon = StatusIcon("#8E918A", "?"),
-                Text = "dsh 状态检测",
+                Text = "Vigil · 正在盯 dsh 会话",
                 Visible = true,
                 ContextMenuStrip = menu,
             };
@@ -1361,7 +1451,7 @@ namespace DshBar
                 _settings?.Save(SettingsFile);
                 _mutex.ReleaseMutex();
                 _mutex.Dispose();
-                Log("DshBar 退出");
+                Log("Vigil 退出");
             }
             catch
             {

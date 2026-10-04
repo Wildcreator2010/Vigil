@@ -3,7 +3,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 运行页：检测引擎的轮询间隔、阈值只读展示、手动重启，以及开机自启与两个目录入口。

@@ -18,6 +18,7 @@ import glob
 import io
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.error
@@ -716,10 +717,52 @@ def snapshot(
 
 # ---------------------------------------------------------------- 余额
 
+STATE_DIR_NAME = "Vigil"
+LEGACY_STATE_DIR_NAME = "dsh-status"
+
+# 2026-10-04 产品改名 Vigil，数据目录跟着从 %LOCALAPPDATA%\dsh-status 换到
+# %LOCALAPPDATA%\Vigil。老机器上的设置、日志、加密的余额 Key 不能凭空"消失"，
+# 所以这里做一次性搬迁：只搬新目录里**还没有**的那几个文件，
+# 搬完把清单写进新目录的 MIGRATED 里 —— 有这份记录，重复启动不会再搬第二遍，
+# 出问题也能看出是哪一次搬的。老目录本身留着不删。
+_MIGRATED = False
+
+
+def _migrate_locked(base: str, dst: str) -> list:
+    src_root = os.path.join(base, LEGACY_STATE_DIR_NAME)
+    if not os.path.isdir(src_root) or os.path.abspath(src_root) == os.path.abspath(dst):
+        return []
+    moved = []
+    for name in ("settings.json", "bar.log", "balance.protected", "refresh.token"):
+        src = os.path.join(src_root, name)
+        dst_f = os.path.join(dst, name)
+        if os.path.isfile(src) and not os.path.exists(dst_f):
+            try:
+                shutil.move(src, dst_f)
+                moved.append(name)
+            except OSError:
+                pass
+    if moved:
+        try:
+            with open(os.path.join(dst, "MIGRATED"), "a", encoding="utf-8") as fh:
+                fh.write("%s from %s: %s\n" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), src_root, ", ".join(moved)))
+        except OSError:
+            pass
+    return moved
+
+
 def state_dir() -> str:
+    global _MIGRATED
     base = os.environ.get("LOCALAPPDATA") or expand("~/.local/share")
-    path = os.path.join(base, "dsh-status")
+    path = os.path.join(base, STATE_DIR_NAME)
     os.makedirs(path, exist_ok=True)
+    if not _MIGRATED:
+        _MIGRATED = True
+        try:
+            _migrate_locked(base, path)
+        except OSError:
+            pass
     return path
 
 
@@ -737,7 +780,7 @@ def _dpapi(data: bytes, protect: bool) -> bytes | None:
         blob_out = _DataBlob()
         flags = 0x1 if protect else 0x0  # CRYPTPROTECT_UI_FORBIDDEN
         ok = (
-            crypt32.CryptProtectData(ctypes.byref(blob_in), "dsh-status", None, None, None, flags, ctypes.byref(blob_out))
+            crypt32.CryptProtectData(ctypes.byref(blob_in), "Vigil", None, None, None, flags, ctypes.byref(blob_out))
             if protect
             else crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, flags, ctypes.byref(blob_out))
         )
@@ -840,7 +883,7 @@ def fetch_balance(ts: float, force: bool = False, ttl: float | None = None) -> d
         headers={
             "Authorization": f"Bearer {key}",
             "Accept": "application/json",
-            "User-Agent": "dsh-status/1.0",
+            "User-Agent": "Vigil/1.0",
         },
     )
     try:

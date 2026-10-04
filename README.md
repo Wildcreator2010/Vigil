@@ -1,4 +1,10 @@
-# dsh 任务栏状态栏（DeepSeek Harness Desktop 状态检测）
+# Vigil
+
+**Vigil** —— 版本代号 *Vachellia farnesiana*。作者 Wildcreator。
+
+嵌在 Windows 任务栏里的 dsh 会话守望条 + 控制台。
+
+原名「dsh 任务栏状态栏 / dsh-status」，2026-10-04 改名 Vigil；数据目录与开机自启的注册表值名一起换，老数据首次启动自动搬迁。
 
 把状态栏**嵌进 Windows 任务栏里面**（不是浮在上方），实时显示 **DeepSeek Harness Desktop**
 在做什么，右侧显示 **DeepSeek 账户余额**；另有一个按状态着色的托盘图标。
@@ -19,7 +25,7 @@
 
 ```bat
 build.cmd        :: dotnet build -c Release
-start-bar.bat    :: 启动 bar\bin\Release\net10.0-windows\DshBar.exe
+start-bar.bat    :: 启动 bar\bin\Release\net10.0-windows\Vigil.exe
 ```
 
 启动前可以先验证引擎能读懂你机器上的 dsh 会话：
@@ -73,8 +79,8 @@ python smoke_test.py --all     :: 加上 Release 编译和状态栏 GUI 冒烟
 ## 各状态视觉自检
 
 ```bat
-DshBar.exe --demo needs_action
-DshBar.exe --demo thinking
+Vigil.exe --demo needs_action
+Vigil.exe --demo thinking
 python dsh_state.py --demo error --json
 ```
 
@@ -122,9 +128,9 @@ python dsh_state.py --demo error --json
    python dsh_state.py --clear-balance-key
    python dsh_state.py --balance           :: 只查余额
    ```
-3. 明文文件 `dsh-status/balance.key`
+3. 明文文件 `仓库根/balance.key`（改名前是 dsh-status/，按目录实际名字找）
 
-Key 存在 `%LOCALAPPDATA%\dsh-status\balance.protected`，用当前 Windows 账户的 DPAPI 加密，不是明文；
+Key 存在 `%LOCALAPPDATA%\Vigil\balance.protected`，用当前 Windows 账户的 DPAPI 加密，不是明文；
 换电脑或换账户要重新录入。余额默认缓存 5 分钟，菜单「立即刷新余额」写 `refresh.token` 让引擎强制重查。
 
 ## 文件
@@ -145,7 +151,7 @@ Key 存在 `%LOCALAPPDATA%\dsh-status\balance.protected`，用当前 Windows 账
 | `LICENSE` | 本项目自身的 MIT 许可证全文 |
 | `THIRD-PARTY-NOTICES.md` | 第三方组件与素材的归属声明（含 WPF-UI 及其传递依赖的许可证原文） |
 
-运行时数据在 `%LOCALAPPDATA%\dsh-status\`：`settings.json`、`bar.log`、`balance.protected`、`refresh.token`。
+运行时数据在 `%LOCALAPPDATA%\Vigil\`：`settings.json`、`bar.log`、`balance.protected`、`refresh.token`。
 
 ## 命令行用法
 
@@ -171,14 +177,14 @@ DeepSeek Harness 把每个会话的完整事件流写在
 
 ## 常见问题
 
-- **状态栏没出现**：看 `%LOCALAPPDATA%\dsh-status\bar.log` 有没有「引擎已启动」和异常。
+- **状态栏没出现**：看 `%LOCALAPPDATA%\Vigil\bar.log` 有没有「引擎已启动」和异常。
   任务栏若在左右两侧，`FreeRange` 不适用，会退回工作区底部。
 - **托盘显示「未运行」但 Harness 开着**：按进程名 `DeepSeek Harness.exe` 判断，改了安装名就改 `APP_EXES`。
 - **状态一直「待命」**：`python dsh_state.py --pretty` 会显示最后事件与静默秒数，确认 `~/.dsh/sessions/` 在动。
 - **余额报 401**：Key 无余额查询权限或已失效，到平台控制台 API Keys 页确认。
 - **`No module named 'compression'`**：Python 低于 3.14，升级或用 `py -3.14`。
-- **开机自启**：菜单勾选即可（写 `HKCU\...\Run` 的 `dsh-status` 值指向 `DshBar.exe`），取消勾选删除。
-- **停掉状态栏**：托盘菜单「退出」；命令行用 `taskkill /f /im DshBar.exe`（引擎子进程靠 stdout 管道
+- **开机自启**：菜单勾选即可（写 `HKCU\...\Run` 的 `Vigil` 值指向 `Vigil.exe`），取消勾选删除。
+- **停掉状态栏**：托盘菜单「退出」；命令行用 `taskkill /f /im Vigil.exe`（引擎子进程靠 stdout 管道
   断裂随后自行退出，不会留孤儿）。不带 `/f` 的优雅关闭**无效**：窗口已经是 `Shell_TrayWnd` 的子窗口，
   `taskkill` 枚举不到它，会静默返回成功而进程照跑；`ShutdownMode.OnExplicitShutdown` 也让关窗口不停 app。
 

@@ -2,7 +2,7 @@ using System.Windows;
 using WpfControls = System.Windows.Controls;
 using UiControls = Wpf.Ui.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 外观页：主题单选（浅/深/跟随系统）+ 任务栏状态条开关。

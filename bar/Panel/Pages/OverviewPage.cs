@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Windows;
 using WpfControls = System.Windows.Controls;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 概览页 = 当前状态卡 + 全部会话表 + 等你处理。

@@ -1,7 +1,7 @@
 using System;
 using Microsoft.Win32;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 状态栏嵌在任务栏里，配色必须跟着系统主题走，否则深色任务栏上顶出一块白卡特别突兀。

@@ -1,7 +1,7 @@
 using System;
 using Win = System.Windows;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 控制台页签的唯一登记表：key、导航标题、以及 key 到页面实例的工厂。

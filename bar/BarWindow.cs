@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
@@ -9,7 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 
-namespace DshBar
+namespace Vigil
 {
     /// <summary>
     /// 停靠进任务栏的状态栏窗口。必须 AllowsTransparency，WPF 才会加上 WS_EX_LAYERED；
@@ -91,7 +91,7 @@ namespace DshBar
         public event Action HoverChanged;
 
         public bool Expanded => _hover;
-        public string TooltipText { get; private set; } = "dsh 状态栏";
+        public string TooltipText { get; private set; } = "Vigil 状态栏";
 
         public BarWindow()
         {
@@ -106,7 +106,7 @@ namespace DshBar
             SizeToContent = SizeToContent.Manual;
             Width = 420;
             Height = 40;
-            Title = "dsh 状态栏";
+            Title = "Vigil 状态栏";
 
             for (int i = 0; i < 4; i++)
             {
@@ -312,7 +312,7 @@ namespace DshBar
             BuildProgress(s, accentBrush);
 
             _balance.Text = string.IsNullOrEmpty(snap.StripRight) ? "--" : snap.StripRight;
-            TooltipText = string.IsNullOrEmpty(snap.Tooltip) ? "dsh 状态栏" : snap.Tooltip;
+            TooltipText = string.IsNullOrEmpty(snap.Tooltip) ? "Vigil 状态栏" : snap.Tooltip;
         }
 
         private string BuildMeta(Snapshot snap, Session s)

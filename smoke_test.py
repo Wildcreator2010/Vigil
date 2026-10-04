@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""dsh-status 冒烟测试：把 README 承诺的每条命令和状态栏契约跑成断言。
+"""Vigil（原 dsh-status）冒烟测试：把 README 承诺的每条命令和状态栏契约跑成断言。
 
   python smoke_test.py           引擎 + CLI 契约（无副作用，可随时复跑）
   python smoke_test.py --build   额外做 Release 编译，断言 0 警告 0 错误
-  python smoke_test.py --gui     额外启动 DshBar.exe，在 Win32 层校验任务栏停靠
+  python smoke_test.py --gui     额外启动 Vigil.exe，在 Win32 层校验任务栏停靠
 
 --gui 会真的往任务栏里挂一个状态栏，结束时用 taskkill /f 收掉（优雅关闭当前不可用，
 见 check_gui 的注释）。--build 需要 .NET 10 SDK。
@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import dsh_state as ds  # noqa: E402
 
-BAR_EXE = os.path.join(HERE, "bar", "bin", "Release", "net10.0-windows", "DshBar.exe")
+BAR_EXE = os.path.join(HERE, "bar", "bin", "Release", "net10.0-windows", "Vigil.exe")
 SNAPSHOT_KEYS = (
     "ok", "state", "label", "glyph", "color", "detail", "strip", "strip_left",
     "strip_right", "tooltip", "tooltip_full", "tip_lines", "attention",
@@ -239,7 +239,7 @@ def check_key_storage() -> None:
 def check_engine_copy() -> None:
     print("\n== 产物一致性 ==")
     if not os.path.isfile(BAR_EXE):
-        check("DshBar.exe 存在", False, "先跑 --build 或 build.cmd")
+        check("Vigil.exe 存在", False, "先跑 --build 或 build.cmd")
         return
     out = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
     check("产物目录带引擎", os.path.isfile(out), out)
@@ -406,7 +406,7 @@ def check_licenses() -> None:
     lic = os.path.join(root, "LICENSE")
     tpn = os.path.join(root, "THIRD-PARTY-NOTICES.md")
     readme_p = os.path.join(root, "README.md")
-    csproj_p = os.path.join(root, "bar", "DshBar.csproj")
+    csproj_p = os.path.join(root, "bar", "Vigil.csproj")
     check("LICENSE 存在", os.path.isfile(lic), lic)
     check("THIRD-PARTY-NOTICES.md 存在", os.path.isfile(tpn), tpn)
     # 缺文件 / 非 UTF-8 一律记 ✗：合规段会被后续任务的 --all 复用，不能让整段 traceback 退出。
@@ -785,7 +785,7 @@ def find_bar_windows() -> list[int]:
     def cb(hwnd, _lparam):
         buf = ctypes.create_unicode_buffer(256)
         u.GetClassNameW(hwnd, buf, 256)
-        if buf.value.startswith("HwndWrapper[DshBar"):
+        if buf.value.startswith("HwndWrapper[Vigil"):
             found.append(hwnd)
         return True
 
@@ -814,7 +814,7 @@ def top_window(title: str) -> int:
 
 
 def bar_processes() -> set[int]:
-    out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq DshBar.exe", "/fo", "csv", "/nh"],
+    out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq Vigil.exe", "/fo", "csv", "/nh"],
                          capture_output=True, text=True, errors="replace").stdout
     return {int(p.split('","')[1]) for p in out.splitlines() if p.count('"') >= 3}
 
@@ -1119,7 +1119,7 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
         print("  （跳过：没有编译产物）")
         return shots
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return shots
     shot_paths: dict[str, str] = {}
     for page in PANEL_PAGES:
@@ -1247,7 +1247,7 @@ def check_panel_empty_sessions(empty: tuple[int, str, dict | None]) -> None:
         return
     if bar_processes():
         # 同口径的另一半：已有实例是**真事故**（上一轮没收拾干净），必须记 ✗ 而不是静默跳过。
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     rc, head, st = empty
     # 断言的不是色数，是「没崩 + 表壳还在 + 没有数据行」：
@@ -1296,7 +1296,7 @@ def check_panel_row_data(empty_base: dict | None) -> None:
         print("  （跳过：没有编译产物）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     if empty_base is None:
         check("空表基线可用（本段两条门禁的前提）", False, "上一轮 --panel-shot 注入没出图")
@@ -1519,7 +1519,7 @@ def check_overview_page() -> None:
         print("  （跳过：没有编译产物，离屏与真窗口两面跑不了）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     eng_bin = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
     if not check("概览页注入点就位", os.path.isfile(eng_bin), eng_bin):
@@ -1580,12 +1580,12 @@ def check_overview_page() -> None:
             subprocess.Popen([BAR_EXE, "--panel", "overview"], cwd=os.path.dirname(BAR_EXE))
             t0, hwnd = time.time(), 0
             while time.time() - t0 < 25:
-                hwnd = top_window("dsh 控制台")
+                hwnd = top_window("Vigil 控制台")
                 if hwnd:
                     break
                 time.sleep(0.4)
             if not check("真窗口：概览页面板已打开（--panel overview）", bool(hwnd),
-                         "找不到标题为 dsh 控制台 的顶层窗口"):
+                         "找不到标题为 Vigil 控制台 的顶层窗口"):
                 return
             res = uia(hwnd, "text1")
             if not check("真窗口：UIA 读得到概览页文字（text1 把换行折成 <NL>，一条不落）",
@@ -1624,7 +1624,7 @@ def check_overview_page() -> None:
                   f"标记「冒烟待处理甲」出现 {n_jia} 次、「乙」{n_yi} 次 —— 各自都该是 1，"
                   f">1 就是每帧又 append 了一遍，0 是没画出来")
         finally:
-            subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+            subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
             engine_restore(real)
             time.sleep(2)
             left = python_pids() - before
@@ -1633,7 +1633,7 @@ def check_overview_page() -> None:
                 time.sleep(1)
                 left = python_pids() - before
             check("概览页真窗口场景：退出后无引擎孤儿子进程", not left, f"仍在跑 {sorted(left)}")
-            check("概览页真窗口场景：退出后 DshBar 已消失", not bar_processes(),
+            check("概览页真窗口场景：退出后 Vigil 已消失", not bar_processes(),
                   str(bar_processes()))
     except Exception as ex:
         check("概览页门禁整段不抛", False, f"{type(ex).__name__}: {ex}")
@@ -1850,11 +1850,11 @@ def uia_ok(res: dict[str, list[str]]) -> bool:
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_VALUE = "dsh-status"
+RUN_VALUE = "Vigil"
 
 
 def reg_run_value() -> str | None:
-    """HKCU\\...\\Run 里 dsh-status 的当前值；没有这一项（或读不到）都给 None。"""
+    """HKCU\\...\\Run 里 Vigil 的当前值；没有这一项（或读不到）都给 None。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
             v, _ = winreg.QueryValueEx(k, RUN_VALUE)
@@ -2039,7 +2039,7 @@ def check_pages_filled() -> None:
         print("  （跳过：没有编译产物）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     f = os.path.join(ds.state_dir(), "settings.json")
     backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
@@ -2211,7 +2211,7 @@ def check_panel_settings_live() -> None:
         print("  （跳过：没有编译产物）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     req = os.path.join(ds.state_dir(), "panel.request")
     if os.path.isfile(req):
@@ -2232,11 +2232,11 @@ def check_panel_settings_live() -> None:
         subprocess.Popen([BAR_EXE, "--panel", "runtime"], cwd=os.path.dirname(BAR_EXE))
         hwnd, t0 = 0, time.time()
         while time.time() - t0 < 25:
-            hwnd = top_window("dsh 控制台")
+            hwnd = top_window("Vigil 控制台")
             if hwnd:
                 break
             time.sleep(0.4)
-        if not check("真窗口：面板开在运行页", bool(hwnd), "找不到标题为 dsh 控制台 的顶层窗口"):
+        if not check("真窗口：面板开在运行页", bool(hwnd), "找不到标题为 Vigil 控制台 的顶层窗口"):
             return
         res = uia(hwnd, "count")
         # 这条只钉「通路本身能用」（占位页也能枚举出 15 个元素，所以不拿元素数当门槛）：
@@ -2309,7 +2309,7 @@ def check_panel_settings_live() -> None:
         check("再关一次真的把该项删掉（不是「本来就没有」）",
               reg_on == f'"{BAR_EXE}"' and reg_run_value() is None,
               f"开的时候 {reg_on!r}，关之后 {reg_run_value()!r}")
-        print(f"  注册表 Run\\dsh-status：开={reg_on!r} → 关={reg_run_value()!r}"
+        print(f"  注册表 Run\\Vigil：开={reg_on!r} → 关={reg_run_value()!r}"
               f"（用户原状 {reg_had!r}）")
 
         # —— 两个目录入口：真的开了窗口，测试只关自己开出来的那几扇 ——
@@ -2530,7 +2530,7 @@ def check_panel_settings_live() -> None:
               f"引擎 PID {pid2}→{pid3}→{pid4}；静默秒数 {a1}→{a2}→{a3}")
     finally:
         close_windows(opened)
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         ok = engine_restore(real)
         check("真窗口段注入的引擎拷贝已按仓库根还原", ok, os.path.dirname(BAR_EXE))
         reg_run_write(reg_had)
@@ -2551,9 +2551,9 @@ def check_panel_settings_live() -> None:
         while left and time.time() - t1 < 20:
             time.sleep(1)
             left = python_pids() - before_pids
-        check("真窗口段之后无残留（DshBar / 引擎子进程 / panel.request 都清干净）",
+        check("真窗口段之后无残留（Vigil / 引擎子进程 / panel.request 都清干净）",
               not bar_processes() and not left and not os.path.exists(req),
-              f"DshBar={sorted(bar_processes())} python={sorted(left)} req={os.path.exists(req)}")
+              f"Vigil={sorted(bar_processes())} python={sorted(left)} req={os.path.exists(req)}")
 
 
 def check_bar_null_records() -> None:
@@ -2573,7 +2573,7 @@ def check_bar_null_records() -> None:
         print("  （跳过：没有编译产物）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
     if not check("假引擎注入点就位", os.path.isfile(eng), eng):
@@ -2648,7 +2648,7 @@ def check_bar_null_records() -> None:
               "JSON 解析失败" not in tail,
               f"日志尾巴：{tail[-240:]!r}（非可空 int 撞上 null 就是这一行，然后整帧被丢掉）")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         with open(eng, "wb") as fh:
             fh.write(real)
         check("records:null 注入后引擎拷贝已按仓库根还原",
@@ -2661,7 +2661,7 @@ def check_bar_null_records() -> None:
             time.sleep(1)
             left_pids = python_pids() - before
         check("records:null 场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
-        check("records:null 场景：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
+        check("records:null 场景：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 
 
 class _MOUSEINPUT(ctypes.Structure):
@@ -2892,7 +2892,7 @@ def check_panel_real_scroll() -> None:
         print("  （跳过：没有编译产物）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
         return
     eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
     if not check("真实窗口注入点就位", os.path.isfile(eng), eng):
@@ -2910,12 +2910,12 @@ def check_panel_real_scroll() -> None:
         subprocess.Popen([BAR_EXE, "--panel"], cwd=os.path.dirname(BAR_EXE))
         hwnd, t0 = 0, time.time()
         while time.time() - t0 < 25:
-            hwnd = top_window("dsh 控制台")
+            hwnd = top_window("Vigil 控制台")
             if hwnd:
                 break
             time.sleep(0.4)
         if not check("真实窗口：面板已打开（--panel 起真窗口）", bool(hwnd),
-                     "找不到标题为 dsh 控制台 的顶层窗口"):
+                     "找不到标题为 Vigil 控制台 的顶层窗口"):
             return
         # 送达通路：只往面板自己的 HWND 投 WM_MOUSEWHEEL（post_wheel_to）。
         # 定向投递不进系统输入队列，所以**不需要面板在前台**，也就不需要当年那层
@@ -3090,7 +3090,7 @@ def check_panel_real_scroll() -> None:
         # 兜底那条 SendInput 通路也靠它命中），
         # 不管前面走到哪一步、有没有抛，都得把用户的光标还回去。
         u.SetCursorPos(home.x, home.y)
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         with open(eng, "wb") as fh:
             fh.write(real)
         check("真实窗口场景：注入后引擎拷贝已按仓库根还原",
@@ -3103,7 +3103,7 @@ def check_panel_real_scroll() -> None:
             time.sleep(1)
             left_pids = python_pids() - before
         check("真实窗口场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
-        check("真实窗口场景：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
+        check("真实窗口场景：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 
 
 def check_panel_window() -> None:
@@ -3116,11 +3116,11 @@ def check_panel_window() -> None:
         u = _user32()
         found, t0 = None, time.time()
         while time.time() - t0 < 25:
-            found = top_window("dsh 控制台")
+            found = top_window("Vigil 控制台")
             if found:
                 break
             time.sleep(0.4)
-        check("面板窗口已出现", bool(found), "找不到标题为 dsh 控制台 的顶层窗口")
+        check("面板窗口已出现", bool(found), "找不到标题为 Vigil 控制台 的顶层窗口")
         if found:
             style = u.GetWindowLongW(found, -16)
             l, t, r, b = rect_of(found)
@@ -3133,15 +3133,15 @@ def check_panel_window() -> None:
         u.PostMessageW(found, 0x0010, 0, 0)  # WM_CLOSE
         time.sleep(1.5)
         check("关窗后进程仍在（只是隐藏，没销毁）", bool(bar_processes()), "进程跟着退出了")
-        check("关窗后面板不再可见", not top_window("dsh 控制台"), "窗口还看得见")
+        check("关窗后面板不再可见", not top_window("Vigil 控制台"), "窗口还看得见")
         subprocess.run([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE),
                        timeout=30)
         t1 = time.time()
-        while time.time() - t1 < 20 and not top_window("dsh 控制台"):
+        while time.time() - t1 < 20 and not top_window("Vigil 控制台"):
             time.sleep(0.4)
-        check("再次请求能重新打开面板", bool(top_window("dsh 控制台")), "面板没能再打开")
+        check("再次请求能重新打开面板", bool(top_window("Vigil 控制台")), "面板没能再打开")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         time.sleep(3)
         check("退出后无残留", not bar_processes(), str(bar_processes()))
 
@@ -3186,7 +3186,7 @@ def check_panel_direct_page() -> None:
     外加一条零容差的「六个请求产生六种内容」。
     概览页白底换成主题刷之后这两条仍然有效 —— 本轮的 (b) 组红→绿证据就是拿这个假设量出来的。
 
-    走的是 `--panel` 的两条直达通路：冷启动（`DshBar.exe --panel appearance`，
+    走的是 `--panel` 的两条直达通路：冷启动（`Vigil.exe --panel appearance`，
     Task 5 复核里撞出的那条 Task 3 缺陷路径）与请求通路（二次实例写 panel.request →
     常驻实例 ShowOn → Navigate）。两条都终点在同一个 Navigate 上。
     """
@@ -3220,12 +3220,12 @@ def check_panel_direct_page() -> None:
         subprocess.Popen([BAR_EXE, "--panel", "appearance"], cwd=os.path.dirname(BAR_EXE))
         hwnd, t0 = 0, time.time()
         while time.time() - t0 < 25:
-            hwnd = top_window("dsh 控制台")
+            hwnd = top_window("Vigil 控制台")
             if hwnd:
                 break
             time.sleep(0.4)
         if not check("冷启动直达：面板窗口已出现（--panel appearance）", bool(hwnd),
-                     "找不到标题为 dsh 控制台 的顶层窗口"):
+                     "找不到标题为 Vigil 控制台 的顶层窗口"):
             return
         scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
         w0, h0, rgb0 = capture_bar(hwnd, shot, scale=scale)
@@ -3318,7 +3318,7 @@ def check_panel_direct_page() -> None:
               f"取样框指纹去重后 {len(set(hashes.values()))}/{len(hashes)}，"
               f"画同一片内容的：{' '.join(dup)}（Navigate 不渲染时六次请求全是概览那一张表）")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         time.sleep(3)
         with open(eng, "wb") as fh:
             fh.write(real)
@@ -3326,7 +3326,7 @@ def check_panel_direct_page() -> None:
         for p in list(refs.values()) + [shot]:
             if os.path.isfile(p):
                 os.remove(p)
-        check("直达段：退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
+        check("直达段：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
         left_pids = python_pids() - before
         t3 = time.time()
         while left_pids and time.time() - t3 < 20:
@@ -3456,12 +3456,12 @@ def check_showbar_hidden() -> None:
         proc = subprocess.Popen([BAR_EXE, "--panel", "appearance"], cwd=os.path.dirname(BAR_EXE))
         hwnd, t0 = 0, time.time()
         while time.time() - t0 < 25:
-            hwnd = top_window("dsh 控制台")
+            hwnd = top_window("Vigil 控制台")
             if hwnd:
                 break
             time.sleep(0.4)
         check("showBar=false：面板仍能打开（--panel 直达）", bool(hwnd),
-              "找不到标题为 dsh 控制台 的顶层窗口")
+              "找不到标题为 Vigil 控制台 的顶层窗口")
         # 「直达页 == 请求页」的证据不在这里。Task 5 轮 1 曾在这儿量过一片纯白像素，
         # 它的区分度全来自概览页那张写死的白底表格（Step 0 #1 的明文豁免），
         # Task 8 换主题刷后就会静默变成「永远绿」；而且它躲在 showBar 场景里，
@@ -3469,7 +3469,7 @@ def check_showbar_hidden() -> None:
         # 拿同一 theme、同一份假引擎下的**离屏参照配色分布**做正证据。
         bars = find_bar_windows()
         check("showBar=false：任务栏里没有停靠的状态条（真的消失了）", not bars,
-              f"Shell_TrayWnd 下仍挂着 {len(bars)} 个 DshBar 子窗口")
+              f"Shell_TrayWnd 下仍挂着 {len(bars)} 个 Vigil 子窗口")
         check("showBar=false：进程仍活着（托盘与 watchdog 都在）", proc.poll() is None,
               f"退出码 {proc.returncode}")
         # 隐藏期间二次实例的转交必须仍被消费——它和托盘菜单「打开面板」是同一个 OpenPanel。
@@ -3481,9 +3481,9 @@ def check_showbar_hidden() -> None:
             time.sleep(0.4)
         check("showBar=false：panel.request 仍被隐藏中的进程消费（唤起通路活着）",
               not os.path.isfile(req), "10 秒后请求文件还在，watchdog 没干活")
-        check("showBar=false：面板窗口仍在（能从唤起回到面板）", bool(top_window("dsh 控制台")),
+        check("showBar=false：面板窗口仍在（能从唤起回到面板）", bool(top_window("Vigil 控制台")),
               "请求消费了但窗口不在了")
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         t2 = time.time()
         while time.time() - t2 < 20 and bar_processes():
             time.sleep(0.5)
@@ -3508,7 +3508,7 @@ def check_showbar_hidden() -> None:
         check("showBar=true 再打开时状态条重新停靠", docked,
               f"找到 {len(hwnds)} 个子窗口，等满 25 秒也没出现可见且父子关系正确的状态条")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         time.sleep(3)
         if backup is None:
             if os.path.isfile(f):
@@ -3522,10 +3522,10 @@ def check_showbar_hidden() -> None:
 def check_panel_cold_open() -> None:
     """冷打开：常驻实例是不带 --panel 起的、面板从来没创建过。
 
-    check_panel_window() 用 `DshBar.exe --panel` 起的正是常驻实例本身，
+    check_panel_window() 用 `Vigil.exe --panel` 起的正是常驻实例本身，
     PanelWindow.Instance 在它的构造函数里就被置上了，所以那条链路从没覆盖过
     「Instance 还是 null、只能惰性创建」的路径 —— 而日常最常见的情形恰恰是它：
-    开机自启的普通 DshBar.exe + 用户后来敲一次 `DshBar.exe --panel`。
+    开机自启的普通 Vigil.exe + 用户后来敲一次 `Vigil.exe --panel`。
     """
     print("\n== 面板冷打开 ==")
     if not os.path.isfile(BAR_EXE) or bar_processes():
@@ -3545,11 +3545,11 @@ def check_panel_cold_open() -> None:
         check("常驻实例已起（不带 --panel）", proc.poll() is None and bool(hwnds),
               f"存活={proc.poll() is None} 状态栏窗口={hwnds}")
         time.sleep(3)  # 让 watchdog 至少跑过一轮，确认面板不是它自己冒出来的
-        check("冷打开前面板不存在", not top_window("dsh 控制台"), "状态栏一起来面板就在")
+        check("冷打开前面板不存在", not top_window("Vigil 控制台"), "状态栏一起来面板就在")
         subprocess.run([BAR_EXE, "--panel", "balance"], cwd=os.path.dirname(BAR_EXE),
                        timeout=30)
         found, t1 = 0, time.time()
-        while time.time() - t1 < 25 and not (found := top_window("dsh 控制台")):
+        while time.time() - t1 < 25 and not (found := top_window("Vigil 控制台")):
             time.sleep(0.4)
         check("冷打开：--panel 唤起面板", bool(found),
               "常驻实例的 PanelWindow.Instance 是 null，请求文件被删掉却没人开窗")
@@ -3564,12 +3564,12 @@ def check_panel_cold_open() -> None:
               f"{req}（开窗后 {time.time() - t2:.1f} 秒仍未删除；"
               f"实测正常删除就在开窗后 0.2 秒上下）")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         deadline = time.time() + 20
         while time.time() < deadline and (bar_processes() or python_pids() - before):
             time.sleep(1)
         check("冷打开后无残留", not bar_processes() and not (python_pids() - before),
-              f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)}")
+              f"Vigil={sorted(bar_processes())} python={sorted(python_pids() - before)}")
 
 
 def lock_against_delete(path: str) -> int:
@@ -4047,7 +4047,7 @@ def check_panel_request_containment() -> None:
                      "CreateFileW 占用失败，注入没成立"):
             return
         found, t1 = 0, time.time()
-        while time.time() - t1 < 25 and not (found := top_window("dsh 控制台")):
+        while time.time() - t1 < 25 and not (found := top_window("Vigil 控制台")):
             time.sleep(0.4)
         check("删不掉请求文件时面板仍然打开（先开窗后删除，N2）", bool(found),
               "删除排在开窗前面时，这条请求会被整个吞掉")
@@ -4066,8 +4066,8 @@ def check_panel_request_containment() -> None:
               os.path.exists(req), "请求文件不见了，下一轮没法重试")
         check("消费失败后进程仍存活（N1）", proc.poll() is None, f"退出码 {proc.returncode}")
         check("消费失败后状态栏仍在任务栏里（N1）", bool(find_bar_windows()),
-              "Shell_TrayWnd 里已经没有 DshBar 子窗口")
-        check("消费失败后面板仍可见", bool(top_window("dsh 控制台")), "面板跟着没了")
+              "Shell_TrayWnd 里已经没有 Vigil 子窗口")
+        check("消费失败后面板仍可见", bool(top_window("Vigil 控制台")), "面板跟着没了")
         unlock(holder)
         holder = 0
         t3 = time.time()
@@ -4080,7 +4080,7 @@ def check_panel_request_containment() -> None:
     finally:
         if holder:
             unlock(holder)  # 顺序不能反：先释放句柄，否则请求文件删不掉
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         deadline = time.time() + 20
         while time.time() < deadline and (bar_processes() or python_pids() - before):
             time.sleep(1)
@@ -4088,7 +4088,7 @@ def check_panel_request_containment() -> None:
             os.remove(req)  # 放弃路径只在能删时才删；测试自己不留垃圾给下一轮
         check("消费失败测试后无残留",
               not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
-              f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
+              f"Vigil={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
 
 
 def check_panel_request_race() -> None:
@@ -4125,7 +4125,7 @@ def check_panel_request_race() -> None:
         check("常驻实例已起（不带 --panel）", proc.poll() is None and bool(find_bar_windows()),
               f"存活={proc.poll() is None} 状态栏窗口={find_bar_windows()}")
         time.sleep(3)  # 让 watchdog 跑过一轮：面板不是它自己冒出来的，窗口期才真的是冷的
-        if not check("竞态测试前面板不存在（开窗必然是冷构造）", not top_window("dsh 控制台"),
+        if not check("竞态测试前面板不存在（开窗必然是冷构造）", not top_window("Vigil 控制台"),
                      "面板已经在了，OpenPanel 不再冷构造，这段窗口本来就不存在"):
             return
         base = request_write(req, "about")
@@ -4140,7 +4140,7 @@ def check_panel_request_race() -> None:
         t_end, probed = t_read + 8.0, False
         while time.time() < t_end:
             now = time.time()
-            if not t_panel and top_window("dsh 控制台"):
+            if not t_panel and top_window("Vigil 控制台"):
                 t_panel = now  # 记下的是「看到的时刻」，不是句柄：后面要拿它跟写入时刻比先后
             if not probed and now - t_read >= 1.5:
                 still_there, probed = os.path.exists(req), True
@@ -4166,10 +4166,10 @@ def check_panel_request_race() -> None:
               tail[-260:] or "无新日志")
         check("竞态后进程仍存活", proc.poll() is None, f"退出码 {proc.returncode}")
         check("竞态后状态栏仍在任务栏里", bool(find_bar_windows()),
-              "Shell_TrayWnd 里已经没有 DshBar 子窗口")
-        check("竞态后面板可见", bool(top_window("dsh 控制台")), "面板跟着没了")
+              "Shell_TrayWnd 里已经没有 Vigil 子窗口")
+        check("竞态后面板可见", bool(top_window("Vigil 控制台")), "面板跟着没了")
     finally:
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         deadline = time.time() + 20
         while time.time() < deadline and (bar_processes() or python_pids() - before):
             time.sleep(1)
@@ -4177,7 +4177,7 @@ def check_panel_request_race() -> None:
             os.remove(req)
         check("竞态测试后无残留",
               not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
-              f"DshBar={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
+              f"Vigil={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
 
 
 def check_gui() -> None:
@@ -4186,7 +4186,7 @@ def check_gui() -> None:
         print("  （跳过：没有编译产物，先跑 --build）")
         return
     if bar_processes():
-        check("启动前无残留实例", False, "已有 DshBar 在跑，先退出它再冒烟")
+        check("启动前无残留实例", False, "已有 Vigil 在跑，先退出它再冒烟")
         return
     before = python_pids()
     log = os.path.join(ds.state_dir(), "bar.log")
@@ -4202,7 +4202,7 @@ def check_gui() -> None:
                 break
             time.sleep(0.5)
         check("进程存活", proc.poll() is None, f"退出码 {proc.returncode}")
-        check("任务栏里挂上了状态栏窗口", bool(hwnds), "Shell_TrayWnd 无 DshBar 子窗口")
+        check("任务栏里挂上了状态栏窗口", bool(hwnds), "Shell_TrayWnd 无 Vigil 子窗口")
         if hwnds:
             u = _user32()
             h = hwnds[0]
@@ -4284,7 +4284,7 @@ def check_gui() -> None:
         check("日志无异常", "异常" not in tail and "失败" not in tail, tail[-200:])
     finally:
         # 优雅 taskkill 对 WS_CHILD 窗口无效（WM_CLOSE 送不到），只能强杀。
-        subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         # 引擎靠 stdout 管道断裂退出，父进程死后还要一两秒才收尾，轮询而不是定死等待。
         left_pids = python_pids() - before
         deadline = time.time() + 20
@@ -4292,7 +4292,7 @@ def check_gui() -> None:
             time.sleep(1)
             left_pids = python_pids() - before
         check("退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
-        check("退出后 DshBar 已消失", not bar_processes(), str(bar_processes()))
+        check("退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 
 
 def check_build() -> None:
