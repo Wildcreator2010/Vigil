@@ -2000,8 +2000,15 @@ git commit -m "feat(panel): 余额页并入面板，移除独立的 KeyDialog"
 
 **Files:**
 - Create: `bar/Panel/Pages/OverviewPage.cs`
-- Modify: `bar/Panel/Pages/Pages.cs`（删 `OverviewPage` 占位）
+- Modify: `bar/Panel/Pages/Pages.cs`
 - Test: `smoke_test.py`
+
+> **落地时的事实修正（Task 7 之后核过代码）**：`OverviewPage` 不是占位类，它在 `Pages.cs` 里
+> 已经是**半成品** —— 有 `DataGrid`、有把竖向约束限成 `*` 行的 `Grid`（Task 4 轮 2 修的），
+> `Refresh` 只是把 `snap.Sessions` 原样绑上去。所以本任务是「搬进自己的文件 + 填上
+> `SessionView` 投影 + 状态卡 + 待处理卡」，**那个 `*` 行的 Grid 必须保住**；
+> 而 `Pages.cs` 里还剩 `PageBase` 与 `AboutPage` 两个真用户，Step 3 的「整个文件删除」
+> 这一支现在不成立，只删 `OverviewPage`。
 
 **Interfaces:**
 - Consumes: `Snapshot.Sessions`（Task 4）、`Snapshot.State/Label/Color/StripRight/TipLines/Waiting`、`STATES` 的中文标签与配色（前端自己映射，见 Step 1 的 `StateLabel`）。
@@ -2130,11 +2137,31 @@ namespace DshBar
             Ui.Ref(statusCard, WpfControls.Border.BackgroundProperty, Ui.CardKey);
             Ui.Ref(statusCard, WpfControls.Border.BorderBrushProperty, Ui.LineKey);
 
-            Content = Ui.Column(
-                Ui.Heading("概览"),
-                statusCard,
-                Ui.Group("会话", _grid),
-                Ui.Group("等你处理", _waiting));
+            // 页面根**必须是 Grid，不是 Ui.Column**：Ui.Column 是竖向 StackPanel，
+            // 给子元素的竖向约束是无限高 —— 表格又会按行数长到 ~1150px 再由视口裁掉，
+            // 正是 Task 4 轮 2 修掉的那个缺陷（而且离屏与真窗口一样，像素门禁看不见）。
+            // 概览页也**不放整页 ScrollViewer**：它是 Global Constraints 那条
+            // 「需要整页滚动的页面自己放 ScrollViewer」的**例外** —— 整页滚与表体滚
+            // 只能选一个，这一页要的是表头固定、只滚表体。
+            Content = new WpfControls.Grid
+            {
+                Margin = new Thickness(0, 0, 0, 0),
+                RowDefinitions =
+                {
+                    new WpfControls.RowDefinition { Height = GridLength.Auto },   // 标题 + 状态卡
+                    new WpfControls.RowDefinition { Height = new GridLength(1, GridUnitType.Star) }, // 会话表（吃掉剩余高度）
+                    new WpfControls.RowDefinition { Height = GridLength.Auto },   // 等你处理
+                },
+            };
+            var head = Ui.Column(Ui.Heading("概览"), statusCard);
+            WpfControls.Grid.SetRow(head, 0);
+            var table = Ui.Group("会话", _grid);
+            WpfControls.Grid.SetRow(table, 1);
+            var wait = Ui.Group("等你处理", _waiting);
+            WpfControls.Grid.SetRow(wait, 2);
+            ((WpfControls.Grid)Content).Children.Add(head);
+            ((WpfControls.Grid)Content).Children.Add(table);
+            ((WpfControls.Grid)Content).Children.Add(wait);
         }
 
         void AddColumn(string header, string binding, double width)
