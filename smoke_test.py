@@ -870,8 +870,9 @@ def fmt_rgba(px: bytes) -> str:
 #   ① alpha：离屏图是 RGBA，Fluent 刷大半是「纯色 + 低 alpha」（概览页的表体、占位页整页
 #      都是 alpha<255），而 PrintWindow 抓到的是已经合成完的 RGB —— 所以参照侧要先按
 #      `外壳底色` 把 alpha 合成掉，占位页那种全透明像素才会落到窗口真正显示的那块底色上。
-#   ② 取样框：离屏是 900×620、真窗口页面区是 724×600 逻辑像素，**尺寸不同不能逐像素比**，
-#      比的是「每档颜色占多少比例」这个分布。
+#   ② 取样框：两边现在是**同一块页面几何** —— 离屏画布就是真窗口给页面的 724×600，
+#      参照侧再照 PAGE_BOX_DIP 往里缩 4 像素裁成 714×588（见 SHOT_PAGE_DIP 为什么钉死）。
+#      但 ①③ 两条差异还在，所以比的仍是「每档颜色占多少比例」这个分布，不逐像素比。
 #   ③ 通道漂移：同一个纯色在两条通路上实测会差 1~2 个 level（外观页卡片
 #      离屏 #FEFEFE、真窗口 #FDFDFD；文字侧 ClearType 与离屏灰阶抗锯齿更是各出各的中间色），
 #      所以每通道右移 2 位（4 级一档）再统计 —— #FDFDFD/#FEFEFE/#FFFFFF 落到相邻档但
@@ -882,6 +883,17 @@ PAGE_BOX_DIP = (216, 26, 930, 614)
 右沿 960-24=936，上沿 Host 上边距 20、下沿 640-20=620（FluentWindow 的内容区从客户区
 (0,0) 起算，标题栏是覆盖式的，本机实测表格顶沿 y=20.8）。往里各缩 4 像素避开 1px 描边。
 窗口尺寸变了这条就不成立 —— 所以那个尺寸本身是一条前提断言，不是默认值。"""
+
+PAGE_W_DIP = PAGE_BOX_DIP[2] - PAGE_BOX_DIP[0]
+PAGE_H_DIP = PAGE_BOX_DIP[3] - PAGE_BOX_DIP[1]
+"""真窗口里页面取样框的尺寸（DIP）：714 × 588。离屏参照必须按同一块几何裁过再比，见 shot_profile。"""
+
+SHOT_PAGE_DIP = (724, 600)
+"""`--panel-shot` 的画布（App.cs RenderShot 里那两个数）＝ 真窗口里页面实际拿到的那块：
+960 - nav 188 - Host 左右 24×2 = 724，640 - Host 上下 20×2 = 600。
+两边必须是**同一个排版**才能比配色分布：宽度差着 176 DIP 时长描述换行数不同、
+卡片高度就不同，白底占比整体漂移（Task 7 实测重合度只有 0.77，而画的确实是余额页）。
+改 App.cs 那两个数必须同时改这里，否则 shot_profile 直接给 None、比样段当场红。"""
 
 BACKDROP_STRIP_DIP = (196, 100, 206, 600)
 """侧栏右描边（x=188）与页面左沿（x=212）之间那条窗口底色带：
@@ -910,13 +922,23 @@ def over_backdrop(px: bytes, bg: bytes) -> bytes:
 
 
 def shot_profile(path: str, bg: bytes, stride: int = 2) -> dict[bytes, float] | None:
-    """离屏参照页的配色分布（已按外壳底色合成 alpha）；读不出 PNG 给 None。"""
+    """离屏参照页的配色分布（已按外壳底色合成 alpha）；读不出 PNG 或几何对不上给 None。
+
+    裁到和真窗口取样框**同一块几何**再统计：`--panel-shot` 出的是整页 724×600，
+    而真窗口那一侧的框是往里缩 4 像素的 714×588。不裁的话参照多带着一圈描边和
+    页边空白，两边量的就不是同一块地方。
+    """
     got = read_png_rgba(path)
     if got is None:
         return None
     w, h, buf = got
-    return color_profile([over_backdrop(buf[i * 4:i * 4 + 4], bg)
-                          for i in range(0, w * h, stride)])
+    if (w, h) != SHOT_PAGE_DIP:
+        # 参照画布一改（App.cs RenderShot 里的 900/620），下面这块裁切就全错，
+        # 与其悄悄比错，不如让调用处当场红。
+        return None
+    x0, y0, x1, y1 = 4, 4, 4 + PAGE_W_DIP, 4 + PAGE_H_DIP
+    return color_profile([over_backdrop(buf[(y * w + x) * 4:(y * w + x) * 4 + 4], bg)
+                          for y in range(y0, y1, stride) for x in range(x0, x1, stride)])
 
 
 def box_profile(rgb: bytes, w: int, h: int, scale: float, stride: int = 2) -> dict[bytes, float]:
@@ -1040,8 +1062,11 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
             except ValueError:
                 pass
         check(f"--panel-shot {page}",
-              p.returncode == 0 and colors >= 0 and w_px >= 720 and h_px >= 480,
-              f"退出码 {p.returncode} 输出 {head!r} err={(p.stderr or '')[-160:]!r}")
+              p.returncode == 0 and colors >= 0
+              and (w_px, h_px) == SHOT_PAGE_DIP,
+              f"退出码 {p.returncode} 输出 {head!r} err={(p.stderr or '')[-160:]!r}"
+              f"（画布必须是 {SHOT_PAGE_DIP[0]}×{SHOT_PAGE_DIP[1]}：真窗口页面区就是这一块，"
+              "离屏参照换了尺寸就不是同一个排版，直达页那段比样会整体漂移）")
         check(f"{page} 落盘 PNG", os.path.isfile(shot) and os.path.getsize(shot) > 2000, shot)
         shots[page] = colors
         print(f"  {page} 离屏颜色种类 {colors}")
@@ -1067,7 +1092,7 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
               f"非白 {st['ink']} 像素，绘制区 x {st['x0']}..{st['x1']} y {st['y0']}..{st['y1']}，"
               f"≥600px 横线 {st['hlines']} 条")
         # 占位页在这三条上的实测值：7 色 / 0.0% 不透明（整页透明）/ 横向跨度不成立。
-        # 空表（Sessions 为 null 时）实测 41.9% 不透明、铺满 900 宽，所以这条不依赖数据量，
+        # 空表（Sessions 为 null 时）实测 41.9% 不透明、横向铺满页宽，所以这条不依赖数据量，
         # 见 check_panel_empty_sessions()。
         check("概览页已画出表格（不再是一行占位文字）",
               pct >= 0.35 and span >= st["w"] - 2 and colors > 20,
@@ -1091,7 +1116,7 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
                   f"（判据：至少多 1 条横线、至少多 600 非白像素）")
 
     # 非法页名必须非零退出。旧实现把未知 key 静默当 overview：`--panel-shot nonsense`
-    # 照样回 `SHOT nonsense 900 620 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
+    # 照样回 `SHOT nonsense 724 600 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
     # 看不出渲染其实跑偏去了别的页。
     p = run_shot("nonsense", "-")
     if p is None:
@@ -1155,10 +1180,10 @@ def check_panel_row_data(empty_base: dict | None) -> None:
 
     ① 「有数据行」必须是相对空表那张的量：1 / 3 / 29 行都得比基线高出一截。
        旧版钉 hlines>=6 / ink>=5000 的绝对值，等价于要求本机至少 4 个会话；
-    ② 滚动视口必须**高度受限**：--panel-shot 给页面的是 900×620 的有限约束，
+    ② 滚动视口必须**高度受限**：--panel-shot 给页面的是 724×600 的有限约束，
        行数从 3 涨到 29 时绘制区高度必须还钉在视口下沿。
        Content 外面套一层竖向 StackPanel 会把这层约束丢掉（StackPanel 给子元素无限高度），
-       DataGrid 于是按内容长到 ~1150px 再被 620 裁掉：画面看起来是满的、门禁完全隐形，
+       DataGrid 于是按内容长到 ~1150px 再被 600 裁掉：画面看起来是满的、门禁完全隐形，
        但表格自己的 ScrollViewer 拿不到有限高度 → 永不滚动，第 16~60 行
        （SESSIONS_IN_SNAPSHOT 上限 60）在真实面板里只能靠整页滚动、表头也一起滚出视野。
     """
@@ -1503,7 +1528,12 @@ def fake_static_engine_source(ok: bool = True) -> str:
         '    "session": {"project": "定格项目", "title": "t", "state": "idle", "turn": 7,\n'
         '        "step": 1, "age_sec": 42.0, "last_tool": "edit", "pending": None,\n'
         '        "todo": None, "error": None},\n'
-        '    "balance": None, "waiting": [], "recent": [], "sessions_scanned": 3,\n'
+        # 余额那一格给的是**真形状**的帧（Task 7 的余额页要钉「那一行跟着快照走」），
+        # 并且故意多带一个 `key` 字段：C# 的 Balance 模型里没有它，反序列化直接丢掉 ——
+        # 余额页因此没有任何通路能把 Key 本体画到界面上，多带的那一份就是这条的活证据。
+        '    "balance": {"available": True, "total": "12.34", "currency": "¥",\n'
+        '        "error": None, "source": "dpapi", "key": "SMOKE-TEST-NOT-A-REAL-KEY-0000"},\n'
+        '    "waiting": [], "recent": [], "sessions_scanned": 3,\n'
         '    "sessions": [\n'
         '        {"key": "s%d" % i, "project": "proj-%d" % i, "title": "会话 %d" % i,\n'
         '         "state": "idle", "turn": i, "step": i, "age_sec": 60.0 + i,\n'
@@ -1576,11 +1606,14 @@ def engine_restore(real: bytes) -> bool:
 def check_pages_filled() -> None:
     """Task 6 离屏面：两页画了真控件，且**设置值被画回控件上**（setting → UI 那一半）。
 
+    Task 7 把余额页也并到这里：它同样是「占位 → 真页」，判据口径与 notify/runtime 一致
+    （色数与不透明像素两条地板值 + 一行跟着快照走），不再另起一段。
+
     占位页的形状是「一行标题 + 整页透明」，实测 7 色 / 0 不透明像素 —— 那两条地板值
     就是「填实没有」的分界（与 Task 5 给 appearance 定的口径同源）。
     另一半（UI → setting，改了到底生不生效）在 check_panel_settings_live() 的真窗口段。
     """
-    print("\n== 通知页与运行页（离屏） ==")
+    print("\n== 通知页 / 运行页 / 余额页（离屏） ==")
     if not os.path.isfile(BAR_EXE):
         print("  （跳过：没有编译产物）")
         return
@@ -1605,6 +1638,10 @@ def check_pages_filled() -> None:
         check("runtime 页已画出真实控件（离屏色数 > 20，占位页实测 7）", c_r > 20,
               f"色数 {c_r}、不透明 {o_r}")
         check("runtime 页不再是透明占位（不透明像素 > 0）", o_r > 0, f"不透明像素 {o_r}")
+        fp_b_a, c_b, o_b = shot_fp("balance", "balance-a")
+        check("balance 页已画出真实控件（离屏色数 > 20，占位页实测 7）", c_b > 20,
+              f"色数 {c_b}、不透明 {o_b}")
+        check("balance 页不再是透明占位（不透明像素 > 0）", o_b > 0, f"不透明像素 {o_b}")
 
         # ② 设置值有没有被画回控件：换掉那一项，画面必须跟着换
         write_settings(notify=False)
@@ -1638,6 +1675,13 @@ def check_pages_filled() -> None:
               bool(fp_n_no) and fp_n_no == fp_n_on,
               f"notify 有帧 {fp_n_on[:8]} vs 无帧 {fp_n_no[:8]}：不同说明离屏出图本身不稳定，"
               "上面那几条「两张不同」就都不作数了")
+        # 余额页那一行「当前余额 …（来源 …）」是 Refresh 里写的，不是构造时写死的：
+        # 有帧 / 无帧两张必须不同。占位页（Task 7 之前的 BalancePage 是 PageBase 一行字）
+        # 两张一样，所以这条对「只删了占位、页还没接快照流」的半成品也会红。
+        fp_b_no, _, _ = shot_fp("balance", "balance-nosnap")
+        check("balance 页的余额行跟着快照走（有帧 / 无帧两张离屏图不同）",
+              bool(fp_b_no) and bool(fp_b_a) and fp_b_no != fp_b_a,
+              f"有帧 {fp_b_a[:8]} vs 无帧 {fp_b_no[:8]}：相同就是 Refresh 没接上 balance")
 
         # ④ 开机自启那一格读的是注册表现状，不是 settings.json
         reg_run_write(f'"{BAR_EXE}"')
@@ -1658,7 +1702,8 @@ def check_pages_filled() -> None:
             with open(f, "w", encoding="utf-8") as fh:
                 fh.write(backup)
         for tag in ("notify-on", "notify-off", "notify-33", "runtime-a", "runtime-int7",
-                    "runtime-nosnap", "notify-nosnap", "runtime-reg-on"):
+                    "runtime-nosnap", "notify-nosnap", "runtime-reg-on",
+                    "balance-a", "balance-nosnap"):
             p = os.path.join(ds.state_dir(), f"t6-{tag}.png")
             if os.path.isfile(p):
                 os.remove(p)
@@ -1878,33 +1923,71 @@ def check_panel_settings_live() -> None:
               f"所以这两值只作现场、不进判据；可滚性看 VerticallyScrollable）；{sc.get('ERR')}")
         scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
         shot = os.path.join(ds.state_dir(), "t6-scroll.png")
-        w0, h0, rgb0 = capture_bar(hwnd, shot, scale=scale)
+        # 三处时间量全部改成「等到条件成立」，不再钉固定 sleep。Task 7 实测同一份代码
+        # 两次跑出 moved=0 与 moved=548：前者是基线那一帧还没排完（于是重排被算成「没滚」，
+        # 下一次抓取才把重排显出来 = 548），后者是滚回顶部的那 0.8 秒不够。
+        # 判据本身一个字没改：滚到底必须变一大片、滚回顶部必须回到原样。
+        LIVE_ROWS = 12  # 阈值那一行是活的（静默秒数每帧在涨），12 行以内都算「画面没动」
+
+        def grab() -> tuple[int, int, list[int]]:
+            ww, hh, buf = capture_bar(hwnd, shot, scale=scale)
+            return ww, hh, (row_hashes(buf, ww, hh) if ww else [])
+
+        def diff_of(sig: list[int], cur: tuple[int, int, list[int]]) -> int:
+            """与参照那一帧差几行；没抓到或帧高对不上给 -1（这条实验作废，不是产品红）。
+
+            比签名长度而不是比 (w, h)：基线那两个数在第一次调用时还没赋出来。
+            """
+            if not cur[2] or not sig or len(cur[2]) != len(sig):
+                return -1
+            return sum(1 for a, c in zip(sig, cur[2]) if a != c)
+
+        w, h, sig = grab()
+        t_s = time.time()
+        while time.time() - t_s < 12.0:
+            time.sleep(0.6)
+            cur = grab()
+            if 0 <= diff_of(sig, cur) <= LIVE_ROWS:
+                w, h, sig = cur
+                break
+            w, h, sig = cur
+        w0, h0, sig0 = w, h, sig
         moved, back_diff = -1, -1
-        sig0 = row_hashes(rgb0, w0, h0) if w0 else []
+        sd: dict = {}
         if w0:
             sd = uia(hwnd, "scroll", value="down")
-            time.sleep(0.8)
-            w1, h1, rgb1 = capture_bar(hwnd, shot, scale=scale)
-            if (w1, h1) == (w0, h0) and rgb1:
-                moved = sum(1 for a, c in zip(sig0, row_hashes(rgb1, w1, h1)) if a != c)
+            t_s = time.time()
+            while time.time() - t_s < 8.0:
+                moved = diff_of(sig0, grab())
+                if moved > LIVE_ROWS:
+                    break
+                time.sleep(0.5)
             uia(hwnd, "scroll", value="up")
-            time.sleep(0.8)
-            w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
-            if (w2, h2) == (w0, h0) and rgb2:
-                back_diff = sum(1 for a, c in zip(sig0, row_hashes(rgb2, w2, h2)) if a != c)
+            t_s = time.time()
+            while time.time() - t_s < 8.0:
+                back_diff = diff_of(sig0, grab())
+                if 0 <= back_diff <= LIVE_ROWS:
+                    break
+                time.sleep(0.5)
             pct2 = (sd.get("PCT2") or ["-1"])[0]
         else:
             pct2 = "-1"
         # 滚回顶部后**不要求逐行相同**：阈值那一行是活的（静默秒数每帧在涨），
         # 十几行以内的差异就是它；真没滚回去的话差的是整屏布局，量级差几十倍。
         check("滚到底之后画面真的动了、滚回顶部又回到原位置（内容在滚，不是被裁在视口外）",
-              moved >= 30 and 0 <= back_diff <= 12,
+              moved >= 30 and 0 <= back_diff <= LIVE_ROWS,
               f"滚到底变化 {moved} 行（阈值 30：活的那行文字每帧只动 2~3 行，够不着 30）、"
-              f"滚回顶部后与基线差 {back_diff} 行（容 12 行 = 阈值行那点活字）；"
-              f"抓帧 {w0}x{h0}，moved=0 就是压根没滚（VerticalPercent 本机恒报 {pct2}，不进判据）")
+              f"滚回顶部后与基线差 {back_diff} 行（容 {LIVE_ROWS} 行 = 阈值行那点活字）；"
+              f"抓帧 {w0}x{h0}，两个数都是各等满 8 秒之后的最后一次实测"
+              f"（VerticalPercent 本机恒报 {pct2}，不进判据）")
         print(f"  整页滚动现场：视口 {w0}x{h0}，滚到底变化 {moved} 行，滚回顶部与基线差 {back_diff} 行")
         if os.path.isfile(shot):
             os.remove(shot)
+        # 实验做完把窗口还给外壳默认尺寸：这一段后面还有通知页的四条判据，
+        # 让它们跑在「被上一节顺手收窄到 760×500」的几何上，等于给以后留一个
+        # 「改上一节的尺寸就红」的隐式依赖。
+        u.SetWindowPos(hwnd, 0, l, t, r - l, b - t, 0x0004 | 0x0010)
+        time.sleep(1.2)
 
         # —— 通知页：切过去（二次实例写请求 → 常驻实例导航）——
         # 一次调用就够：驱动脚本在 switch 之前就把 TOGGLES/EDITS/BOXSPINS/BUTTONS 打全了，
@@ -2265,7 +2348,7 @@ def check_panel_real_scroll() -> None:
     """真实窗口这一侧：外壳必须给页面**有限高度**，让表头固定、只有表体滚动。
 
     为什么离屏那两条（check_panel_row_data）守不住这件事：`--panel-shot` 是直接把页面
-    Measure/Arrange 到 900×620 上出图的，**压根不经过 PanelWindow 的外壳**。外壳一旦把
+    Measure/Arrange 到 724×600 上出图的，**压根不经过 PanelWindow 的外壳**。外壳一旦把
     Host 包在 ScrollViewer 里，页面拿到的竖向约束就是无限高，表格按行数长到 ~1150px
     再由整页滚动兜着 —— 表头跟着一起滚出视野、排版成本随行数线性上升，而离屏门禁全绿。
     所以这一段起的是真窗口（`--panel`）、看的是真窗口里滚轮滚过之后的画面。
@@ -2349,37 +2432,67 @@ def check_panel_real_scroll() -> None:
                 return None
             return [y for y, (a, c) in enumerate(zip(sig0, row_hashes(buf, ww, hh))) if a != c]
 
-        posted = post_wheel_to(hwnd, px, py, -120 * 3, 3)
-        sent = posted
-        way = f"定向 PostMessage → HWND {hwnd}（不经前台），投出 {posted}/3"
+        # 投递侧改成「投 → 等到画面动为止 → 没动就重新瞄准再投」，最多 3 轮。
+        # 为什么：Task 7 的三轮全量里这一段 1 红 2 绿，红因都是同一句话 ——
+        # 「定向通路 3/3 投出却没滚」。滚轮消息落到哪个元素由**光标当下命中什么**和 WPF
+        # 输入队列的时序决定，那是环境的时序，不是产品的行为；钉一次投递等于把
+        # 「这一次没中」记成产品缺陷（Task 6 刚因为一条依赖环境时序的判据被打回过一次）。
+        # 判据①②本身一个字没改，改的只是「给它机会把滚轮滚出来」。
+        def wait_moved(limit: float = 5.0) -> tuple[int, int, bytes, list[int] | None]:
+            t_s = time.time()
+            cw = ch = 0
+            buf = b""
+            out: list[int] | None = None
+            while time.time() - t_s < limit:
+                time.sleep(0.7)
+                cw, ch, buf = capture_bar(hwnd, shot, scale=scale)
+                out = diff_of(buf, cw, ch)
+                if out:
+                    break
+            return cw, ch, buf, out
+
         fg_note, fg_blocked = "", False
-        time.sleep(1.0)
-        w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
-        changed = diff_of(rgb2, w2, h2)
+        changed: list[int] | None = None
+        w2 = h2 = 0
+        rgb2 = b""
+        posted = rounds = 0
+        while rounds < 3 and not changed:
+            rounds += 1
+            u.SetCursorPos(px, py)  # 重新瞄准：光标挪走了滚的就是别的容器，不是表体
+            posted = post_wheel_to(hwnd, px, py, -120 * 3, 3)
+            w2, h2, rgb2, changed = wait_moved()
+        sent = posted
+        way = f"定向 PostMessage → HWND {hwnd}（不经前台），投到第 {rounds} 轮（每轮各等 5 秒）"
         if posted == 3 and changed is not None and not changed:
             # 定向通路三帧都投出去了却一行都没动 —— 才轮到那条要前台的真滚轮。
             # 抢前台的结果**当场记下来**：本探测环境（agent 后台终端）前台锁归 IDE，
             # 裸 SetForegroundWindow 返回 0，ALT 抖动兜底也不保证抢得回（本机实测两者都返回 0）。
             # 兜底也失败时「送达自检」单独红并写明送达失败，不再伪装成「表头被滚走」那种产品缺陷。
-            got = bool(u.SetForegroundWindow(hwnd))
-            how = "裸 SetForegroundWindow"
-            if not got or u.GetForegroundWindow() != hwnd:
-                k = ctypes.windll.user32.keybd_event
-                k(0x12, 0, 0, 0)      # ALT 按下
-                k(0x12, 0, 2, 0)      # 抬起：Windows 放行「刚收到输入事件的进程」改前台
+            # 兜底通路也要前台，而前台归属在这个探测环境里是**会被抢回去的**（IDE 一有动静
+            # 面板就不是前台窗口了），所以同样重试三轮：每轮重新抢一次前台、重新瞄准、
+            # 投 3 格、等到画面动为止。三轮都零变化才让「送达自检」红，并且写明
+            # 红因在送达不在产品。
+            for attempt in range(3):
                 got = bool(u.SetForegroundWindow(hwnd))
-                how = "ALT 抖动后 SetForegroundWindow"
-            fg_note = ("前台归属："
-                       + ("面板已是前台窗口" if u.GetForegroundWindow() == hwnd
-                          else f"面板**不是**前台窗口（GetForegroundWindow={u.GetForegroundWindow()} ≠ {hwnd}）"
-                               "→ 真滚轮送不达，红因在送达不在产品"))
-            fg_blocked = u.GetForegroundWindow() != hwnd
-            sent = send_wheel(-120 * 3, 3)
-            way = (f"兜底 SendInput 真滚轮（{how} 返回 {int(got)}，投出 {sent}/3）；"
-                   f"定向通路 3/3 投出却没滚 → 两条通路都记在这里")
-            time.sleep(1.0)
-            w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
-            changed = diff_of(rgb2, w2, h2)
+                how = "裸 SetForegroundWindow"
+                if not got or u.GetForegroundWindow() != hwnd:
+                    k = ctypes.windll.user32.keybd_event
+                    k(0x12, 0, 0, 0)      # ALT 按下
+                    k(0x12, 0, 2, 0)      # 抬起：Windows 放行「刚收到输入事件的进程」改前台
+                    got = bool(u.SetForegroundWindow(hwnd))
+                    how = "ALT 抖动后 SetForegroundWindow"
+                fg_note = ("前台归属："
+                           + ("面板已是前台窗口" if u.GetForegroundWindow() == hwnd
+                              else f"面板**不是**前台窗口（GetForegroundWindow={u.GetForegroundWindow()} ≠ {hwnd}）"
+                                   "→ 真滚轮送不达，红因在送达不在产品"))
+                fg_blocked = u.GetForegroundWindow() != hwnd
+                u.SetCursorPos(px, py)
+                sent = send_wheel(-120 * 3, 3)
+                way = (f"兜底 SendInput 真滚轮（第 {attempt + 1} 次抢前台，{how} 返回 {int(got)}，"
+                       f"投出 {sent}/3）；定向通路 {rounds} 轮 ×3 格都没滚 → 两条通路都记在这里")
+                w2, h2, rgb2, changed = wait_moved()
+                if changed:
+                    break
         same_size = check("真实窗口：滚动前后画面同尺寸可比",
                           sent == 3 and (w2, h2) == (w, h) and bool(rgb2),
                           f"滚轮发出 {sent}/3 次（{way}），抓帧 {w2}x{h2}（基线 {w}x{h}）")
@@ -2570,9 +2683,12 @@ def check_panel_direct_page() -> None:
               f"抓帧 {w0}x{h0}（缩放 {scale}），页面取样框 {PAGE_BOX_DIP} 是按这套外壳布局"
               f"（nav 188 + Host 边距 24/20）算出来的，窗口尺寸一变就得重derive")
         expect = {p: shot_profile(refs[p], bg) for p in PANEL_PAGES}
-        if not check("六页离屏参照都可解码（真窗口比样的基准）",
+        if not check("六页离屏参照都可解码，且画布就是比样前提的那 724×600",
                      all(v is not None for v in expect.values()),
-                     "读不出来的页：" + " ".join(p for p in PANEL_PAGES if expect[p] is None)):
+                     "读不出来 / 画布对不上的页：" + " ".join(
+                         p for p in PANEL_PAGES if expect[p] is None)
+                     + f"（参照必须正好是 {SHOT_PAGE_DIP}，裁切块 {PAGE_W_DIP}×{PAGE_H_DIP} "
+                     "才和真窗口取样框同几何；App.cs RenderShot 改尺寸就要同步这两个常量）"):
             return
 
         def settle(page: str, limit: float = 12.0) -> tuple[float, str, str, float]:
@@ -2941,6 +3057,110 @@ def log_tail(offset: int) -> str:
             return fh.read()
     except OSError:
         return ""
+
+
+def check_balance_key_handling() -> None:
+    """余额 Key 的形状门禁：弹窗已删干净、Key 只走 stdin、日志先脱敏、界面只出来源。
+
+    为什么钉源码形状而不是行为：这一条要防的是**以后有人顺手改坏**，不是现在的缺陷。
+    行为侧要验「Key 会不会泄漏到界面上」就得真存一把 Key、真开一次窗口、再把整棵控件树
+    读一遍 —— 而本机 `balance.protected` 按口径必须不存在，测完还得还原；那条路
+    check_key_storage() 已经在引擎侧走过了（假 Key + 落盘非明文 + 当场还原）。
+    剩下这半边是 C# 侧的结构不变量，用行为表达反而更弱（一次绿证明不了一次不红）。
+    会假红的改动：把 stdin 换成参数、把 RedactKey 从日志那行摘掉、给 PasswordBox 加一句
+    「回填上次输入」—— 这三件正是本段要拦的。守不住的：在别的文件里新起一处明文落盘
+    （第 ⑤ 条只扫 bar/ 目录，仓库根新加一个 KeyDialog2.cs 不在它射程内）。
+    """
+    print("\n== 余额 Key 处理口径 ==")
+    app = os.path.join(HERE, "bar", "App.cs")
+    page = os.path.join(HERE, "bar", "Panel", "Pages", "BalancePage.cs")
+    if not (os.path.isfile(app) and os.path.isfile(page)):
+        check("App.cs / BalancePage.cs 可读", False, f"{app} {page}")
+        return
+    app_src = open(app, encoding="utf-8-sig", errors="replace").read()
+    page_src = open(page, encoding="utf-8-sig", errors="replace").read()
+
+    # ① 独立弹窗通路已断干净：注释里提 KeyDialog 是历史说明，代码里再出现就是还有调用点。
+    callers = []
+    for root, dirs, files in os.walk(os.path.join(HERE, "bar")):
+        dirs[:] = [d for d in dirs if d not in ("bin", "obj")]
+        for fn in files:
+            if not fn.endswith(".cs"):
+                continue
+            p = os.path.join(root, fn)
+            if "KeyDialog." in open(p, encoding="utf-8-sig", errors="replace").read():
+                callers.append(os.path.relpath(p, HERE))
+    check("bar/KeyDialog.cs 已删除且全目录没有 `KeyDialog.` 调用点（同一功能不留两处入口）",
+          not os.path.isfile(os.path.join(HERE, "bar", "KeyDialog.cs")) and not callers,
+          f"仍在引用的文件：{' '.join(callers) or '无'}")
+
+    # ② Key 只能从 stdin 进引擎。argv 不是秘密存放处：本机任何进程都能读到子进程命令行。
+    gi = app_src.find("static void RunEngineVerb(")
+    verb_body = app_src[gi:gi + 3000] if gi >= 0 else ""
+    arg_lines = [l.strip() for l in verb_body.splitlines() if "Arguments" in l]
+    check("找到了 RunEngineVerb 的引擎调用站点", bool(verb_body) and bool(arg_lines),
+          "App.cs 里没有 static void RunEngineVerb(，或它没有 Arguments 赋值")
+    check("引擎命令行里不含 Key（Arguments 只拼 python、脚本路径和 verb）",
+          bool(arg_lines) and all("key" not in l.lower() for l in arg_lines),
+          ("这些行里出现了 key：" + " / ".join(arg_lines)
+           + "（把 Key 插进 argv = 本机任何进程读得到）"))
+    check("Key 走 StandardInput.Write，且只在有 Key 时才重定向 stdin",
+          "RedirectStandardInput = key != null" in verb_body
+          and "proc.StandardInput.Write(key)" in verb_body,
+          "没找到 RedirectStandardInput = key != null / StandardInput.Write(key)")
+
+    # ③ 引擎那一路的输出**不保证**不含敏感串：HTTP 错误分支会把服务端返回体原样截 200
+    #    字符贴进 error（dsh_state.py fetch_balance），所以落日志前必须过 RedactKey。
+    log_lines = [l.strip() for l in verb_body.splitlines()
+                 if "RedactKey(output, key)" in l]
+    check("写进 bar.log 的那一行先经过 RedactKey（不原样落引擎输出）",
+          len(log_lines) == 1 and log_lines[0].startswith("Log("),
+          f"RunEngineVerb 里带 RedactKey(output, key) 的行 {len(log_lines)} 条："
+          f"{' / '.join(log_lines) or '一条没有 —— 引擎输出正在原样进日志'}")
+    check("RedactKey 把本次经手的 Key 替成 ***（空 Key 分支不替换）",
+          "text.Replace(key, \"***\")" in app_src
+          and "static string RedactKey(string output, string key)" in app_src,
+          "RedactKey 的替换口径变了：改之前先想清楚 error 字段会带什么回来")
+
+    # ④ 界面上只出「来源」，不出 Key 本体：PasswordBox 的值只被读去保存，从不写进任何文本。
+    leak = [l.strip() for l in page_src.splitlines()
+            if "_key.Password" in l and re.search(r"\.(Text|Content)\s*=", l)]
+    check("PasswordBox 的值从不写进界面文本（Text/Content 里没有 _key.Password）",
+          not leak, "这些行把 Key 画到界面上：" + " / ".join(leak))
+    # 上一条只管得住「直接赋值」；先转进局部变量再拼进 Text 就绕过去了。
+    # 所以钉得更死一点：跟着快照重画的那条路径（Refresh）里根本不许出现输入框 ——
+    # 引擎帧里多出一个 key 字段也好、以后有人给 Balance 加个 Key 属性也好，
+    # 这一页都没有把它画出来的通路。
+    ri = page_src.find("public void Refresh(")
+    check("Refresh 整段不引用输入框（快照重画路径上没有读 Password 的口子）",
+          ri >= 0 and "_key" not in page_src[ri:],
+          "Refresh 里出现了 _key：" + " / ".join(
+              l.strip() for l in page_src[ri:].splitlines() if "_key" in l)[:160])
+    check("保存与清除两支都当场清空输入框（_key.Clear() ≥2）",
+          page_src.count("_key.Password") >= 1 and page_src.count("_key.Clear()") >= 2,
+          f"_key.Password {page_src.count('_key.Password')} 次、"
+          f"_key.Clear() {page_src.count('_key.Clear()')} 次（保存后要清、清除后也要清）")
+    check("余额那一行显示的是来源（dpapi / env:… / file:… / none），不是 Key",
+          "b.Source" in page_src and "来源" in page_src,
+          "BalancePage.Refresh 里没有 b.Source —— 用户就看不出环境变量有没有盖住已存的 Key")
+
+    # ⑤ 加解密只在引擎那一侧：C# 里出现 balance.protected 就意味着有人在自己写 Key 文件。
+    hits = []
+    for root, dirs, files in os.walk(os.path.join(HERE, "bar")):
+        dirs[:] = [d for d in dirs if d not in ("bin", "obj")]
+        for fn in files:
+            if fn.endswith(".cs") and "balance.protected" in open(
+                    os.path.join(root, fn), encoding="utf-8-sig", errors="replace").read():
+                hits.append(fn)
+    check("C# 侧不碰 balance.protected（DPAPI 读写全在 dsh_state.py）", not hits,
+          f"引用了该文件名的：{' '.join(hits)}")
+
+    # ⑥ 托盘菜单那一项必须改指面板，而不是自己弹窗 —— 与 ① 配对：① 钉「没有调用点」，
+    #    这条钉「入口还在、而且指向了余额页」（删掉菜单项也能过 ①，但那等于把功能删了）。
+    check("托盘菜单「设置余额 Key…」指向面板余额页 OpenPanel(\"balance\")",
+          re.search(r'"设置余额 Key…",\s*\(s,\s*e\)\s*=>\s*OpenPanel\("balance"\)',
+                    app_src) is not None,
+          "菜单项没找到，或它不再走 OpenPanel(\"balance\")")
 
 
 def check_panel_request_guard() -> None:
@@ -3346,6 +3566,7 @@ def main() -> int:
     # 和「请求文件在开窗之后才删」这两条（外部没法让 PanelWindow 构造必然抛，
     # 见 check_panel_request_guard 的注释）。
     check_panel_request_guard()
+    check_balance_key_handling()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
         # 「空表那张」先用假引擎量好：它是本段所有「有没有数据行」门禁的基线

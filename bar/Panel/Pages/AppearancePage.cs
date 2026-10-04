@@ -54,7 +54,7 @@ namespace DshBar
                 Ui.Group("主题",
                     Ui.Row("配色",
                         "面板默认浅色（白底黑字）；任务栏状态条始终跟随系统深浅色，不受这里影响。",
-                        Row(light, dark, sys))),
+                        Ui.Row2(light, dark, sys))),
                 Ui.Group("显示模式",
                     Ui.Row("任务栏状态条", "隐藏后仍可通过托盘图标打开本面板。", showBar)));
             // 主题底色用 Border 铺满整页：裸 ContentControl 的默认模板里没有画 Background 的
@@ -83,14 +83,6 @@ namespace DshBar
             // 否则深色下默认黑字贴在深色底上看不见。
             Ui.Ref(rb, WpfControls.RadioButton.ForegroundProperty, Ui.InkKey);
             return rb;
-        }
-
-        /// <summary>Ui.Row 的右侧只收一个元素，需要横排时用这个包一层。</summary>
-        static FrameworkElement Row(params FrameworkElement[] items)
-        {
-            var sp = new WpfControls.StackPanel { Orientation = WpfControls.Orientation.Horizontal };
-            foreach (var i in items) sp.Children.Add(i);
-            return sp;
         }
 
         void SetBar(bool on)

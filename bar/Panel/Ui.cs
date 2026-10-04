@@ -32,6 +32,14 @@ namespace DshBar
             target.SetResourceReference(dp, key);
         }
 
+        /// <summary>Ui.Row 的右侧只收一个元素，需要横排（输入框 + 两颗按钮、一组单选）时包这一层。</summary>
+        public static FrameworkElement Row2(params FrameworkElement[] items)
+        {
+            var sp = new WpfControls.StackPanel { Orientation = WpfControls.Orientation.Horizontal };
+            foreach (var i in items) sp.Children.Add(i);
+            return sp;
+        }
+
         public static FrameworkElement Row(string title, string desc, FrameworkElement field)
         {
             var grid = new WpfControls.Grid { Margin = new Thickness(14, 11, 14, 11) };

@@ -23,7 +23,7 @@
 - **面板外壳不再代劳整页滚动**（Task 4 轮 2 的裁决：`PanelWindow.xaml` 去掉了包 `Host` 的
   `ScrollViewer`，让 `Host` 直接占 `*` 行，这样概览页的表格才能表头固定、只滚表体）。
   **因此每个需要整页滚动的页面必须自己在页内放 `ScrollViewer`** —— Task 5/6/7/9 的页内容都可能超
-  620px，不放就滚不动。占位页今天是一行文字所以不受影响，别误以为无事。
+  600px（960×640 的窗口里页面实得 724×600），不放就滚不动。占位页今天是一行文字所以不受影响，别误以为无事。
 - 若页面用到写死颜色做像素判据（`smoke_test.py:check_panel_real_scroll` 现在依赖表格的
   `Brushes.White` 定顶沿、WPF-UI 滑块中灰定整页滚动条），换主题刷时必须同步改那条断言；
   它的失效方式是记 ✗ 并打印现场，不会静默假绿。
@@ -47,6 +47,7 @@
 - 主题 API：`ApplicationThemeManager.Apply(ApplicationTheme, WindowBackdropType, bool updateAccent)`；枚举实际取值 `ApplicationTheme { Unknown, Dark, Light, HighContrast }`、`WindowBackdropType { None, Auto, Mica, Acrylic, Tabbed }`。
 - XAML 里 WPF-UI 的命名空间是 `xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"`（已实测可编译）。
 - **不要用 `PrintWindow` 验证面板**：实测对 `FluentWindow` 返回内容全白的废图。面板渲染一律走进程内 `RenderTargetBitmap`（`--panel-shot`）。`PrintWindow` 只用于分层的状态栏窗口。
+- **`--panel-shot` 的画布钉死在 724×600**（= 真窗口给页面的那一块：960 − nav 188 − Host 左右 24×2，640 − Host 上下 20×2）。冒烟拿离屏图当真窗口的比样参照（`smoke_test.py` 的 `PAGE_BOX_DIP` / `SHOT_PAGE_DIP`），画布一改两边就不是同一排版：Task 7 用 900×620 实测余额页重合度只有 0.748（长描述少换两行 → 卡片变矮 → 白底占比整体漂移），改成同几何后 0.90+。要改外壳尺寸就必须同时改 `App.cs` 的两个数、`SHOT_PAGE_DIP` 与 `PAGE_BOX_DIP`。
 - 测试跑法：`python test_dsh_state.py`（引擎单元/端到端）、`python smoke_test.py --all`（全量冒烟）。两者退出码 0 才算过。
 - 本仓库刚 `git init`，**提交者身份尚未配置**；第一个任务之前必须先拿到用户提供的邮箱并只写入仓库级 `.git/config`（不动全局配置）。
 - 每个任务结束时必须：跑该任务的验证命令并确认真的通过，再 `git commit`。不允许"应该可以了"。
@@ -1000,7 +1001,10 @@ namespace DshBar
                     case "about": root = new AboutPage(); break;
                     default: root = new OverviewPage(); break;
                 }
-                double w = 900, h = 620;
+                // 画布 = 真窗口给页面的那一块：960-188(nav)-24*2 = 724，640-20*2 = 600。
+                // 离屏参照与真窗口取样框必须是同一排版（Task 7 实测：900×620 时长描述
+                // 少换两行、卡片变矮，配色分布整体漂移，余额页比样只有 0.77）。
+                double w = 724, h = 600;
                 root.Measure(new Size(w, h));
                 root.Arrange(new Rect(0, 0, w, h));
                 root.UpdateLayout();
@@ -1095,7 +1099,7 @@ Expected: `0`，`0 个警告 0 个错误`。若报 CS0104，说明某文件同�
 - [ ] **Step 9: 跑 shot 模式确认渲染真的成立**
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot overview shot-probe.png; echo EXIT=$?`
-Expected: 输出形如 `SHOT overview 900 620 <N>`，`EXIT=0`。
+Expected: 输出形如 `SHOT overview 724 600 <N>`，`EXIT=0`。
 **判据是「有没有真的画出东西」，不是色数**（Task 4 实测：占位页 7 色 / 0 个不透明像素；
 表格骨架 40 色 / 99.99% 不透明像素 / 17 条分隔线跨度恰等于六列宽之和）。
 停下条件：报 `SHOT-FAIL`、或**不透明像素为 0**、或 PNG 解码失败 —— 这三条才说明离屏渲染没走通。
@@ -1597,7 +1601,7 @@ Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep 
 Expected: `0`，无输出（0 警告 0 错误）。
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot appearance probe.png`
-Expected: `SHOT appearance 900 620 <colors>`，colors > 20 **且不透明像素 > 0**。随后 `rm -f probe.png`。
+Expected: `SHOT appearance 724 600 <colors>`，colors > 20 **且不透明像素 > 0**。随后 `rm -f probe.png`。
 （阈值口径见 Task 4：色数只当地板值用，真正的判据是不透明像素与结构证据。）
 
 - [ ] **Step 6: 加设置往返断言并跑全量**
@@ -1784,7 +1788,7 @@ Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep 
 Expected: `0`，无输出。
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot notify p1.png && ./DshBar.exe --panel-shot runtime p2.png && rm -f p1.png p2.png`
-Expected: 两行 `SHOT ... 900 620 <colors>`，colors > 20 且不透明像素 > 0。
+Expected: 两行 `SHOT ... 724 600 <colors>`，colors > 20 且不透明像素 > 0。
 
 - [ ] **Step 5: 加通知/运行设置的往返断言**
 
@@ -1978,7 +1982,7 @@ Expected: `0`，无输出。若有 `CS0246 KeyDialog` 说明还有调用点，�
 - [ ] **Step 5: 跑余额页渲染与 DPAPI 往返**
 
 Run: `cd bar/bin/Release/net10.0-windows && ./DshBar.exe --panel-shot balance p.png && rm -f p.png`
-Expected: `SHOT balance 900 620 <colors>`，colors > 20 且不透明像素 > 0。
+Expected: `SHOT balance 724 600 <colors>`，colors > 20 且不透明像素 > 0。
 
 Run: `python smoke_test.py`
 Expected: 退出码 0（`== 余额 Key 存取 ==` 5 项仍全过——那是引擎侧，不受本次改动影响）。

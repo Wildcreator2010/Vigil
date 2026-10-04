@@ -6,7 +6,7 @@ namespace DshBar
 {
     /// PanelWindow 必须是 public：WPF 标记编译器为 x:Class 生成的那半个分部写死了
     /// `public partial class`，代码侧声明成 internal 会撞 CS0262（分部可访问性冲突）。
-    /// BarWindow/KeyDialog 那种纯代码窗口不受此限，仍是 internal。
+    /// BarWindow 那种纯代码窗口不受此限，仍是 internal。
     public sealed partial class PanelWindow : Wpf.Ui.Controls.FluentWindow
     {
         readonly Dictionary<string, Win.FrameworkElement> _pages =

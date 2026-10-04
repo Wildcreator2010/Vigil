@@ -101,8 +101,8 @@ namespace DshBar
         public void Refresh(Snapshot snap) => _grid.ItemsSource = snap?.Sessions;
     }
 
-    // NotifyPage / RuntimePage 已在 Task 6 迁到 Pages/NotifyPage.cs 与 Pages/RuntimePage.cs
-    // （真实控件），这里别再留同名占位 —— 留着就是 CS0101 重复定义。
-    internal sealed class BalancePage : PageBase { public BalancePage() : base("余额") { } }
+    // NotifyPage / RuntimePage 已在 Task 6 迁到 Pages/NotifyPage.cs 与 Pages/RuntimePage.cs，
+    // BalancePage 在 Task 7 迁到 Pages/BalancePage.cs（都是真实控件），
+    // 这里别再留同名占位 —— 留着就是 CS0101 重复定义。
     internal sealed class AboutPage : PageBase { public AboutPage() : base("关于") { } }
 }

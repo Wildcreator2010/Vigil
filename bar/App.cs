@@ -366,7 +366,13 @@ namespace DshBar
                     Console.Error.Flush();
                     return 2;
                 }
-                double w = 900, h = 620;
+                // 画布 = 真窗口里页面实际拿到的那块：960 宽 - nav 188 - Host 左右边距 24×2 = 724，
+                // 640 高 - Host 上下边距 20×2 = 600。以前这里是随手写的 900×620，于是
+                // `--panel-shot` 出的图和面板上那一页**不是同一个排版**：宽 176 DIP 的差让长描述
+                // 少换一两行，卡片高度随之变，白底与页面底的占比整体漂移。冒烟拿离屏图当真窗口
+                // 比样的参照（smoke_test.py 的 PAGE_BOX_DIP / SHOT_PAGE_DIP），Task 7 的余额页
+                // 就撞在这条上：画的确实是余额页，重合度却只有 0.77。
+                double w = 724, h = 600;
                 // 页面是在 Refresh 里读快照填内容的（Task 8 的会话表就照这个契约写）。
                 // 排版之前不把快照交进去，占位页也许看不出来，但填实以后 --panel-shot
                 // 渲染的永远是空表，spec §9「概览页色数显著高于关于页」那条门禁无从判定。
@@ -875,7 +881,9 @@ namespace DshBar
             _miTips = Add(menu, "详情", null, false);
             menu.Items.Add(new ToolStripSeparator());
             Add(menu, "立即刷新余额", (s, e) => RefreshBalance());
-            Add(menu, "设置余额 Key…", (s, e) => KeyDialog.Ask());
+            // Task 7：不再弹独立对话框 —— 录入/清除并进面板的「余额」页，同一功能不留两处入口。
+            // 状态栏右键用的是同一个 ContextMenuStrip，所以这一处改完两个入口一起变。
+            Add(menu, "设置余额 Key…", (s, e) => OpenPanel("balance"));
             Add(menu, "切到 DeepSeek Harness", (s, e) => FocusHarness());
             Add(menu, "重启检测进程", (s, e) => RestartClient());
             _miAuto = Add(menu, "开机自动启动", (s, e) => ToggleAutostart(!_miAuto.Checked));
@@ -915,6 +923,89 @@ namespace DshBar
                 Log($"刷新余额失败: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// 跑一次引擎的余额 Key 子命令（Task 7：从原来的 KeyDialog 搬上来，两处实现并一处）。
+        ///
+        /// 三条不可商量的口径：
+        /// ① Key 只走 stdin，绝不进命令行参数 —— argv 不是秘密存放处：本机任何进程都能用
+        ///   Process.GetProcesses / WMI 读到子进程的命令行，面板又是常驻进程，泄漏面比一次性
+        ///   弹窗大得多。引擎的 --save-balance-key 正是按这个契约写的（`sys.stdin.read()`）。
+        /// ② 加解密只在引擎那一侧（DPAPI），C# 这边不写任何 Key 文件 —— 明文化的唯一机会
+        ///   就是自己落盘，所以这里只有「起子进程 + 喂 stdin」。
+        /// ③ 日志记的是**脱敏后**的输出。引擎这一路打印的是保存路径 + 余额那一行，按构造
+        ///   不含 Key；但余额那行走 HTTP 错误分支时，会把**服务端返回体**原样截 200 字符贴进
+        ///   error 字段（dsh_state.py fetch_balance 的 HTTPError 分支），那一段不归我们控制。
+        ///   所以落日志前无条件把本次经手的那串 Key 替成 ***（见 RedactKey）：
+        ///   与其论证「它不会泄漏」，不如让「泄漏」在这条路径上写不出来。
+        /// 完成后写 refresh.token 让常驻引擎强制重查一次，页面下一帧就跟着变。
+        /// </summary>
+        static void RunEngineVerb(string verb, string key)
+        {
+            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
+            if (!File.Exists(engine))
+                engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
+            string python = ResolvePython();
+            if (python == null || !File.Exists(engine))
+            {
+                Balloon("状态检测引擎不可用", "请确认 dsh_state.py 与 python 3.14 就位", ToolTipIcon.Error);
+                return;
+            }
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = python,
+                    Arguments = $"-X utf8 \"{engine}\" {verb}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = key != null,
+                    RedirectStandardOutput = true,
+                    WorkingDirectory = Path.GetDirectoryName(engine),
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (key != null)
+                {
+                    proc.StandardInput.Write(key);
+                    proc.StandardInput.Close();
+                }
+                string output = proc.StandardOutput.ReadToEnd();
+                // 20 秒等不到就杀掉：--save-balance-key 存完还会顺手查一次余额（引擎里 HTTP 超时 12 秒），
+                // 网络不通时这一路是能挂住的；面板按钮的点击是同步跑在 UI 线程上的，
+                // 卡死的子进程会把整个状态栏一起带走。
+                bool exited = proc.WaitForExit(20000);
+                if (!exited)
+                {
+                    try { proc.Kill(true); } catch { }
+                }
+                Log($"{verb} -> 退出码 {(exited ? proc.ExitCode.ToString() : "超时已终止")} {RedactKey(output, key)}");
+                RefreshBalance();
+            }
+            catch (Exception ex)
+            {
+                // ex.Message 里不会有 Key：这条路径上 Key 只出现在 stdin 流里，
+                // 参数、路径、异常文本都不含它。Balloon 走的也是 Log（见 App.Balloon），
+                // 所以这一句同样安全。
+                Balloon("余额 Key 操作失败", ex.Message, ToolTipIcon.Error);
+            }
+        }
+
+        /// <summary>
+        /// 引擎输出 → 可落日志的一行：限长、压平换行，并把**本次提交的那串 Key**就地打成 ***。
+        /// 空 key（清除分支）没东西可替，直接走原文。
+        /// </summary>
+        static string RedactKey(string output, string key)
+        {
+            string text = (output ?? "").Trim();
+            if (!string.IsNullOrEmpty(key))
+                text = text.Replace(key, "***");
+            text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+            return text.Length > 200 ? text.Substring(0, 200) + "…" : text;
+        }
+
+        internal static void SaveBalanceKey(string key) => RunEngineVerb("--save-balance-key", key);
+        internal static void ClearBalanceKey() => RunEngineVerb("--clear-balance-key", null);
 
         private static void RestartClient()
         {

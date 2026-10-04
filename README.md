@@ -116,7 +116,7 @@ python dsh_state.py --demo error --json
 优先级从高到低：
 
 1. 环境变量 `DEEPSEEK_BALANCE_KEY`，其次 `DEEPSEEK_API_KEY`
-2. DPAPI 加密保存（推荐）：菜单「设置余额 Key…」，或命令行
+2. DPAPI 加密保存（推荐）：菜单「设置余额 Key…」（打开控制面板的「余额」页），或命令行
    ```bat
    python dsh_state.py --init-balance      :: 交互式录入，输入不回显
    python dsh_state.py --clear-balance-key
@@ -137,7 +137,8 @@ Key 存在 `%LOCALAPPDATA%\dsh-status\balance.protected`，用当前 Windows 账
 | `bar/BarWindow.cs` | 状态栏窗口（分层 WPF Window）与视觉树、悬停/滚轮/点击 |
 | `bar/StateClient.cs` | 常驻子进程 `dsh_state.py --watch`，独立线程读 NDJSON，退出自动重启 |
 | `bar/App.cs` | 入口、托盘图标、通知、watchdog、菜单、开机自启、日志 |
-| `bar/Settings.cs` `bar/KeyDialog.cs` | 设置持久化 / 余额 Key 录入对话框 |
+| `bar/Settings.cs` | 设置持久化（`settings.json`：轮询间隔、通知开关、重复间隔、主题、是否显示状态条） |
+| `bar/Panel/` | 控制面板（控制台）：左侧导航 + 概览/通知/外观/运行/余额/关于六页，余额 Key 在「余额」页录入 |
 | `test_dsh_state.py` | 16 个状态用例 + 端到端临时会话目录断言，`--live` 加真实数据冒烟 |
 | `smoke_test.py` | 冒烟工具：CLI 契约 + `--demo` 全状态 + 余额 Key 存取，`--build`/`--gui` 加编译与停靠校验 |
 | `build.cmd` `start-bar.bat` | 编译 / 启动 |

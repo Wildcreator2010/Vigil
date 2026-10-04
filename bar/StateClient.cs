@@ -45,6 +45,11 @@ namespace DshBar
         [JsonPropertyName("currency")] public string Currency { get; set; }
         [JsonPropertyName("total")] public string Total { get; set; }
         [JsonPropertyName("error")] public string Error { get; set; }
+        /// <summary>Key 的**来源**，不是 Key 本身：`env:DEEPSEEK_BALANCE_KEY` / `dpapi` /
+        /// `file:xxx` / `none`（dsh_state.py 的 balance_key）。面板只显示这一格，
+        /// 好让用户看清「环境变量盖住了已保存的 Key」这种情形。缺失时为 null
+        /// （--no-balance 的帧只有 available/error/skipped）。</summary>
+        [JsonPropertyName("source")] public string Source { get; set; }
     }
 
     public sealed class Brief
