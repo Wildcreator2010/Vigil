@@ -925,6 +925,12 @@ namespace DshBar
         }
 
         /// <summary>
+        /// 引擎子命令的进行中标记（0/1，走 Interlocked）。放在 RunEngineVerb 的文档块
+        /// **外面** —— 夹在中间的话那份「五条不可商量的口径」就成了这个 bool 的文档。
+        /// </summary>
+        static int _verbBusy;
+
+        /// <summary>
         /// 跑一次引擎的余额 Key 子命令（Task 7：从原来的 KeyDialog 搬上来，两处实现并一处）。
         ///
         /// 五条不可商量的口径：
@@ -946,10 +952,9 @@ namespace DshBar
         ///   把它放在 WaitForExit(20000) 前面，那条 20 秒超时和 Kill 就永远轮不到 ——
         ///   挂死的子进程会连着把宿主进程挂死。所以读用 ReadToEndAsync 发起，
         ///   超时杀进程这一支才真的成立。
-        /// 成敗通过 done 回到 UI 线程；失败时不写 refresh.token，页面也保留输入框里的内容。
+        /// 成败通过 done 回到发起调用时抓住的那个 Dispatcher；失败时不写 refresh.token，
+        /// 页面也保留输入框里的内容。
         /// </summary>
-        static volatile bool _verbBusy;
-
         static void RunEngineVerb(string verb, string key, Action<bool, string> done)
         {
             string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
@@ -962,15 +967,18 @@ namespace DshBar
                 done?.Invoke(false, "状态检测引擎不可用");
                 return;
             }
-            if (_verbBusy)
+            // 回程的 Dispatcher 必须在**还在 UI 线程上的此刻**抓住：_window 是静态字段，
+            // 用户从托盘退出时它会变 null，后台线程到时候再读就是读一个不确定的东西。
+            var back = _window == null ? null : _window.Dispatcher;
+            if (System.Threading.Interlocked.CompareExchange(ref _verbBusy, 1, 0) != 0)
             {
                 // 连点不能起第二个引擎子进程：两个 --save-balance-key 同时写 balance.protected
                 // 是「后写的盖掉前一个」，用户看到的是保存成功、下次启动读到的却是另一份。
+                // 页面那三颗按钮已经禁用了，这一道是给「同时开两扇面板」留的兜底。
                 Log($"{verb} 已经在跑，忽略这一次");
                 done?.Invoke(false, "上一次操作还在跑");
                 return;
             }
-            _verbBusy = true;
             var worker = new System.Threading.Thread(() =>
             {
                 bool ok = false;
@@ -1021,18 +1029,38 @@ namespace DshBar
                     fail = ex.Message;
                     Log($"{verb} 异常: {ex.Message}");
                 }
-                _verbBusy = false;
-                bool result = ok;
+                System.Threading.Interlocked.Exchange(ref _verbBusy, 0);
                 // fail 只有我们自己写得出来的那三种：退出码、超时、异常文本。
                 // 引擎的 stdout **不进这里** —— 那一段可能带服务端返回体，只允许经
                 // RedactKey 之后落 bar.log（见 ③）。这一串是要显示到界面上的。
                 string msg = string.IsNullOrEmpty(fail) ? "余额 Key 操作失败" : fail;
-                if (_window != null)
-                    _window.Dispatcher.BeginInvoke(new Action(() => FinishEngineVerb(result, msg, done)));
-                else done?.Invoke(result, result ? "" : msg);
+                // 回程本身也不能抛：Dispatcher 可能已经关掉（用户就在这 20 秒里从托盘退出），
+                // 而后台线程上没人接的异常 = 整个进程一起没（bar/ 里没有 DispatcherUnhandledException）。
+                try
+                {
+                    if (back != null && !back.HasShutdownStarted)
+                        back.BeginInvoke(new Action(() => FinishEngineVerb(ok, msg, done)));
+                    else if (ok) RefreshBalance();          // 没有 UI 可回了：只做不吃线程的那半
+                    else Log($"{verb} 失败: {msg}（回程时已经没有 UI 线程）");
+                }
+                catch (Exception ex)
+                {
+                    Log($"{verb} 回程失败: {ex.Message}");
+                }
             })
             { IsBackground = true };
-            worker.Start();
+            try
+            {
+                worker.Start();
+            }
+            catch (Exception ex)
+            {
+                // 起线程这一步失败时标志必须还得清掉：否则它一直挂着，
+                // 以后每一次点击都回「上一次操作还在跑」，而那一轮根本不存在。
+                System.Threading.Interlocked.Exchange(ref _verbBusy, 0);
+                Balloon("余额 Key 操作失败", ex.Message, ToolTipIcon.Error);
+                done?.Invoke(false, ex.Message);
+            }
         }
 
         /// <summary>引擎子命令的回程，跑在 UI 线程上：成功才请求刷新余额，失败要让人看见。</summary>
@@ -1044,15 +1072,39 @@ namespace DshBar
         }
 
         /// <summary>
-        /// 引擎输出 → 可落日志的一行：压平换行、把**本次提交的那串 Key**就地打成 ***、限长。
-        /// 压平必须在替换**之前**：服务端返回体里的 Key 可能被换行截断，压平之后那一串才连得起来。
+        /// 引擎输出 → 可落日志的一行：把**本次提交的那串 Key**打成 ***，然后压平换行、限长。
+        ///
+        /// 三道各有自己接得住的形状，顺序不能反：
+        /// ① 原样匹配 —— Key 完整地出现在输出里，这是绝大多数。
+        /// ② 容错匹配 —— 服务端把 Key 折了行（`sk-ab\ncd`）时原样匹配是漏的。注意
+        ///    「先把换行压平再匹配」接不上：`\s+` 是换成**一个空格**、不是删掉，
+        ///    `sk-ab cd` 里照样没有 `sk-abcd` 这一串。所以按字符之间插 `\s*` 再走一遍
+        ///    （顺带盖住 Key 自身带空白的情况；大小写无关，宁可多打码也不漏）。
+        /// ③ 压平 + 限长放在最后 —— 那之后的文本里已经没有 Key 了。
         /// 空 key（清除分支）没东西可替，直接走原文。
         /// </summary>
         static string RedactKey(string output, string key)
         {
-            string text = System.Text.RegularExpressions.Regex.Replace((output ?? "").Trim(), @"\s+", " ");
+            string text = output ?? "";
             if (!string.IsNullOrEmpty(key))
+            {
                 text = text.Replace(key, "***");
+                if (key.Length <= 512)
+                {
+                    // 长度上限是给这一遍的：模式里有 key.Length 个 `\s*`，拿一坨随机长串
+                    // 去跑正则不划算，而超过 512 字符的东西本身就不是 Key。
+                    var pat = new System.Text.StringBuilder();
+                    for (int i = 0; i < key.Length; i++)
+                    {
+                        if (i > 0) pat.Append(@"\s*");
+                        pat.Append(System.Text.RegularExpressions.Regex.Escape(key[i].ToString()));
+                    }
+                    text = System.Text.RegularExpressions.Regex.Replace(
+                        text, pat.ToString(), "***",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                }
+            }
+            text = System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"\s+", " ");
             return text.Length > 200 ? text.Substring(0, 200) + "…" : text;
         }
 

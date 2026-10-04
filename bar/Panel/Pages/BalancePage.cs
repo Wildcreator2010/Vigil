@@ -72,11 +72,15 @@ namespace DshBar
                 string k = _key.Password == null ? "" : _key.Password.Trim();
                 if (k.Length == 0) return;   // 空输入什么都不做：清除有专门的按钮
                 Busy(false);
+                ShowOp("正在跑引擎（保存完它还会顺手查一次余额，最长 20 秒）…");
                 App.SaveBalanceKey(k, (ok, why) =>
                 {
                     // 失败时**不清空**：Key 是用户从平台控制台复制来的，
                     // 一失败就清空等于让人回去重新找一遍。
-                    if (ok) { _key.Clear(); ShowOp("已保存：用当前 Windows 账户的 DPAPI 加密写进数据目录。"); }
+                    // 成功那句话刻意不写「DPAPI 加密」：引擎在 DPAPI 失败时会退回明文
+                    // balance.key 并**照样退出 0**（dsh_state.py save_balance_key），
+                    // 界面上没有凭据说它这次走的是哪一条 —— 来源那一行才有。
+                    if (ok) { _key.Clear(); ShowOp("已保存。落在哪个文件、加密没加密，看下面那一行的来源。"); }
                     else ShowOp("保存失败：" + why + "。输入框里的内容还留着，可以直接重试。");
                     Busy(true);
                 });
@@ -85,6 +89,7 @@ namespace DshBar
             var clear = PushButton("清除已存 Key", () =>
             {
                 Busy(false);
+                ShowOp("正在跑引擎…");
                 App.ClearBalanceKey((ok, why) =>
                 {
                     if (ok) { _key.Clear(); ShowOp("已请求清除已保存的 Key。"); }

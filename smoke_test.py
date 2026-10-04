@@ -934,11 +934,16 @@ def shot_profile(path: str, bg: bytes, stride: int = 2) -> dict[bytes, float] | 
         return None
     w, h, buf = got
     if (w, h) != SHOT_PAGE_DIP:
-        # 参照画布一改（App.cs RenderShot 里的 900/620），下面这块裁切就全错，
+        # 参照画布一改（App.cs RenderShot 里那两个数），下面这块裁切就全错，
         # 与其悄悄比错，不如让调用处当场红。
         return None
-    x0, y0 = PAGE_BOX_DIP[0] - 212, PAGE_BOX_DIP[1] - 20   # 页面左沿 212、上沿 20（Host 边距）
+    # 页面原点：nav 188 + Host 左边距 24 = 212；Host 上边距 20。它和 PAGE_BOX_DIP 是
+    # 同一个外壳的两处读数，所以这里当场校验裁切块落在画布里 —— 外壳改了而这里没跟上时，
+    # 宁可红在「参照读不出来」，也不要切片悄悄短一截、拿错区域比样。
+    x0, y0 = PAGE_BOX_DIP[0] - 212, PAGE_BOX_DIP[1] - 20
     x1, y1 = x0 + PAGE_W_DIP, y0 + PAGE_H_DIP
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        return None
     return color_profile([over_backdrop(buf[(y * w + x) * 4:(y * w + x) * 4 + 4], bg)
                           for y in range(y0, y1, stride) for x in range(x0, x1, stride)])
 
@@ -1377,6 +1382,24 @@ switch ($Action) {
       Write-Output ("PCT0=" + [int]$s.Current.VerticalPercent)
     }
   }
+  'wide' {
+    # 页面上**长说明文字**最窄有多宽（DIP）。Ui.Row 的左侧是 Star 列：右侧字段吃掉多少，
+    # 说明文字就只剩多少，而这件事任何像素门禁都看不见 —— 离屏参照与真窗口是同一块
+    # 挤压后的排版，比样照样 0.95+（Task 7 复核 I4）。所以直接量控件的包围盒。
+    # 只算 Name 长度 >= 24 的 TextBlock：标题和按钮文字本来就短，不参与。
+    # 外壳宽度是这条换算的分母，它自己由「面板窗口是默认的 960×640」那条前提断言钉着。
+    $scW = $root.Current.BoundingRectangle.Width / 960.0
+    $min = -1; $who = ''
+    foreach ($e in $all) {
+      if ($e.Current.ClassName -ne 'TextBlock') { continue }
+      $n = $e.Current.Name
+      if ($n.Length -lt 24) { continue }
+      $wd = [int](($e.Current.BoundingRectangle.Width) / $scW)
+      if ($min -lt 0 -or $wd -lt $min) { $min = $wd; $who = $n.Substring(0, 20) }
+    }
+    Write-Output ("MINWIDE=" + $min)
+    Write-Output ("MINWIDEWHO=" + $who)
+  }
   default { Write-Output 'ERR=BADACTION'; exit 6 }
 }
 '''
@@ -1697,6 +1720,11 @@ def check_pages_filled() -> None:
         check("界面对 Key 本体是聋的：帧里带不带 key 字段，两张离屏图逐字节相同",
               bool(fp_b_a) and bool(fp_b_nk) and fp_b_a == fp_b_nk,
               f"带 key {fp_b_a[:8]} vs 不带 {fp_b_nk[:8]}：不同就是界面把 Key 画出来了")
+        # 换回去：下面 ④ 那张开机自启的对照图必须和 fp_r_a 只差注册表这一件事。
+        # 留着 with_key=False 跑 ④，两张就差两个变量，那条门禁从此名不副实。
+        with open(os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(fake_static_engine_source(True))
 
         # ④ 开机自启那一格读的是注册表现状，不是 settings.json
         reg_run_write(f'"{BAR_EXE}"')
@@ -1950,7 +1978,10 @@ def check_panel_settings_live() -> None:
             return ww, hh, (row_hashes(buf, ww, hh) if ww else [])
 
         def diff_of(base: tuple[int, int, list[int]], cur: tuple[int, int, list[int]]) -> int:
-            """与参照那一帧差几行；没抓到或尺寸对不上给 -1（这条实验作废，不是产品红）。
+            """与参照那一帧差几行；没抓到或尺寸对不上给 -1。
+
+            -1 不豁免判据：抓不到帧本身就值得红，静默跳过会把「面板根本没画出来」读成绿的。
+            红的时候看现场里的抓帧尺寸 —— 尺寸对不上是环境问题，抓帧为 0 才是产品问题。
 
             尺寸必须逐维比：只比签名长度的话，「滚动条出现导致宽度变了」这一帧也能比，
             于是整屏重排会被算成「滚了 500 行」。基线那一帧的宽高就带在 base 里。
@@ -2449,7 +2480,7 @@ def check_panel_real_scroll() -> None:
         time.sleep(0.5)
 
         def diff_of(buf: bytes, ww: int, hh: int) -> list[int] | None:
-            """两帧逐行一比；尺寸对不上返回 None（这条实验作废，不是产品红）。"""
+            """两帧逐行一比；尺寸对不上返回 None（None 由调用处记红，不静默跳过）。"""
             if (ww, hh) != (w, h) or not buf:
                 return None
             return [y for y, (a, c) in enumerate(zip(sig0, row_hashes(buf, ww, hh))) if a != c]
@@ -2547,8 +2578,8 @@ def check_panel_real_scroll() -> None:
               f"落在表头带 [y{st0['top']}, y{st0['head1']}] 里的有 {in_head} 条、"
               f"分隔线 {st1['lines']} 条、最右条带滑块像素 {st1['gray']}")
         check("真实窗口：滚轮在表体上滚得动（画面确实动了，不是什么都没发生）",
-              len(changed) >= 100,
-              f"{len(changed)} 行变化（阈值 100 行 ≈ 表体的一大截）；送达通路={way}；"
+              len(changed) >= WHEEL_MIN,
+              f"{len(changed)} 行变化（阈值 {WHEEL_MIN} 行 ≈ 表体的一大截）；送达通路={way}；"
               f"{fg_note or '定向通路不经前台'}；"
               f"够不上 100 行就先看上面那条送达自检——它红是送达问题（本环境的前台锁那一类），"
               f"它绿而这条红才是那 29 行在真实面板里够不着")
@@ -2638,6 +2669,19 @@ DIRECT_AGREE_MIN = 0.80
 把 Navigate 还原成 Task 3 的坏版本后实测：请求外观页却停在概览，
 与外观参照的重合度 0.175、与四个占位参照的 0.0002 —— 走错页那一侧离阈值也差四倍多。
 两侧都不靠「概览页是白底」这个写死事实，Task 8 换主题刷后照样成立（同一轮实测过）。"""
+
+
+TEXT_FLOOR_DIP = {"notify": 180, "appearance": 180, "runtime": 180, "balance": 180}
+"""四页里「长说明文字」最窄可以接受到多少 DIP（Ui.Row 的 Star 列）。
+
+这条是给 Task 7 复核 I4 补的：余额页那行右侧摆了输入框 + 两颗按钮，把说明文字挤到
+一行三四个字，而**任何像素门禁都看不见** —— 离屏参照与真窗口是同一块挤压后的排版，
+比样照样 0.95+。所以量控件包围盒，不量颜色。
+180 这个地板值是量出来的，不是猜的：把余额页改回 I4 那一版（输入框 300 + 长按钮文案）
+实测 **87 DIP** 并当场红，而修好之后四页的实测区间是 **275 ~ 528 DIP**
+（notify 528 / appearance 275 / runtime 309 / balance 299，连续三轮跑批都是 299）——
+两侧离阈值都还有一倍以上，不会时红时绿。概览页（表格标题列）与关于页（Task 9 才填实）不在这里。
+"""
 
 
 def check_panel_direct_page() -> None:
@@ -2766,6 +2810,21 @@ def check_panel_direct_page() -> None:
             report(page, f"二次实例 --panel {page}"
                    f"{'（请求文件已消费）' if consumed else '（请求文件 12 秒没被消费！）'}",
                    ov, prof, waited)
+            # 说明文字有没有被右侧字段挤坏：像素门禁看不见这件事（参照与现场是同一块
+            # 挤压后的排版），所以直接量长 TextBlock 的包围盒宽度。
+            # 概览页不在射程里：那张表里的会话标题也是长 TextBlock，窄列是它的设计；
+            # 关于页现在是占位（Task 9 填实时把它连同预期一起加进来）。
+            if page in TEXT_FLOOR_DIP:
+                wd = uia(hwnd, "wide")
+                got = int((wd.get("MINWIDE") or ["-1"])[0])
+                print(f"  {page} 页最窄的长说明文字实测 {got} DIP："
+                      f"{(wd.get('MINWIDEWHO') or ['?'])[0]!r}")
+                check(f"{page} 页的说明文字列没有被右侧字段挤坏（最长那段宽 ≥ "
+                      f"{TEXT_FLOOR_DIP[page]} DIP）",
+                      uia_ok(wd) and got >= TEXT_FLOOR_DIP[page],
+                      f"最窄的长文本 {(wd.get('MINWIDEWHO') or ['?'])[0]!r} 实测 {got} DIP"
+                      f"（Task 7 复核那次挤到 ~48 DIP，一行只放得下三四个字）；"
+                      f"{wd.get('ERR')}")
         dup = [k for k, v in hashes.items() if list(hashes.values()).count(v) > 1]
         check("六个直达请求产生六种内容（没有一个请求停在上一页上）",
               len(set(hashes.values())) == len(hashes),
@@ -3147,10 +3206,17 @@ def check_balance_key_handling() -> None:
 
     # ②b 这一路必须跑在后台线程上。KeyDialog 时代同步等只冻一扇模态窗，
     #     面板是常驻的：同步等会把状态栏、托盘和两个 DispatcherTimer 一起冻住。
-    check("引擎子命令跑在后台线程上，回程再 marshal 回 UI 线程",
+    check("引擎子命令跑在后台线程上，回程 marshal 回**发起时抓住的那个** Dispatcher",
           "new System.Threading.Thread(" in verb_body
-          and "Dispatcher.BeginInvoke" in verb_body,
-          "RunEngineVerb 里没找到后台线程或 Dispatcher.BeginInvoke —— 点一下保存就冻住整个进程")
+          and "back.BeginInvoke(new Action(" in verb_body
+          and "_window.Dispatcher" in verb_body,
+          "RunEngineVerb 里没找到后台线程，或回程不是回到发起时抓住的那个 Dispatcher"
+          "（退出过程中 _window 会变 null，后台线程再读它就是读一个不确定的东西）")
+    check("起线程失败时把进行中标记还回去（否则以后每次点击都回「还在跑」）",
+          "Interlocked.CompareExchange(ref _verbBusy, 1, 0)" in verb_body
+          and verb_body.count("Interlocked.Exchange(ref _verbBusy, 0)") == 2,
+          "标记不是走 Interlocked，或只有 worker 内部那一处清位 —— worker.Start() 抛在"
+          "外面的话这一位就永远挂着")
     # ②c 「先读完再等退出」是死的：ReadToEnd 要等子进程关掉 stdout（也就是退出）才返回，
     #     放在 WaitForExit(20000) 前面，那条超时和 Kill 永远轮不到 —— 挂死的子进程挂死宿主。
     ra, we = verb_body.find("ReadToEndAsync"), verb_body.find("WaitForExit(")
@@ -3163,20 +3229,23 @@ def check_balance_key_handling() -> None:
     #    判据是「每一处提到 output 的 Log 都得过 RedactKey」，不是「有一处过了」——
     #    后者在旁边再加一句 Log(output) 也照样绿。
     raw = [l.strip() for l in verb_body.splitlines()
-           if re.search(r"^\s*Log\(.*\boutput\b", l) and "RedactKey" not in l]
-    check("引擎输出进 bar.log 的每一处都先过 RedactKey（不原样落盘）",
-          not raw, "这些 Log 行把未脱敏的输出写进了 bar.log：" + " / ".join(raw))
+           if re.search(r"^\s*(Log|Balloon)\(.*\boutput\b", l) and "RedactKey" not in l]
+    check("引擎输出进 bar.log 的每一处都先过 RedactKey（Log 与 Balloon 同一个水槽）",
+          not raw, "这些行把未脱敏的输出写进了 bar.log：" + " / ".join(raw))
     rk_i = app_src.find("static string RedactKey(")
-    rk = app_src[rk_i:rk_i + 600] if rk_i >= 0 else ""
-    FLAT = r'@"\s+"'
-    SUB = ".Replace(key,"
-    flat_at = rk.index(FLAT) if FLAT in rk else -1
-    sub_at = rk.index(SUB) if SUB in rk else -1
-    check("RedactKey 先压平换行再替换（服务端返回体里的 Key 可能被换行截断）",
-          bool(rk) and flat_at >= 0 and sub_at >= 0 and flat_at < sub_at
-          and 'text.Replace(key, "***")' in rk,
-          f"RedactKey 的替换口径变了（压平@{flat_at} 替换@{sub_at}）："
-          "顺序反了，跨行的 Key 就替不掉")
+    rk = app_src[rk_i:rk_i + 1400] if rk_i >= 0 else ""
+    VERBATIM = 'text.Replace(key, "***")'
+    TOLERANT = "Regex.Escape(key[i].ToString())"
+    FLAT = r'Regex.Replace(text.Trim(), @"\s+", " ")'
+    v_at = rk.index(VERBATIM) if VERBATIM in rk else -1
+    t_at = rk.index(TOLERANT) if TOLERANT in rk else -1
+    f_at = rk.index(FLAT) if FLAT in rk else -1
+    # 「先压平再替换」是接不上的：\s+ 换成的是**一个空格**、不是删掉，
+    # `sk-ab\ncd` 压平成 `sk-ab cd` 之后照样不含 `sk-abcd`。所以真正的兜底是
+    # 字符间插 \s* 的那一遍容错匹配，压平只能放在最后当排版。
+    check("RedactKey 三道齐全且顺序是 原样 → 容错 → 压平限长",
+          v_at >= 0 and t_at > v_at and f_at > t_at,
+          f"原样@{v_at} 容错@{t_at} 压平@{f_at}：缺任一道，被折行的 Key 就能原样进 bar.log")
 
     # ④ 界面上只出「来源」，不出 Key 本体：PasswordBox 的值只被读去保存，从不写进任何文本。
     leak = [l.strip() for l in page_src.splitlines()
@@ -3192,10 +3261,11 @@ def check_balance_key_handling() -> None:
           ri >= 0 and "_key" not in page_src[ri:],
           "Refresh 里出现了 _key：" + " / ".join(
               l.strip() for l in page_src[ri:].splitlines() if "_key" in l)[:160])
-    check("保存与清除两支都在成功之后清空输入框（_key.Clear() ≥2）",
-          page_src.count("_key.Password") >= 1 and page_src.count("_key.Clear()") >= 2,
+    check("输入框只在成功那两支里清空（全页 _key.Clear() 恰好 2 处）",
+          page_src.count("_key.Password") >= 1 and page_src.count("_key.Clear()") == 2,
           f"_key.Password {page_src.count('_key.Password')} 次、"
-          f"_key.Clear() {page_src.count('_key.Clear()')} 次（保存成功要清、清除成功也要清）")
+          f"_key.Clear() {page_src.count('_key.Clear()')} 次（多于 2 就是有人加了一处"
+          "无条件清空 —— 失败时那一下会把用户粘进来的 Key 吃掉）")
     # 「失败也当场清空」是最伤用户的那一支：Key 是从平台控制台复制来的，一失败就清空
     # 等于让人回去重新找一遍，而且界面看起来像保存成功了。所以钉成回调形状：
     # 只有 ok 为真那一条分支里才许出现 Clear。
