@@ -1099,9 +1099,22 @@ namespace DshBar
                         if (i > 0) pat.Append(@"\s*");
                         pat.Append(System.Text.RegularExpressions.Regex.Escape(key[i].ToString()));
                     }
-                    text = System.Text.RegularExpressions.Regex.Replace(
-                        text, pat.ToString(), "***",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    try
+                    {
+                        text = System.Text.RegularExpressions.Regex.Replace(
+                            text, pat.ToString(), "***",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase,
+                            TimeSpan.FromMilliseconds(500));
+                    }
+                    catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+                    {
+                        // 超时的语义是「没匹配上」，不是「没有 Key」。这一整行宁可不打，
+                        // 也不能拿未脱敏的原文去落 bar.log —— 能走到超时这一支的，
+                        // 正是第一道原样替换没接住的那一种（被折行/换大小写嵌在里面）。
+                        // 没有时限的话，Replace 不返回就永远到不了清标志那一行，
+                        // 三个按钮会一直禁着：那是复核 N1 那个症状的另一条来路。
+                        return "（引擎输出没能在时限内安全脱敏，已整行省略）";
+                    }
                 }
             }
             text = System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"\s+", " ");

@@ -2491,9 +2491,9 @@ def check_panel_real_scroll() -> None:
         # 输入队列的时序决定，那是环境的时序，不是产品的行为；钉一次投递等于把
         # 「这一次没中」记成产品缺陷（Task 6 刚因为一条依赖环境时序的判据被打回过一次）。
         # 判据①②本身一个字没改，改的只是「给它机会把滚轮滚出来」。
-        # 等的那条线必须就是判据那条线（100 行）：只等「有一行变了」的话，快照推进带来的
+        # 等的那条线必须就是判据那条线（WHEEL_MIN）：只等「有一行变了」的话，快照推进带来的
         # 两三行会提前收手，三轮定向投递连同整条兜底通路都被跳过，判据①拿着两三行去比
-        # 100 行 —— 健康的产品照样红（Task 7 复核指出，这正是「把 flake 挪了个位置」）。
+        # WHEEL_MIN 行 —— 健康的产品照样红（Task 7 复核指出，这正是「把 flake 挪了个位置」）。
         WHEEL_MIN = 100
 
         def wait_moved(limit: float = 5.0) -> tuple[int, int, bytes, list[int] | None]:
@@ -2581,7 +2581,7 @@ def check_panel_real_scroll() -> None:
               len(changed) >= WHEEL_MIN,
               f"{len(changed)} 行变化（阈值 {WHEEL_MIN} 行 ≈ 表体的一大截）；送达通路={way}；"
               f"{fg_note or '定向通路不经前台'}；"
-              f"够不上 100 行就先看上面那条送达自检——它红是送达问题（本环境的前台锁那一类），"
+              f"够不上 {WHEEL_MIN} 行就先看上面那条送达自检——它红是送达问题（本环境的前台锁那一类），"
               f"它绿而这条红才是那 29 行在真实面板里够不着")
         check("真实窗口：滚轮滚过之后表头没有被滚出视野",
               first_diff > st0["head1"],
@@ -2681,6 +2681,7 @@ TEXT_FLOOR_DIP = {"notify": 180, "appearance": 180, "runtime": 180, "balance": 1
 实测 **87 DIP** 并当场红，而修好之后四页的实测区间是 **275 ~ 528 DIP**
 （notify 528 / appearance 275 / runtime 309 / balance 299，连续三轮跑批都是 299）——
 两侧离阈值都还有一倍以上，不会时红时绿。概览页（表格标题列）与关于页（Task 9 才填实）不在这里。
+**只反证过 balance 那一页**：其余三条钉的是同一个动作、同一份实现，但「把它们改坏会不会红」没被演示过 —— 记在这里，别让它们看起来比实际更可信。
 """
 
 
@@ -3232,20 +3233,44 @@ def check_balance_key_handling() -> None:
            if re.search(r"^\s*(Log|Balloon)\(.*\boutput\b", l) and "RedactKey" not in l]
     check("引擎输出进 bar.log 的每一处都先过 RedactKey（Log 与 Balloon 同一个水槽）",
           not raw, "这些行把未脱敏的输出写进了 bar.log：" + " / ".join(raw))
+    def method_body(src: str, start: int, limit: int = 6000) -> str:
+        """从签名处往后按大括号配平截出方法体。
+
+        原来这里是 `src[start:start + 1400]` 这样的定长窗口 —— RedactKey 加上超时那一支
+        之后长出了窗口，压平那一道锚点被切到外面，门禁当场假红（是反证跑出来的，
+        不是想出来的）。方法体长度不该由门禁去猜，配平才是对的。
+        """
+        k = src.find("{", start)
+        if k < 0:
+            return ""
+        depth, i = 0, k
+        while i < len(src) and i - start < limit:
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[start:i + 1]
+            i += 1
+        return src[start:start + limit]
+
     rk_i = app_src.find("static string RedactKey(")
-    rk = app_src[rk_i:rk_i + 1400] if rk_i >= 0 else ""
+    rk = method_body(app_src, rk_i) if rk_i >= 0 else ""
     VERBATIM = 'text.Replace(key, "***")'
     TOLERANT = "Regex.Escape(key[i].ToString())"
-    FLAT = r'Regex.Replace(text.Trim(), @"\s+", " ")'
+    FLAT = r'@"\s+"'          # 锚在字面量上，不锚在整句调用上：见下面那条注释
     v_at = rk.index(VERBATIM) if VERBATIM in rk else -1
     t_at = rk.index(TOLERANT) if TOLERANT in rk else -1
     f_at = rk.index(FLAT) if FLAT in rk else -1
     # 「先压平再替换」是接不上的：\s+ 换成的是**一个空格**、不是删掉，
     # `sk-ab\ncd` 压平成 `sk-ab cd` 之后照样不含 `sk-abcd`。所以真正的兜底是
     # 字符间插 \s* 的那一遍容错匹配，压平只能放在最后当排版。
-    check("RedactKey 三道齐全且顺序是 原样 → 容错 → 压平限长",
-          v_at >= 0 and t_at > v_at and f_at > t_at,
-          f"原样@{v_at} 容错@{t_at} 压平@{f_at}：缺任一道，被折行的 Key 就能原样进 bar.log")
+    # 锚点用字面量而不是整句调用：上一轮的反证暴露了后者能被「在前面再复制一道形状
+    # 略不同的压平」绕过去；配 count == 1 一起钉 —— RedactKey 里只许出现一处 \s+。
+    check("RedactKey 三道齐全、压平只有一道且排在最后",
+          v_at >= 0 and t_at > v_at and f_at > t_at and rk.count(FLAT) == 1,
+          f"原样@{v_at} 容错@{t_at} 压平@{f_at}、压平共 {rk.count(FLAT)} 道：" 
+          "缺任一道或被提前，被折行的 Key 就能原样进 bar.log")
 
     # ④ 界面上只出「来源」，不出 Key 本体：PasswordBox 的值只被读去保存，从不写进任何文本。
     leak = [l.strip() for l in page_src.splitlines()

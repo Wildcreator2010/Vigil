@@ -77,10 +77,15 @@ namespace DshBar
                 {
                     // 失败时**不清空**：Key 是用户从平台控制台复制来的，
                     // 一失败就清空等于让人回去重新找一遍。
-                    // 成功那句话刻意不写「DPAPI 加密」：引擎在 DPAPI 失败时会退回明文
+                    // 成功那句话刻意什么都不声称：引擎在 DPAPI 失败时会退回明文
                     // balance.key 并**照样退出 0**（dsh_state.py save_balance_key），
-                    // 界面上没有凭据说它这次走的是哪一条 —— 来源那一行才有。
-                    if (ok) { _key.Clear(); ShowOp("已保存。落在哪个文件、加密没加密，看下面那一行的来源。"); }
+                    // 界面上没有凭据说它这一次走的是哪一条。
+                    // 更别指向「下面那一行的来源」—— 那条回退路径写的是
+                    // state_dir()\balance.key，而 balance_key() 的候选里根本没有这一条
+                    // （它只翻 here/、here/../、~/.dsh/、~/.deepseek/）：真到那一步，
+                    // 来源会一直显示 none，保存进去的 Key 谁也读不到。
+                    // 那是引擎侧的读写不对称，记在 SDD ledger 的待办里，不在这一页遮掩。
+                    if (ok) { _key.Clear(); ShowOp("已保存。"); }
                     else ShowOp("保存失败：" + why + "。输入框里的内容还留着，可以直接重试。");
                     Busy(true);
                 });
