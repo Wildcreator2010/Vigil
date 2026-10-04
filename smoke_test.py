@@ -925,8 +925,9 @@ def shot_profile(path: str, bg: bytes, stride: int = 2) -> dict[bytes, float] | 
     """离屏参照页的配色分布（已按外壳底色合成 alpha）；读不出 PNG 或几何对不上给 None。
 
     裁到和真窗口取样框**同一块几何**再统计：`--panel-shot` 出的是整页 724×600，
-    而真窗口那一侧的框是往里缩 4 像素的 714×588。不裁的话参照多带着一圈描边和
-    页边空白，两边量的就不是同一块地方。
+    而真窗口那一侧的框是从页面左上往里缩 4（左）/ 6（上）像素的 714×588 —— 就是
+    PAGE_BOX_DIP 减掉页面原点 (212, 20)。不裁的话参照多带着一圈描边和页边空白，
+    两边量的就不是同一块地方。
     """
     got = read_png_rgba(path)
     if got is None:
@@ -936,7 +937,8 @@ def shot_profile(path: str, bg: bytes, stride: int = 2) -> dict[bytes, float] | 
         # 参照画布一改（App.cs RenderShot 里的 900/620），下面这块裁切就全错，
         # 与其悄悄比错，不如让调用处当场红。
         return None
-    x0, y0, x1, y1 = 4, 4, 4 + PAGE_W_DIP, 4 + PAGE_H_DIP
+    x0, y0 = PAGE_BOX_DIP[0] - 212, PAGE_BOX_DIP[1] - 20   # 页面左沿 212、上沿 20（Host 边距）
+    x1, y1 = x0 + PAGE_W_DIP, y0 + PAGE_H_DIP
     return color_profile([over_backdrop(buf[(y * w + x) * 4:(y * w + x) * 4 + 4], bg)
                           for y in range(y0, y1, stride) for x in range(x0, x1, stride)])
 
@@ -1510,16 +1512,19 @@ def shot_fp(page: str, tag: str) -> tuple[str, int, int]:
     return hashlib.md5(buf).hexdigest(), shot_dims(head)[2], opaque
 
 
-def fake_static_engine_source(ok: bool = True) -> str:
+def fake_static_engine_source(ok: bool = True, with_key: bool = True) -> str:
     """一帧**定死**的快照（age_sec / label 都不随时间变），给「两张图只差一个设置项」的比对用。
 
     为什么不用真引擎：运行页的阈值那一行跟着快照走（静默秒数每帧都在涨），
     拿真引擎连出两张图必然不同 —— 那条门禁就退化成「什么都不断言」的摆设。
     ok=False 出的是 `{"ok": false}`：反序列化后 Snapshot.Ok 为 false，
     页面走「还没有可用快照」那一支（与面板在第一帧之前打开是同一条路）。
+    with_key 只多一个 `balance.key` 字段（C# 的 Balance 模型里没有这一格）：
+    带与不带两张出图必须逐字节相同，那是「界面对 Key 本体是聋的」那条门禁的两张图。
     """
     if not ok:
         return 'import sys\nsys.stdout.write(\'{"ok": false, "error": "smoke-static"}\\n\')\n'
+    decoy = ', "key": "SMOKE-TEST-NOT-A-REAL-KEY-0000"' if with_key else ''
     return (
         'import json, sys\n'
         'frame = json.dumps({"ok": True, "app_running": True, "state": "idle",\n'
@@ -1528,11 +1533,9 @@ def fake_static_engine_source(ok: bool = True) -> str:
         '    "session": {"project": "定格项目", "title": "t", "state": "idle", "turn": 7,\n'
         '        "step": 1, "age_sec": 42.0, "last_tool": "edit", "pending": None,\n'
         '        "todo": None, "error": None},\n'
-        # 余额那一格给的是**真形状**的帧（Task 7 的余额页要钉「那一行跟着快照走」），
-        # 并且故意多带一个 `key` 字段：C# 的 Balance 模型里没有它，反序列化直接丢掉 ——
-        # 余额页因此没有任何通路能把 Key 本体画到界面上，多带的那一份就是这条的活证据。
+        # 余额那一格给的是**真形状**的帧（Task 7 的余额页要钉「那一行跟着快照走」）。
         '    "balance": {"available": True, "total": "12.34", "currency": "¥",\n'
-        '        "error": None, "source": "dpapi", "key": "SMOKE-TEST-NOT-A-REAL-KEY-0000"},\n'
+        f'        "error": None, "source": "dpapi"{decoy}}},\n'
         '    "waiting": [], "recent": [], "sessions_scanned": 3,\n'
         '    "sessions": [\n'
         '        {"key": "s%d" % i, "project": "proj-%d" % i, "title": "会话 %d" % i,\n'
@@ -1683,6 +1686,18 @@ def check_pages_filled() -> None:
               bool(fp_b_no) and bool(fp_b_a) and fp_b_no != fp_b_a,
               f"有帧 {fp_b_a[:8]} vs 无帧 {fp_b_no[:8]}：相同就是 Refresh 没接上 balance")
 
+        # 反向配对：引擎帧里**多带一个 key 字段**，界面必须画不出任何东西 ——
+        # 带与不带两张出图逐字节相同。上面那几条「两张不同」钉的是该画的会画，
+        # 这一条钉的是不该画的画不出来；占位页两张也一样，所以它对半成品是假绿的，
+        # 但只有「余额行真的跟着快照走」那条绿了它才算数（两条成对，判据在下面）。
+        with open(os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(fake_static_engine_source(True, with_key=False))
+        fp_b_nk, _, _ = shot_fp("balance", "balance-nokey")
+        check("界面对 Key 本体是聋的：帧里带不带 key 字段，两张离屏图逐字节相同",
+              bool(fp_b_a) and bool(fp_b_nk) and fp_b_a == fp_b_nk,
+              f"带 key {fp_b_a[:8]} vs 不带 {fp_b_nk[:8]}：不同就是界面把 Key 画出来了")
+
         # ④ 开机自启那一格读的是注册表现状，不是 settings.json
         reg_run_write(f'"{BAR_EXE}"')
         fp_r_reg, _, _ = shot_fp("runtime", "runtime-reg-on")
@@ -1703,7 +1718,7 @@ def check_pages_filled() -> None:
                 fh.write(backup)
         for tag in ("notify-on", "notify-off", "notify-33", "runtime-a", "runtime-int7",
                     "runtime-nosnap", "notify-nosnap", "runtime-reg-on",
-                    "balance-a", "balance-nosnap"):
+                    "balance-a", "balance-nosnap", "balance-nokey"):
             p = os.path.join(ds.state_dir(), f"t6-{tag}.png")
             if os.path.isfile(p):
                 os.remove(p)
@@ -1927,45 +1942,52 @@ def check_panel_settings_live() -> None:
         # 两次跑出 moved=0 与 moved=548：前者是基线那一帧还没排完（于是重排被算成「没滚」，
         # 下一次抓取才把重排显出来 = 548），后者是滚回顶部的那 0.8 秒不够。
         # 判据本身一个字没改：滚到底必须变一大片、滚回顶部必须回到原样。
-        LIVE_ROWS = 12  # 阈值那一行是活的（静默秒数每帧在涨），12 行以内都算「画面没动」
+        LIVE_ROWS = 12   # 阈值那一行是活的（静默秒数每帧在涨），12 行以内都算「画面没动」
+        SCROLL_MIN = 30  # 判据①的门槛：滚到底必须变这么多行
 
         def grab() -> tuple[int, int, list[int]]:
             ww, hh, buf = capture_bar(hwnd, shot, scale=scale)
             return ww, hh, (row_hashes(buf, ww, hh) if ww else [])
 
-        def diff_of(sig: list[int], cur: tuple[int, int, list[int]]) -> int:
-            """与参照那一帧差几行；没抓到或帧高对不上给 -1（这条实验作废，不是产品红）。
+        def diff_of(base: tuple[int, int, list[int]], cur: tuple[int, int, list[int]]) -> int:
+            """与参照那一帧差几行；没抓到或尺寸对不上给 -1（这条实验作废，不是产品红）。
 
-            比签名长度而不是比 (w, h)：基线那两个数在第一次调用时还没赋出来。
+            尺寸必须逐维比：只比签名长度的话，「滚动条出现导致宽度变了」这一帧也能比，
+            于是整屏重排会被算成「滚了 500 行」。基线那一帧的宽高就带在 base 里。
             """
-            if not cur[2] or not sig or len(cur[2]) != len(sig):
+            if not base[2] or not cur[2] or (cur[0], cur[1]) != (base[0], base[1]):
                 return -1
-            return sum(1 for a, c in zip(sig, cur[2]) if a != c)
+            if len(cur[2]) != len(base[2]):
+                return -1
+            return sum(1 for a, c in zip(base[2], cur[2]) if a != c)
 
-        w, h, sig = grab()
+        base = grab()
         t_s = time.time()
         while time.time() - t_s < 12.0:
             time.sleep(0.6)
             cur = grab()
-            if 0 <= diff_of(sig, cur) <= LIVE_ROWS:
-                w, h, sig = cur
+            d = diff_of(base, cur)   # 先比再挪基线：反过来就是拿那一帧和自己比，恒 0
+            base = cur
+            if 0 <= d <= LIVE_ROWS:
                 break
-            w, h, sig = cur
-        w0, h0, sig0 = w, h, sig
+        w0, h0, sig0 = base
         moved, back_diff = -1, -1
         sd: dict = {}
         if w0:
             sd = uia(hwnd, "scroll", value="down")
             t_s = time.time()
             while time.time() - t_s < 8.0:
-                moved = diff_of(sig0, grab())
-                if moved > LIVE_ROWS:
+                # 等到的是**判据自己那条线**（≥30 行），不是「有一行变了」：
+                # 只等「动过」的话，快照推进带来的两三行就能提前收手，而判据要 30 行 ——
+                # 于是活字那一行被当成滚过了，健康的产品也会红（Task 7 复核指出）。
+                moved = diff_of(base, grab())
+                if moved >= SCROLL_MIN:
                     break
                 time.sleep(0.5)
             uia(hwnd, "scroll", value="up")
             t_s = time.time()
             while time.time() - t_s < 8.0:
-                back_diff = diff_of(sig0, grab())
+                back_diff = diff_of(base, grab())
                 if 0 <= back_diff <= LIVE_ROWS:
                     break
                 time.sleep(0.5)
@@ -1975,8 +1997,8 @@ def check_panel_settings_live() -> None:
         # 滚回顶部后**不要求逐行相同**：阈值那一行是活的（静默秒数每帧在涨），
         # 十几行以内的差异就是它；真没滚回去的话差的是整屏布局，量级差几十倍。
         check("滚到底之后画面真的动了、滚回顶部又回到原位置（内容在滚，不是被裁在视口外）",
-              moved >= 30 and 0 <= back_diff <= LIVE_ROWS,
-              f"滚到底变化 {moved} 行（阈值 30：活的那行文字每帧只动 2~3 行，够不着 30）、"
+              moved >= SCROLL_MIN and 0 <= back_diff <= LIVE_ROWS,
+              f"滚到底变化 {moved} 行（阈值 {SCROLL_MIN}：活的那行文字每帧只动 2~3 行，够不着它）、"
               f"滚回顶部后与基线差 {back_diff} 行（容 {LIVE_ROWS} 行 = 阈值行那点活字）；"
               f"抓帧 {w0}x{h0}，两个数都是各等满 8 秒之后的最后一次实测"
               f"（VerticalPercent 本机恒报 {pct2}，不进判据）")
@@ -2438,6 +2460,11 @@ def check_panel_real_scroll() -> None:
         # 输入队列的时序决定，那是环境的时序，不是产品的行为；钉一次投递等于把
         # 「这一次没中」记成产品缺陷（Task 6 刚因为一条依赖环境时序的判据被打回过一次）。
         # 判据①②本身一个字没改，改的只是「给它机会把滚轮滚出来」。
+        # 等的那条线必须就是判据那条线（100 行）：只等「有一行变了」的话，快照推进带来的
+        # 两三行会提前收手，三轮定向投递连同整条兜底通路都被跳过，判据①拿着两三行去比
+        # 100 行 —— 健康的产品照样红（Task 7 复核指出，这正是「把 flake 挪了个位置」）。
+        WHEEL_MIN = 100
+
         def wait_moved(limit: float = 5.0) -> tuple[int, int, bytes, list[int] | None]:
             t_s = time.time()
             cw = ch = 0
@@ -2447,7 +2474,7 @@ def check_panel_real_scroll() -> None:
                 time.sleep(0.7)
                 cw, ch, buf = capture_bar(hwnd, shot, scale=scale)
                 out = diff_of(buf, cw, ch)
-                if out:
+                if out and len(out) >= WHEEL_MIN:
                     break
             return cw, ch, buf, out
 
@@ -2456,14 +2483,14 @@ def check_panel_real_scroll() -> None:
         w2 = h2 = 0
         rgb2 = b""
         posted = rounds = 0
-        while rounds < 3 and not changed:
+        while rounds < 3 and (not changed or len(changed) < WHEEL_MIN):
             rounds += 1
             u.SetCursorPos(px, py)  # 重新瞄准：光标挪走了滚的就是别的容器，不是表体
             posted = post_wheel_to(hwnd, px, py, -120 * 3, 3)
             w2, h2, rgb2, changed = wait_moved()
         sent = posted
         way = f"定向 PostMessage → HWND {hwnd}（不经前台），投到第 {rounds} 轮（每轮各等 5 秒）"
-        if posted == 3 and changed is not None and not changed:
+        if posted == 3 and changed is not None and len(changed) < WHEEL_MIN:
             # 定向通路三帧都投出去了却一行都没动 —— 才轮到那条要前台的真滚轮。
             # 抢前台的结果**当场记下来**：本探测环境（agent 后台终端）前台锁归 IDE，
             # 裸 SetForegroundWindow 返回 0，ALT 抖动兜底也不保证抢得回（本机实测两者都返回 0）。
@@ -2491,7 +2518,7 @@ def check_panel_real_scroll() -> None:
                 way = (f"兜底 SendInput 真滚轮（第 {attempt + 1} 次抢前台，{how} 返回 {int(got)}，"
                        f"投出 {sent}/3）；定向通路 {rounds} 轮 ×3 格都没滚 → 两条通路都记在这里")
                 w2, h2, rgb2, changed = wait_moved()
-                if changed:
+                if changed and len(changed) >= WHEEL_MIN:
                     break
         same_size = check("真实窗口：滚动前后画面同尺寸可比",
                           sent == 3 and (w2, h2) == (w, h) and bool(rgb2),
@@ -3080,7 +3107,8 @@ def check_balance_key_handling() -> None:
     app_src = open(app, encoding="utf-8-sig", errors="replace").read()
     page_src = open(page, encoding="utf-8-sig", errors="replace").read()
 
-    # ① 独立弹窗通路已断干净：注释里提 KeyDialog 是历史说明，代码里再出现就是还有调用点。
+    # ① 独立弹窗通路已断干净：注释里提 KeyDialog 是历史说明，代码里再出现就是还有调用点
+    #    （所以同样只看 `//` 之前那一段，否则以后一句「这里顶掉了 KeyDialog」就自己钉红）。
     callers = []
     for root, dirs, files in os.walk(os.path.join(HERE, "bar")):
         dirs[:] = [d for d in dirs if d not in ("bin", "obj")]
@@ -3088,7 +3116,9 @@ def check_balance_key_handling() -> None:
             if not fn.endswith(".cs"):
                 continue
             p = os.path.join(root, fn)
-            if "KeyDialog." in open(p, encoding="utf-8-sig", errors="replace").read():
+            code = "\n".join(l.split("//")[0] for l in open(
+                p, encoding="utf-8-sig", errors="replace"))
+            if "KeyDialog." in code:
                 callers.append(os.path.relpath(p, HERE))
     check("bar/KeyDialog.cs 已删除且全目录没有 `KeyDialog.` 调用点（同一功能不留两处入口）",
           not os.path.isfile(os.path.join(HERE, "bar", "KeyDialog.cs")) and not callers,
@@ -3096,10 +3126,12 @@ def check_balance_key_handling() -> None:
 
     # ② Key 只能从 stdin 进引擎。argv 不是秘密存放处：本机任何进程都能读到子进程命令行。
     gi = app_src.find("static void RunEngineVerb(")
-    verb_body = app_src[gi:gi + 3000] if gi >= 0 else ""
+    ge = app_src.find("static void FinishEngineVerb", gi) if gi >= 0 else -1
+    verb_body = app_src[gi:ge] if gi >= 0 and ge > gi else ""
     arg_lines = [l.strip() for l in verb_body.splitlines() if "Arguments" in l]
     check("找到了 RunEngineVerb 的引擎调用站点", bool(verb_body) and bool(arg_lines),
-          "App.cs 里没有 static void RunEngineVerb(，或它没有 Arguments 赋值")
+          "App.cs 里没有 static void RunEngineVerb(（到 FinishEngineVerb 之间），"
+          "或它没有 Arguments 赋值")
     check("引擎命令行里不含 Key（Arguments 只拼 python、脚本路径和 verb）",
           bool(arg_lines) and all("key" not in l.lower() for l in arg_lines),
           ("这些行里出现了 key：" + " / ".join(arg_lines)
@@ -3108,19 +3140,43 @@ def check_balance_key_handling() -> None:
           "RedirectStandardInput = key != null" in verb_body
           and "proc.StandardInput.Write(key)" in verb_body,
           "没找到 RedirectStandardInput = key != null / StandardInput.Write(key)")
+    check("stdin 与 stdout 都显式 UTF-8（否则非 ASCII 的 Key 会被本机码页改形后存进 DPAPI）",
+          "StandardInputEncoding = new UTF8Encoding(false)" in verb_body
+          and "StandardOutputEncoding = new UTF8Encoding(false)" in verb_body,
+          "少了 StandardInputEncoding：写入侧默认按本机 ANSI 码页走")
+
+    # ②b 这一路必须跑在后台线程上。KeyDialog 时代同步等只冻一扇模态窗，
+    #     面板是常驻的：同步等会把状态栏、托盘和两个 DispatcherTimer 一起冻住。
+    check("引擎子命令跑在后台线程上，回程再 marshal 回 UI 线程",
+          "new System.Threading.Thread(" in verb_body
+          and "Dispatcher.BeginInvoke" in verb_body,
+          "RunEngineVerb 里没找到后台线程或 Dispatcher.BeginInvoke —— 点一下保存就冻住整个进程")
+    # ②c 「先读完再等退出」是死的：ReadToEnd 要等子进程关掉 stdout（也就是退出）才返回，
+    #     放在 WaitForExit(20000) 前面，那条超时和 Kill 永远轮不到 —— 挂死的子进程挂死宿主。
+    ra, we = verb_body.find("ReadToEndAsync"), verb_body.find("WaitForExit(")
+    check("输出用 ReadToEndAsync 发起，20 秒超时与 Kill 才真的成立（⑤）",
+          0 <= ra < we and "proc.Kill(true)" in verb_body,
+          f"ReadToEndAsync@{ra} WaitForExit@{we}：顺序反了就是同步阻塞读，超时那一支是死代码")
 
     # ③ 引擎那一路的输出**不保证**不含敏感串：HTTP 错误分支会把服务端返回体原样截 200
     #    字符贴进 error（dsh_state.py fetch_balance），所以落日志前必须过 RedactKey。
-    log_lines = [l.strip() for l in verb_body.splitlines()
-                 if "RedactKey(output, key)" in l]
-    check("写进 bar.log 的那一行先经过 RedactKey（不原样落引擎输出）",
-          len(log_lines) == 1 and log_lines[0].startswith("Log("),
-          f"RunEngineVerb 里带 RedactKey(output, key) 的行 {len(log_lines)} 条："
-          f"{' / '.join(log_lines) or '一条没有 —— 引擎输出正在原样进日志'}")
-    check("RedactKey 把本次经手的 Key 替成 ***（空 Key 分支不替换）",
-          "text.Replace(key, \"***\")" in app_src
-          and "static string RedactKey(string output, string key)" in app_src,
-          "RedactKey 的替换口径变了：改之前先想清楚 error 字段会带什么回来")
+    #    判据是「每一处提到 output 的 Log 都得过 RedactKey」，不是「有一处过了」——
+    #    后者在旁边再加一句 Log(output) 也照样绿。
+    raw = [l.strip() for l in verb_body.splitlines()
+           if re.search(r"^\s*Log\(.*\boutput\b", l) and "RedactKey" not in l]
+    check("引擎输出进 bar.log 的每一处都先过 RedactKey（不原样落盘）",
+          not raw, "这些 Log 行把未脱敏的输出写进了 bar.log：" + " / ".join(raw))
+    rk_i = app_src.find("static string RedactKey(")
+    rk = app_src[rk_i:rk_i + 600] if rk_i >= 0 else ""
+    FLAT = r'@"\s+"'
+    SUB = ".Replace(key,"
+    flat_at = rk.index(FLAT) if FLAT in rk else -1
+    sub_at = rk.index(SUB) if SUB in rk else -1
+    check("RedactKey 先压平换行再替换（服务端返回体里的 Key 可能被换行截断）",
+          bool(rk) and flat_at >= 0 and sub_at >= 0 and flat_at < sub_at
+          and 'text.Replace(key, "***")' in rk,
+          f"RedactKey 的替换口径变了（压平@{flat_at} 替换@{sub_at}）："
+          "顺序反了，跨行的 Key 就替不掉")
 
     # ④ 界面上只出「来源」，不出 Key 本体：PasswordBox 的值只被读去保存，从不写进任何文本。
     leak = [l.strip() for l in page_src.splitlines()
@@ -3136,21 +3192,41 @@ def check_balance_key_handling() -> None:
           ri >= 0 and "_key" not in page_src[ri:],
           "Refresh 里出现了 _key：" + " / ".join(
               l.strip() for l in page_src[ri:].splitlines() if "_key" in l)[:160])
-    check("保存与清除两支都当场清空输入框（_key.Clear() ≥2）",
+    check("保存与清除两支都在成功之后清空输入框（_key.Clear() ≥2）",
           page_src.count("_key.Password") >= 1 and page_src.count("_key.Clear()") >= 2,
           f"_key.Password {page_src.count('_key.Password')} 次、"
-          f"_key.Clear() {page_src.count('_key.Clear()')} 次（保存后要清、清除后也要清）")
+          f"_key.Clear() {page_src.count('_key.Clear()')} 次（保存成功要清、清除成功也要清）")
+    # 「失败也当场清空」是最伤用户的那一支：Key 是从平台控制台复制来的，一失败就清空
+    # 等于让人回去重新找一遍，而且界面看起来像保存成功了。所以钉成回调形状：
+    # 只有 ok 为真那一条分支里才许出现 Clear。
+    check("只有成功才清空输入框（两支都是 if (ok) { _key.Clear(); …}），且等引擎期间按钮禁用",
+          "App.SaveBalanceKey(k, (ok, why) =>" in page_src
+          and page_src.count("if (ok) { _key.Clear();") == 2
+          and "Busy(false);" in page_src and "Busy(true);" in page_src,
+          "没找到回调形式的 App.SaveBalanceKey(k, (ok, why) => …) / 两处 if (ok) { _key.Clear(); / "
+          "Busy(false)…Busy(true) —— 同步调用或无条件 Clear 都是把一次失败变成一次丢 Key")
+    # 失败必须留在**不会被自动清掉**的地方：余额那一行跟着快照走（默认 5 秒一帧），
+    # 把失败写进它是会自己消失的；而托盘气泡在用户关掉通知时根本不弹。
+    check("失败原因写在页面上、不会被下一帧冲掉（_op 只由回调写，Refresh 不碰）",
+          ri >= 0 and "_op" not in page_src[ri:] and "ShowOp(" in page_src[:ri]
+          and "Visibility.Collapsed" in page_src,
+          "没有独立的 _op 那一行，或 Refresh 会覆盖它 —— 失败信息就只剩一条会自己消失的文本")
     check("余额那一行显示的是来源（dpapi / env:… / file:… / none），不是 Key",
           "b.Source" in page_src and "来源" in page_src,
           "BalancePage.Refresh 里没有 b.Source —— 用户就看不出环境变量有没有盖住已存的 Key")
 
     # ⑤ 加解密只在引擎那一侧：C# 里出现 balance.protected 就意味着有人在自己写 Key 文件。
+    #    只看 `//` 之前的部分：这一路的注释本来就要解释「为什么 C# 不写那个文件」，
+    #    把说明也算成引用就成了自己钉自己的假红。
     hits = []
     for root, dirs, files in os.walk(os.path.join(HERE, "bar")):
         dirs[:] = [d for d in dirs if d not in ("bin", "obj")]
         for fn in files:
-            if fn.endswith(".cs") and "balance.protected" in open(
-                    os.path.join(root, fn), encoding="utf-8-sig", errors="replace").read():
+            if not fn.endswith(".cs"):
+                continue
+            code = "\n".join(l.split("//")[0] for l in open(
+                os.path.join(root, fn), encoding="utf-8-sig", errors="replace"))
+            if "balance.protected" in code:
                 hits.append(fn)
     check("C# 侧不碰 balance.protected（DPAPI 读写全在 dsh_state.py）", not hits,
           f"引用了该文件名的：{' '.join(hits)}")

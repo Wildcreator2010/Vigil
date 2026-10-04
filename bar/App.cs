@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -927,7 +927,7 @@ namespace DshBar
         /// <summary>
         /// 跑一次引擎的余额 Key 子命令（Task 7：从原来的 KeyDialog 搬上来，两处实现并一处）。
         ///
-        /// 三条不可商量的口径：
+        /// 五条不可商量的口径：
         /// ① Key 只走 stdin，绝不进命令行参数 —— argv 不是秘密存放处：本机任何进程都能用
         ///   Process.GetProcesses / WMI 读到子进程的命令行，面板又是常驻进程，泄漏面比一次性
         ///   弹窗大得多。引擎的 --save-balance-key 正是按这个契约写的（`sys.stdin.read()`）。
@@ -938,9 +938,19 @@ namespace DshBar
         ///   error 字段（dsh_state.py fetch_balance 的 HTTPError 分支），那一段不归我们控制。
         ///   所以落日志前无条件把本次经手的那串 Key 替成 ***（见 RedactKey）：
         ///   与其论证「它不会泄漏」，不如让「泄漏」在这条路径上写不出来。
-        /// 完成后写 refresh.token 让常驻引擎强制重查一次，页面下一帧就跟着变。
+        /// ④ 整段跑在后台线程上。--save-balance-key 存完会顺手查一次余额（引擎 HTTP 超时
+        ///   12 秒），而按钮的点击处理本来在 UI 线程上 —— 同步等会把状态栏、托盘和两个
+        ///   DispatcherTimer 一起冻住，没有忙音也没有禁用按钮，用户只看到整个产品停了。
+        ///   弹窗时代这一下只冻弹窗自己，面板是常驻的，代价不是一个量级。
+        /// ⑤ 先发起读、后等退出：ReadToEnd 要等子进程关掉 stdout（也就是退出）才返回，
+        ///   把它放在 WaitForExit(20000) 前面，那条 20 秒超时和 Kill 就永远轮不到 ——
+        ///   挂死的子进程会连着把宿主进程挂死。所以读用 ReadToEndAsync 发起，
+        ///   超时杀进程这一支才真的成立。
+        /// 成敗通过 done 回到 UI 线程；失败时不写 refresh.token，页面也保留输入框里的内容。
         /// </summary>
-        static void RunEngineVerb(string verb, string key)
+        static volatile bool _verbBusy;
+
+        static void RunEngineVerb(string verb, string key, Action<bool, string> done)
         {
             string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
             if (!File.Exists(engine))
@@ -949,63 +959,105 @@ namespace DshBar
             if (python == null || !File.Exists(engine))
             {
                 Balloon("状态检测引擎不可用", "请确认 dsh_state.py 与 python 3.14 就位", ToolTipIcon.Error);
+                done?.Invoke(false, "状态检测引擎不可用");
                 return;
             }
-            try
+            if (_verbBusy)
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = python,
-                    Arguments = $"-X utf8 \"{engine}\" {verb}",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardInput = key != null,
-                    RedirectStandardOutput = true,
-                    WorkingDirectory = Path.GetDirectoryName(engine),
-                    StandardOutputEncoding = new UTF8Encoding(false),
-                };
-                using var proc = System.Diagnostics.Process.Start(psi);
-                if (key != null)
-                {
-                    proc.StandardInput.Write(key);
-                    proc.StandardInput.Close();
-                }
-                string output = proc.StandardOutput.ReadToEnd();
-                // 20 秒等不到就杀掉：--save-balance-key 存完还会顺手查一次余额（引擎里 HTTP 超时 12 秒），
-                // 网络不通时这一路是能挂住的；面板按钮的点击是同步跑在 UI 线程上的，
-                // 卡死的子进程会把整个状态栏一起带走。
-                bool exited = proc.WaitForExit(20000);
-                if (!exited)
-                {
-                    try { proc.Kill(true); } catch { }
-                }
-                Log($"{verb} -> 退出码 {(exited ? proc.ExitCode.ToString() : "超时已终止")} {RedactKey(output, key)}");
-                RefreshBalance();
+                // 连点不能起第二个引擎子进程：两个 --save-balance-key 同时写 balance.protected
+                // 是「后写的盖掉前一个」，用户看到的是保存成功、下次启动读到的却是另一份。
+                Log($"{verb} 已经在跑，忽略这一次");
+                done?.Invoke(false, "上一次操作还在跑");
+                return;
             }
-            catch (Exception ex)
+            _verbBusy = true;
+            var worker = new System.Threading.Thread(() =>
             {
-                // ex.Message 里不会有 Key：这条路径上 Key 只出现在 stdin 流里，
-                // 参数、路径、异常文本都不含它。Balloon 走的也是 Log（见 App.Balloon），
-                // 所以这一句同样安全。
-                Balloon("余额 Key 操作失败", ex.Message, ToolTipIcon.Error);
-            }
+                bool ok = false;
+                string fail = "";
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = python,
+                        Arguments = $"-X utf8 \"{engine}\" {verb}",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardInput = key != null,
+                        RedirectStandardOutput = true,
+                        WorkingDirectory = Path.GetDirectoryName(engine),
+                        // 两侧都要显式 UTF-8：不写 StandardInputEncoding 时写入侧按本机
+                        // ANSI 码页走，非 ASCII 的 Key 会被改形成再存进 DPAPI —— 而 Key 是
+                        // 用户从控制台复制粘贴的，恰恰最可能带非 ASCII。
+                        StandardOutputEncoding = new UTF8Encoding(false),
+                        StandardInputEncoding = new UTF8Encoding(false),
+                    };
+                    using var proc = System.Diagnostics.Process.Start(psi);
+                    var reading = proc.StandardOutput.ReadToEndAsync();
+                    if (key != null)
+                    {
+                        proc.StandardInput.Write(key);
+                        proc.StandardInput.Close();
+                    }
+                    bool exited = proc.WaitForExit(20000);
+                    string output = "";
+                    if (exited)
+                    {
+                        output = reading.Result;
+                        ok = proc.ExitCode == 0;
+                        if (!ok) fail = $"引擎退出码 {proc.ExitCode}";
+                    }
+                    else
+                    {
+                        try { proc.Kill(true); } catch { }
+                        fail = "引擎 20 秒没退出，已终止";
+                    }
+                    Log($"{verb} -> 退出码 {(exited ? proc.ExitCode.ToString() : "超时已终止")} {RedactKey(output, key)}");
+                }
+                catch (Exception ex)
+                {
+                    // ex.Message 里不会有 Key：这条路径上 Key 只出现在 stdin 流里，
+                    // 参数、路径、异常文本都不含它。
+                    fail = ex.Message;
+                    Log($"{verb} 异常: {ex.Message}");
+                }
+                _verbBusy = false;
+                bool result = ok;
+                // fail 只有我们自己写得出来的那三种：退出码、超时、异常文本。
+                // 引擎的 stdout **不进这里** —— 那一段可能带服务端返回体，只允许经
+                // RedactKey 之后落 bar.log（见 ③）。这一串是要显示到界面上的。
+                string msg = string.IsNullOrEmpty(fail) ? "余额 Key 操作失败" : fail;
+                if (_window != null)
+                    _window.Dispatcher.BeginInvoke(new Action(() => FinishEngineVerb(result, msg, done)));
+                else done?.Invoke(result, result ? "" : msg);
+            })
+            { IsBackground = true };
+            worker.Start();
+        }
+
+        /// <summary>引擎子命令的回程，跑在 UI 线程上：成功才请求刷新余额，失败要让人看见。</summary>
+        static void FinishEngineVerb(bool ok, string fail, Action<bool, string> done)
+        {
+            if (ok) RefreshBalance();
+            else Balloon("余额 Key 操作失败", fail, ToolTipIcon.Error);
+            done?.Invoke(ok, ok ? "" : fail);
         }
 
         /// <summary>
-        /// 引擎输出 → 可落日志的一行：限长、压平换行，并把**本次提交的那串 Key**就地打成 ***。
+        /// 引擎输出 → 可落日志的一行：压平换行、把**本次提交的那串 Key**就地打成 ***、限长。
+        /// 压平必须在替换**之前**：服务端返回体里的 Key 可能被换行截断，压平之后那一串才连得起来。
         /// 空 key（清除分支）没东西可替，直接走原文。
         /// </summary>
         static string RedactKey(string output, string key)
         {
-            string text = (output ?? "").Trim();
+            string text = System.Text.RegularExpressions.Regex.Replace((output ?? "").Trim(), @"\s+", " ");
             if (!string.IsNullOrEmpty(key))
                 text = text.Replace(key, "***");
-            text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
             return text.Length > 200 ? text.Substring(0, 200) + "…" : text;
         }
 
-        internal static void SaveBalanceKey(string key) => RunEngineVerb("--save-balance-key", key);
-        internal static void ClearBalanceKey() => RunEngineVerb("--clear-balance-key", null);
+        internal static void SaveBalanceKey(string key, Action<bool, string> done) => RunEngineVerb("--save-balance-key", key, done);
+        internal static void ClearBalanceKey(Action<bool, string> done) => RunEngineVerb("--clear-balance-key", null, done);
 
         private static void RestartClient()
         {
