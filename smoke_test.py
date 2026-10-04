@@ -3651,6 +3651,40 @@ def _hue(r: int, g: int, b: int) -> float:
 PURPLE_LO, PURPLE_HI = 245.0, 300.0
 
 
+def check_shot_pipeline() -> None:
+    """最便宜的一条端到端：离屏出图必须真的能出。
+
+    为什么单独放在不碰前台的那一轮里：`--panel-shot` 是整条 WPF 管线
+    （STA 线程、资源字典、程序集里的图片资源、RenderTargetBitmap）最短的一次全程走通，
+    而它过去只在 `--gui` 段里被覆盖 —— 于是改名那次 `[STAThread]` 被插到别的方法头上、
+    `Main` 变成 MTA、`--panel-shot` 直接抛 InvalidOperationException，
+    不碰前台的 96 条照样全绿。那条红要等到有人去跑十几分钟的 GUI 才看得见。
+    这一条两三秒，所以默认那一轮就该带上。
+    """
+    print("\n== 离屏出图管线（不弹窗、不抢前台） ==")
+    if not os.path.isfile(BAR_EXE):
+        check("编译产物存在", False, BAR_EXE)
+        return
+    p = run_shot("overview", "-")
+    if p is None:
+        check("--panel-shot overview 能出图", False, "120 秒没返回")
+        return
+    head = (p.stdout or "").strip().splitlines()
+    ok = p.returncode == 0 and head and head[0].startswith("SHOT overview ")
+    check("--panel-shot overview 退出码 0 且回了一行 SHOT（WPF/STA/资源管线全程走通）",
+          ok, f"退出码 {p.returncode} 输出 {(head[0] if head else '')[:80]!r} "
+              f"err={(p.stderr or '')[-160:]!r}")
+
+    app = os.path.join(HERE, "bar", "App.cs")
+    if os.path.isfile(app):
+        lines = open(app, encoding="utf-8-sig", errors="replace").read().splitlines()
+        mi = next((i for i, l in enumerate(lines) if "static int Main(" in l), -1)
+        check("[STAThread] 紧贴 Main（被别的方法截走的话 Main 就变成 MTA，WPF 当场起不来）",
+              mi > 0 and "[STAThread]" in lines[mi - 1],
+              f"Main 在第 {mi + 1} 行，它上一行是 {lines[mi - 1].strip()[:40]!r}"
+              if mi > 0 else "没找到 Main")
+
+
 def check_brand_palette() -> None:
     """品牌视觉的两条底线：不许有紫色、材质必须真是三档可切。
 
@@ -4329,6 +4363,7 @@ def main() -> int:
     # 见 check_panel_request_guard 的注释）。
     check_panel_request_guard()
     check_balance_key_handling()
+    check_shot_pipeline()
     check_brand_palette()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:

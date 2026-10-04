@@ -71,7 +71,6 @@ namespace Vigil
         private static bool _reqGivenUp;        // 该身份已放弃：不再开窗，只安静等文件可删时清掉
         private static bool _reqQueued;         // 已排进 dispatcher、还没执行完（防重入）
 
-        [STAThread]
         /// <summary>
         /// 改名带来的一次性搬迁：老数据目录里的文件搬进新目录，老注册表自启项挪到新值名。
         ///
@@ -139,6 +138,7 @@ namespace Vigil
             catch (Exception ex) { Log($"开机自启迁移失败: {ex.Message}"); }
         }
 
+        [STAThread]
         private static int Main(string[] args)
         {
             Native.SetProcessDpiAwarenessContext((IntPtr)(-4));
