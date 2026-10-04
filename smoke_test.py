@@ -587,47 +587,70 @@ def read_png_rgba(path: str) -> tuple[int, int, bytes] | None:
 
 
 def shot_table_stats(path: str) -> dict | None:
-    """从离屏 PNG 数出表格的结构证据：绘制区、不透明像素、非白像素、成排的行分隔线、
-    靠右条带里最长的竖色连续段（滚动条滑块）。
+    """从离屏 PNG 数出表格的结构证据：绘制区、真画在纸上的像素、非纸色像素、
+    成排的行分隔线、靠右条带里最长的竖色连续段（滚动条滑块）。
 
-    「不透明」= alpha==255。占位页（PageBase 那一行文字）在 RenderTargetBitmap 上
-    是**整页透明**（本机实测 opaque=0/558000），只有文字那几个像素带 alpha；
-    表格会把 Background 铺满自己的区域，所以 opaque 是「画没画出一整块表」的分水岭，
-    比色数可靠。行分隔线按「同一行里被同一种非白不透明色占据 ≥600 像素」认定，
-    600 ≈ 六列列宽之和（150+110+60+80+130+80=610），比 600 窄就不像表头的列骨架。
+    【Task 8 的口径变更：纸色不再钉死 #FFFFFF，改成按当前主题现量】
+    概览页的表底原先是 `Background = Brushes.White`（Task 5 Step 0 #1 的明文豁免），
+    本任务换成 `Ui.CardKey` 主题键 —— 实测离屏那张的纸色变成 `#FEFEFEB3`
+    （CardBackgroundFillColorDefaultBrush 在浅底下就是半透明 #FEFEFE，alpha 0xB3=179），
+    旧的「alpha==255 且逐字节 #FFFFFF」两判据一起失去落点：painted 从 434344 掉到 200、
+    hlines 从 17 掉到 0、vscroll 从 263 掉到 0，四条门禁集体变成「永远红」。
+    所以这一版：
+      · `COVER_A = 128` —— 「这一笔真的画在纸上」的 alpha 门槛。实测半透明纸色是 179，
+        纸上的墨迹/分隔线是 188~247，而透明底上残留的抗锯齿边是 6~15，128 落在两簇中间；
+        深色主题下纸色同样在 179 一带（WPF-UI 的深浅两张卡片键都是 B3 alpha）。
+      · 纸色 = 所有 covered 像素的**众数**，不写死。占位页整页透明 → 一簇都没有 →
+        各量直接给 0（旧的「占位页 painted=0」形状在新口径下同向成立：实测占位页
+        只有 alpha 228 的几行文字，covered 占比 0.4%，远够不到 35% 那条地板）。
+      · 「非白」→「非纸色」：行分隔线、滚动条滑块、墨迹都按与纸色不同来认定。
+    行分隔线仍按「同一行里被同一种非纸色 covered 色占据 ≥600 像素」认定，
+    600 的原意是「至少像六列的列骨架」，列数从 6 涨到 8 后它仍然是**最松**的那一档
+    （表宽实测 722px，一格都不到 600 的横段不构成一条线）。
     """
     got = read_png_rgba(path)
     if got is None:
         return None
     w, h, buf = got
     stride = w * 4
-    white = b"\xff\xff\xff\xff"
-    painted = ink = hlines = 0
+    cover = 0
+    ink = hlines = 0
     x0, x1, y0, y1 = w, -1, h, -1
+    colors: collections.Counter = collections.Counter()
+    # 第一遍：数出 covered 像素里的众色 = 当前主题的纸色。
+    for i in range(0, len(buf), 4):
+        if buf[i + 3] >= COVER_A:
+            colors[bytes(buf[i:i + 4])] += 1
+    paper = colors.most_common(1)[0][0] if colors else b"\x00\x00\x00\x00"
+    paper_n = colors[paper] if colors else 0
+    # 第二遍：逐行统计（covered 数、纸色数、跨度、成排的线）。
     p = 0
+    paper_per_row, row_covered = [], []
     for y in range(h):
         row = buf[p:p + stride]
         p += stride
-        cnt = collections.Counter()
+        cnt: collections.Counter = collections.Counter()
         first = last = -1
         for x in range(w):
             c = row[x * 4:x * 4 + 4]
             cnt[c] += 1
-            if c[3] == 255:
+            if c[3] >= COVER_A:
                 if first < 0:
                     first = x
                 last = x
-        op = sum(n for c, n in cnt.items() if c[3] == 255)
+        op = sum(n for c, n in cnt.items() if c[3] >= COVER_A)
+        paper_per_row.append(cnt.get(paper, 0))
+        row_covered.append(op > 0)
         if op:
-            painted += op
-            ink += op - cnt.get(white, 0)
+            cover += op
+            ink += op - cnt.get(paper, 0)
             x0, x1 = min(x0, first), max(x1, last)
             y0, y1 = min(y0, y), max(y1, y)
-        wide = [(c, n) for c, n in cnt.items() if n >= 600 and c != white and c[3] == 255]
+        wide = [(c, n) for c, n in cnt.items() if n >= 600 and c != paper and c[3] >= COVER_A]
         if wide:
             hlines += 1
     # 滚动证据：靠右 24px 条带（x ∈ [w-24, w-3)，绕开最右那 1px 描边）里
-    # 「同一个不透明非白色竖着连续」的最长像素数。滚动条滑块是一根几像素宽、
+    # 「同一个 covered 非纸色竖着连续」的最长像素数。滚动条滑块是一根几像素宽、
     # 几百像素高的竖条；行分隔线只有孤立的 1~2 行高，两者在这一项上差两个数量级。
     # 视口无限高（外层套 StackPanel）时表格根本不需要滚动条，这项实测 1~2。
     vscroll = 0
@@ -636,15 +659,66 @@ def shot_table_stats(path: str) -> dict | None:
         for y in range(h):
             i = (y * w + x) * 4
             c = buf[i:i + 4]
-            solid = c[3] == 255 and c != white
+            solid = c[3] >= COVER_A and c != paper
             run = run + 1 if (solid and c == prev) else (1 if solid else 0)
             prev = c if solid else None
             vscroll = max(vscroll, run)
+    # 逐字节 #FFFFFF 的不透明像素数：Task 5 那张白底豁免的**直接**残留度量。
+    # 豁免期内（写死 Brushes.White）实测 399904；换成 Ui.CardKey 后实测 0。
+    pure_white = colors.get(b"\xff\xff\xff\xff", 0)
+    # 纸色带（band）：连续含纸色的行段，容得下短线 —— 96 DPI 离屏下一根行分隔线只占
+    # 1~2 行，而卡片之间那 18 DIP 空隙实测 26~44 行，8 行这条容差落在中间（两侧实测）。
+    # 概览页填实后画面里有三条带：状态卡、会话表、等你处理卡（实测 (41,112)/(139,521)/
+    # (566,580)），**表格带 = 最长的那条**。它是「表格有没有溢出自己那一行」的落点：
+    # 溢出时表格会一路画到画布下沿、把下面那条空隙带和「等你处理」卡一起盖掉。
+    paper_row = [n * 5 >= w * 2 for n in paper_per_row]
+    bands, yy = [], 0
+    while yy < h:
+        if paper_row[yy]:
+            s0 = e0 = yy
+            yy += 1
+            while yy < h:
+                if paper_row[yy]:
+                    e0 = yy
+                    yy += 1
+                    continue
+                k = yy
+                while k < h and not paper_row[k]:
+                    k += 1
+                if k - yy > BAND_GAP or k >= h:
+                    break
+                yy = k
+            bands.append((s0, e0))
+        else:
+            yy += 1
+    # 表格带 = 最长那条纸色带；`below_table` = 它下沿以下还有多少行落了笔。
+    # 填实后的概览页下面是「等你处理」那张卡，它的上沿离表格下沿隔着 18 DIP 空隙，
+    # 所以**表格溢出自己那一行**（外层容器给它无限高）时，那条空隙带会被表格画满、
+    # 卡片被顶到底边距外 —— 实测正确形状 below_table=15（就是那张卡），溢出形状 30+。
+    table_band = max(bands, key=lambda bl: bl[1] - bl[0]) if bands else (-1, -1)
+    below_table = sum(1 for y in range(table_band[1] + 1, h) if row_covered[y])
     return {
-        "w": w, "h": h, "total": w * h, "painted": painted, "ink": ink,
+        "w": w, "h": h, "total": w * h, "cover": cover, "ink": ink,
+        "paper": paper, "paper_n": paper_n, "pure_white": pure_white,
         "x0": x0, "x1": x1, "y0": y0, "y1": y1, "hlines": hlines,
-        "vscroll": vscroll,
+        "vscroll": vscroll, "bands": bands,
+        "table_band": table_band,
+        "table_h": (table_band[1] - table_band[0] + 1) if bands else 0,
+        "below_table": below_table,
     }
+
+
+BAND_GAP = 8
+"""`shot_table_stats` 拼纸色带时允许跨过的非纸色行数（离屏 96 DPI）。
+实测两侧：行分隔线 1~2 行、卡片之间那段空隙 26~44 行（实测三张带的空隙）。"""
+
+
+
+COVER_A = 128
+"""「这一笔真的画在纸上」的 alpha 门槛（`shot_table_stats` 的口径）。
+实测两侧：主题卡片键的纸色是 0xB3=179，纸上的分隔线/墨迹是 188~247；
+透明底上残留的抗锯齿边只有 6~15。128 落在两簇中间，深浅主题同一把尺。"""
+
 
 
 def capture_bar(hwnd: int, out_path: str, scale: float = 1.0) -> tuple[int, int, bytes]:
@@ -1027,13 +1101,13 @@ def shot_with_fake_engine(source: str, out_path: str,
 def row_data_gate(st: dict, base: dict) -> bool:
     """「表里真的有数据行」：与空表那张做**差**，不钉绝对值。
 
-    注入实测（同一台机器、同一次运行、固定 96 DPI 离屏）：1 行 → 横线 +1 / 非白 +1576，
-    3 行 → +3 / +4594，29 行 → +15 / +25002。判据按最松的 1 行情形再留一半余量：
-    横线至少多 1 条、非白至少多 600 像素。
+    注入实测（同一台机器、同一次运行、固定 96 DPI 离屏，Task 8 换主题刷后的**新纸色口径**）：
+    空表基线 横线 1 / 非纸色 5883，1 行 → +1 / +3536，3 行 → +3 / +6267，29 行 → +9 / +14832。
+    判据仍是最松的 1 行情形：横线至少多 1 条、非纸色至少多 600 像素（600 对 3536 留 5.9 倍）。
     旧版钉的是 hlines >= 6 / ink >= 5000：前者在本机实测等价于「至少 4 个会话」
     （hlines ≈ 2 + min(可见行数, 15)），只在零会话时才跳过，1~3 个会话的机器必假红；
-    后者真正的邻居是**负样本**基线（空表实测 3966，只差 25%），不是正样本 36432。
-    做差之后会话数、DPI、列宽三个变量一次性抵消。
+    后者真正的邻居是**负样本**基线，不是正样本。做差之后会话数、DPI、列宽三个变量
+    一次性抵消 —— 这条口径在换刷前后都成立，因为两边量的是同一个「与纸色不同的像素」。
     """
     return st["hlines"] - base["hlines"] >= 1 and st["ink"] - base["ink"] >= 600
 
@@ -1092,20 +1166,32 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
         check("概览页离屏 PNG 可读（表格门禁的前提）", False,
               f"{ov_shot} 读不出像素，色数门禁会一起变成无从判定")
     else:
-        pct = st["painted"] / st["total"]
+        pct = st["cover"] / st["total"]
         span = st["x1"] - st["x0"] + 1
         colors = shots.get("overview", 0)
-        print(f"  概览页离屏实测：颜色 {colors} 种，不透明 {st['painted']}/{st['total']}（{pct:.1%}），"
-              f"非白 {st['ink']} 像素，绘制区 x {st['x0']}..{st['x1']} y {st['y0']}..{st['y1']}，"
-              f"≥600px 横线 {st['hlines']} 条")
-        # 占位页在这三条上的实测值：7 色 / 0.0% 不透明（整页透明）/ 横向跨度不成立。
-        # 空表（Sessions 为 null 时）实测 41.9% 不透明、横向铺满页宽，所以这条不依赖数据量，
+        print(f"  概览页离屏实测：颜色 {colors} 种，落笔 {st['cover']}/{st['total']}（{pct:.1%}），"
+              f"纸色 #{'%02X%02X%02X%02X' % tuple(st['paper'])} 占 {st['paper_n']}，"
+              f"非纸色 {st['ink']} 像素，逐字节 #FFFFFFFF {st['pure_white']} 个，"
+              f"绘制区 x {st['x0']}..{st['x1']} y {st['y0']}..{st['y1']}，"
+              f"≥600px 横线 {st['hlines']} 条、右侧最长竖段 {st['vscroll']}px")
+        # 占位页在这三条上的实测值（新口径）：7 色 / 0.0% 落笔（整页透明）/ 横向跨度不成立。
+        # 空表（Sessions 为 null 时）实测 78.5% 落笔、横向铺满页宽，所以这条不依赖数据量，
         # 见 check_panel_empty_sessions()。
         check("概览页已画出表格（不再是一行占位文字）",
               pct >= 0.35 and span >= st["w"] - 2 and colors > 20,
-              f"colors={colors} painted={pct:.1%} x 跨度={span}/{st['w']}"
-              f"（占位页实测 7 色、0.0% 不透明）")
-        # 行分隔线成排 = 真的有数据行渲染出来，而不只是一块白底 + 表头。
+              f"colors={colors} cover={pct:.1%} x 跨度={span}/{st['w']}"
+              f"（占位页实测 7 色、0.0% 落笔）")
+        # 【Task 5 白底豁免的收口门禁】表底从写死 `Brushes.White` 换成 `Ui.CardKey` 之后，
+        # 离屏图里逐字节 #FFFFFFFF 的不透明像素从实测 **399904**（占整张图 92%）掉到实测 **0**。
+        # 判据方向是安全的：主题卡片键在浅底合成 #FEFEFE、深底更暗，两种主题下都不会给出
+        # 成片逐字节纯白；只有「有人把 Brush 写死回白」才可能把它顶上去，所以阈值给 2000
+        # （实测 0 的一侧 / 写死白 399904 的一侧），钉的是「豁免没有复发」，不是「必须是某个色值」。
+        check("概览页表底已交回主题键（Task 5 白底豁免收口，逐字节 #FFFFFFFF 归零）",
+              st["pure_white"] <= 2000,
+              f"逐字节 #FFFFFFFF 不透明像素 {st['pure_white']} 个（阈值 2000）；"
+              f"豁免期内同一张图实测 399904 个（占画布 92%），"
+              f"当前实测纸色是 #{'%02X%02X%02X%02X' % tuple(st['paper'])}（主题卡片键）")
+        # 行分隔线成排 = 真的有数据行渲染出来，而不只是一块纸底 + 表头。
         # 与 check_cli() 用同一个跳过口径：没有会话文件就没有样本行，这条不该假红。
         # 阈值是**相对空表那张**的量（见 row_data_gate），不再钉 hlines>=6 / ink>=5000：
         # 那两个数把门禁和本机的会话数焊死在一起，1~3 个会话的机器必然假红。
@@ -1116,11 +1202,18 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
             check("空表基线可用（数据行门禁的前提）", False,
                   "上一轮假引擎注入没出图，相对阈值无从计算")
         else:
-            check("概览页表格有数据行：行分隔线与非白像素都高出空表基线",
+            check("概览页表格有数据行：行分隔线与纸色外像素都高出空表基线",
                   row_data_gate(st, empty_base),
                   f"本机 {len(session_files)} 个会话：横线 {empty_base['hlines']}→{st['hlines']}、"
-                  f"非白 {empty_base['ink']}→{st['ink']}"
-                  f"（判据：至少多 1 条横线、至少多 600 非白像素）")
+                  f"非纸色 {empty_base['ink']}→{st['ink']}"
+                  f"（判据：至少多 1 条横线、至少多 600 像素）")
+        # 简报 Step 4 那条：**如实记它的强度** —— 概览页在 Task 4 的表格骨架时代就是 70 色、
+        # 关于页 7 色，所以这条在 Task 8 动手之前就已经是绿的。它守的是「概览页不许退回
+        # 占位那一行字」，不守「Task 8 的三块内容都填上了」；后半边由同段那几条
+        # （状态标签/配色映射、待处理整串赋值、快照跟着变的两张图）钉住，见 check_overview_page。
+        check("概览页比关于页更丰富（会话表已填上真实数据）",
+              shots.get("overview", 0) > shots.get("about", 0),
+              f"overview={shots.get('overview')} about={shots.get('about')}")
 
     # 非法页名必须非零退出。旧实现把未知 key 静默当 overview：`--panel-shot nonsense`
     # 照样回 `SHOT nonsense 724 600 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
@@ -1158,16 +1251,17 @@ def check_panel_empty_sessions(empty: tuple[int, str, dict | None]) -> None:
         return
     rc, head, st = empty
     # 断言的不是色数，是「没崩 + 表壳还在 + 没有数据行」：
-    # hlines 在真实 29 行数据下实测 17，这里必须掉下来，否则说明假引擎根本没生效。
+    # hlines 在 29 行注入下实测 10（Task 8 换主题刷后的新纸色口径；换刷前是 17），
+    # 空表实测 1 —— 这里必须掉下来，否则说明假引擎根本没生效。
     colors = shot_dims(head)[2]
     check("空表注入：ok:false 异常帧（无 sessions 键） 仍出图且退 0",
           rc == 0 and colors > 20 and st is not None,
           f"退出码 {rc} 输出 {head!r}")
     if st:
         check("空表注入：ok:false 异常帧（无 sessions 键） 表壳仍在但没有数据行",
-              st["painted"] / st["total"] >= 0.35 and st["hlines"] < 6,
-              f"不透明 {st['painted']}/{st['total']} 横线 {st['hlines']} 条"
-              f"（真实 29 行数据实测 17 条，没掉下来就是注入没生效）")
+              st["cover"] / st["total"] >= 0.35 and st["hlines"] < 6,
+              f"落笔 {st['cover']}/{st['total']}（纸色 #{'%02X%02X%02X%02X' % tuple(st['paper'])}）"
+              f"横线 {st['hlines']} 条（阈值 6：空表实测 1、29 行注入实测 10）")
     # 假引擎 ②：什么都不输出 → LoadOneShotSnapshot 直接 return → _last 仍是 null
     rc2, head2, st2 = shot_with_fake_engine('import sys\nsys.stdout.write("")\n',
                                             os.path.join(ds.state_dir(), "panel-overview-null.png"),
@@ -1177,9 +1271,9 @@ def check_panel_empty_sessions(empty: tuple[int, str, dict | None]) -> None:
           rc2 == 0 and colors2 > 20 and st2 is not None, f"退出码 {rc2} 输出 {head2!r}")
     if st2:
         check("空表注入：空 stdout（快照整个是 null） 表壳仍在但没有数据行",
-              st2["painted"] / st2["total"] >= 0.35 and st2["hlines"] < 6,
-              f"不透明 {st2['painted']}/{st2['total']} 横线 {st2['hlines']} 条"
-              f"（真实 29 行数据实测 17 条，没掉下来就是注入没生效）")
+              st2["cover"] / st2["total"] >= 0.35 and st2["hlines"] < 6,
+              f"落笔 {st2['cover']}/{st2['total']} 横线 {st2['hlines']} 条"
+              f"（阈值 6：空表实测 1、29 行注入实测 10，Refresh(null) 与无 sessions 键同一条路）")
 
 
 def check_panel_row_data(empty_base: dict | None) -> None:
@@ -1187,12 +1281,15 @@ def check_panel_row_data(empty_base: dict | None) -> None:
 
     ① 「有数据行」必须是相对空表那张的量：1 / 3 / 29 行都得比基线高出一截。
        旧版钉 hlines>=6 / ink>=5000 的绝对值，等价于要求本机至少 4 个会话；
-    ② 滚动视口必须**高度受限**：--panel-shot 给页面的是 724×600 的有限约束，
-       行数从 3 涨到 29 时绘制区高度必须还钉在视口下沿。
+    ② 滚动视口必须**高度受限**：--panel-shot 给页面的是 724×600 的有限约束。
        Content 外面套一层竖向 StackPanel 会把这层约束丢掉（StackPanel 给子元素无限高度），
        DataGrid 于是按内容长到 ~1150px 再被 600 裁掉：画面看起来是满的、门禁完全隐形，
        但表格自己的 ScrollViewer 拿不到有限高度 → 永不滚动，第 16~60 行
        （SESSIONS_IN_SNAPSHOT 上限 60）在真实面板里只能靠整页滚动、表头也一起滚出视野。
+       Task 8 填实后这一条的落点跟着换：概览页成了「状态卡 + 表格 + 待处理卡」三段，
+       绘制区不再顶到画布下沿，于是改量**表格带**（最长那条纸色带）——
+       等高、不短于 _grid.MinHeight、且不溢出到下面那条空隙带里（溢出的形状实测把
+       「等你处理」卡盖掉：带下落笔行数从 15 涨到 78）。反证见 task-8-report.md 的变异表。
     """
     print("\n== 概览页表格：数据行与滚动视口 ==")
     if not os.path.isfile(BAR_EXE):
@@ -1212,11 +1309,12 @@ def check_panel_row_data(empty_base: dict | None) -> None:
         check(f"概览页 {n} 行注入出图", st is not None and shot_dims(got[n][1])[2] > 20,
               f"退出码 {got[n][0]} 输出 {got[n][1]!r}")
         if st:
-            print(f"  {n:2d} 行：不透明 {st['painted']}/{st['total']}"
-                  f"（{st['painted'] / st['total']:.1%}）非白 {st['ink']}，"
-                  f"绘制区 y {st['y0']}..{st['y1']}（高 {st['y1'] - st['y0'] + 1}px），"
+            print(f"  {n:2d} 行：落笔 {st['cover']}/{st['total']}"
+                  f"（{st['cover'] / st['total']:.1%}）非纸色 {st['ink']}，"
+                  f"表格带 y {st['table_band'][0]}..{st['table_band'][1]}（高 {st['table_h']}px）、"
+                  f"带下仍落笔 {st['below_table']} 行，"
                   f"横线 {st['hlines']} 条、右侧最长竖段 {st['vscroll']}px"
-                  f" [空表基线 {empty_base['hlines']} 条 / {empty_base['ink']} 非白]")
+                  f" [空表基线 {empty_base['hlines']} 条 / {empty_base['ink']} 非纸色]")
     # ① 数据行门禁在三种数据量下都不许假红（1 个会话的机器 / 3 个 / 满屏）
     for n in (1, 3, 29):
         st = got[n][2]
@@ -1225,34 +1323,320 @@ def check_panel_row_data(empty_base: dict | None) -> None:
             continue
         check(f"概览页 {n} 行的数据行证据高出空表基线", row_data_gate(st, empty_base),
               f"横线 {empty_base['hlines']}→{st['hlines']}（+{st['hlines'] - empty_base['hlines']}）、"
-              f"非白 {empty_base['ink']}→{st['ink']}（+{st['ink'] - empty_base['ink']}），"
-              f"判据：至少多 1 条横线、至少多 600 非白像素")
+              f"非纸色 {empty_base['ink']}→{st['ink']}（+{st['ink'] - empty_base['ink']}），"
+              f"判据：至少多 1 条横线、至少多 600 像素")
     # 先证明确实多画了行，否则下面「两张一样高」会因为两张都是空表而假绿
     st3, st29 = got[3][2], got[29][2]
     check("注入确实画出了更多行（29 行的横线严格多于 3 行）",
           bool(st3 and st29) and st29["hlines"] > st3["hlines"],
           f"3 行 {st3 and st3['hlines']} 条 / 29 行 {st29 and st29['hlines']} 条")
-    # ② 视口高度受限：两张都必须铺满到视口下沿，且高度不随行数变
-    viewport = shot_dims(got[29][1])[1]
-    if st3 and st29 and viewport > 0:
-        h3 = st3["y1"] - st3["y0"] + 1
-        h29 = st29["y1"] - st29["y0"] + 1
-        check("概览页表格的滚动视口高度受限：行数从 3 到 29 不把画面撑长",
-              h3 >= viewport - 2 and h29 >= viewport - 2 and abs(h29 - h3) <= 2,
-              f"3 行绘制区高 {h3}px、29 行 {h29}px，视口 {viewport}px："
-              f"两张都该钉在视口下沿（多出的行走表格自己的 ScrollViewer）；"
-              f"3 行那张矮一截就是外层面板给了无限高度、表格按行数线性撑开再被裁掉")
+    # ② 视口高度受限。Task 8 填实后这一条不能再写成「绘制区钉在画布下沿」——
+    #    概览页现在是「状态卡 + 表格 + 待处理卡」三段，表格带本来就不挨着底边
+    #    （实测表格带 y 139..521，画布 600）。改成量**表格带本身**的两件事：
+    #      · 高度不随行数变（3 行与 29 行同高，多出的行走表格自己的 ScrollViewer）；
+    #      · 表格带不许溢出它那一行：溢出时它会一路画到画布下沿，把下面 18 DIP 的
+    #        空隙带和「等你处理」卡盖掉 —— 实测正确形状带下只剩 15 行落笔（那张卡），
+    #        溢出形状是 78 行。这条就是简报 Step 0 #1 要的「可用的滚动视口 + 高度受限」。
+    if st3 and st29:
+        h3, h29 = st3["table_h"], st29["table_h"]
+        check("概览页表格的滚动视口高度受限：行数从 3 到 29 不把表格带撑长，也不溢出它那一行",
+              h3 >= 280 and abs(h29 - h3) <= 2 and st29["table_band"][1] <= st29["h"] - 18
+              and st29["below_table"] >= 1 and st3["below_table"] >= 1,
+              f"表格带 3 行高 {h3}px、29 行 {h29}px（判据：等高 ±2，且都不许短于 280 = "
+              f"OverviewPage 里 _grid.MinHeight）；29 行那张的带下沿 y={st29['table_band'][1]}"
+              f"（画布 {st29['h']}，判据 ≤ {st29['h'] - 18}：顶到底边就是表格越出它那一行、"
+              f"把「等你处理」卡盖住了）；带下仍落笔 3 行 {st3['below_table']} 行 / "
+              f"29 行 {st29['below_table']} 行（判据 ≥1：实测正确形状 28 = 「等你处理」那一格"
+              f"和它的标题，0 就是那张卡被表格盖掉了）")
         # 装不下就得有滚动条：这是「多出的行落在滚动里」最直白的像素证据。
-        # 阈值 100 的两侧：修后 29 行实测滑块 302px；未修版（视口无限高，
-        # 表格压根不需要滚动条）与修后 3 行（内容装得下）都只有 1~2px 的描边。
+        # 阈值 40 的两侧都是量出来的（Task 8 填实后重量，表高被状态卡/待处理卡挤矮了，
+        # 滑块从旧口径的 302px 变成 90px）：29 行实测 90px，3 行（内容装得下）与
+        # 未修版（视口无限高、压根不需要滚动条）都只有 1px 的描边。
         check("概览页 29 行时表格右侧画出滚动条（装不下的行落在滚动里）",
-              st29["vscroll"] >= 100,
-              f"右侧 24px 条带里最长的同色竖段 {st29['vscroll']}px（滚动条滑块应有几百 px）；"
-              f"3 行那张 {st3['vscroll']}px 作对照 —— 竖段掉到个位数就是视口没被限住、"
-              f"行是被裁掉而不是被滚动")
+              st29["vscroll"] >= 40,
+              f"右侧 24px 条带里最长的同色竖段 {st29['vscroll']}px（阈值 40；"
+              f"填实后 29 行实测 90px）；3 行那张 {st3['vscroll']}px 作对照 —— "
+              f"竖段掉到个位数就是视口没被限住、行是被裁掉而不是被滚动")
     else:
-        check("概览页表格的滚动视口高度受限：行数从 3 到 29 不把画面撑长", False,
-              f"样本不全：3 行={st3 is not None} 29 行={st29 is not None} 视口={viewport}")
+        check("概览页表格的滚动视口高度受限：行数从 3 到 29 不把表格带撑长，也不溢出它那一行",
+              False, f"样本不全：3 行={st3 is not None} 29 行={st29 is not None}")
+
+
+def strip_cs_comments(text: str) -> str:
+    """剥掉 `//` 与 `///` 注释后的 C# 正文（只按行首/行中出现的 `//` 切一刀）。
+
+    概览页那几条源码门禁看的是**代码**：类注释里写着「不再写 Brushes.White」是给人读的，
+    不能因此把「不许再有写死白」这条判成违例。仓库现有源码门禁（check_panel_request_guard /
+    check_balance_key_handling）都是直接在原文上找串，本函数只在需要提纯的那几条上用。
+    本仓库的 C# 没有 `/* */` 块注释，也没有把 `//` 写进字符串字面量，够用。
+    """
+    out = []
+    for line in text.splitlines():
+        cut = line.find("//")
+        out.append(line if cut < 0 else line[:cut])
+    return "\n".join(out)
+
+
+CS_STATE_ROW = re.compile(
+    r'\{\s*"([a-z_]+)"\s*,\s*\("([^"]*)"\s*,\s*"(#[0-9A-Fa-f]{6})"\s*\)\s*,?\s*\}')
+
+
+def cs_state_map(text: str) -> dict[str, tuple[str, str]]:
+    """把 Ui.cs 里 StateMap 那批 `{ "code", ("标签", "#RRGGBB") }` 收成 dict。"""
+    return {c: (lab, hexv) for c, lab, hexv in CS_STATE_ROW.findall(text)}
+
+
+def fake_overview_engine_source(state: str = "needs_action", waiting: int = 2,
+                                watch: bool = False, age: float = 3.0) -> str:
+    """概览页的注入引擎：一帧**定死**的快照，状态码与待处理条数由参数给。
+
+    为什么不复用 fake_static_engine_source：那一份是 notify/runtime/balance 三段共用的基准帧，
+    改它会连带改掉它们两张图的指纹比对（那些「两张不同」的门禁全都以它为参照）。
+    这一份只给概览页用，字段形状照 dsh_state.py 的真实输出：
+      · `label/glyph/color` 一律从 `ds.STATES[state]` 取 —— 不自己编配色；
+      · `waiting` 的每条 text 带一个**独有标记**（冒烟待处理甲/乙），
+        待处理那一格有没有「每帧整串重算」就数这个标记出现几次（append 会一路叠）；
+      · watch=True 时每帧把 `session.age_sec` +1 —— 那是「下一帧真的进来了」唯一的外部凭据，
+        有它就不用钉死 sleep 秒数（Task 7 就是被两条钉死 sleep 的判据打回去的）。
+    """
+    label, glyph, hexv, _prio = ds.STATES[state]
+    marks = ["冒烟待处理甲", "冒烟待处理乙", "冒烟待处理丙"][:max(0, min(waiting, 3))]
+    waits = ", ".join('{"project": "甲项目", "state": "%s", "text": "%s"}' % (state, m)
+                      for m in marks)
+    body = (
+        'rows = [{"key": f"ov-{i}", "project": f"proj-{i}", "title": f"会话 {i}",\n'
+        '         "state": "idle", "turn": i, "step": i, "age_sec": 60.0 + i,\n'
+        '         "last_event": "result", "last_tool": f"tool{i}", "end_reason": "success",\n'
+        '         "records": i, "todo": {"total": 4, "done": i, "in_progress": 0, "pending": 0},\n'
+        '         "usage_total": {"input": 100, "output": 50, "total": 150 + i}, "pending": None}\n'
+        '        for i in range(3)]\n'
+        'def frame(i):\n'
+        f'    return json.dumps({{"ok": True, "app_running": True, "state": "{state}",\n'
+        f'        "label": "{label}", "glyph": "{glyph}", "color": "{hexv}",\n'
+        f'        "strip_left": "{label}", "strip_right": "¥12.34",\n'
+        '        "tooltip": "概览注入", "tip_lines": ["概览注入"],\n'
+        f'        "session": {{"project": "甲项目", "title": "t", "state": "{state}",\n'
+        f'            "turn": 1, "step": 1, "age_sec": {age} + i,\n'
+        '            "last_tool": "edit", "pending": None, "todo": None, "error": None},\n'
+        '        "balance": None, "waiting": [%s], "recent": [],\n'
+        '        "sessions_scanned": 3, "sessions": rows}, ensure_ascii=False)\n' % waits)
+    if not watch:
+        return ('import json, sys\n' + body +
+                'sys.stdout.write(frame(0) + "\\n")\n')
+    return ('import json, sys, time\n' + body +
+            'if "--watch" not in sys.argv:\n'
+            '    sys.stdout.write(frame(0) + "\\n")\n'
+            '    sys.exit(0)\n'
+            'try:\n'
+            '    for i in range(900):\n'
+            '        sys.stdout.write(frame(i) + "\\n")\n'
+            '        sys.stdout.flush()\n'
+            '        time.sleep(0.5)\n'
+            'except (BrokenPipeError, ValueError, OSError):\n'
+            '    pass\n')
+
+
+def check_overview_page() -> None:
+    """Task 8 概览页填实的门禁，分三面：源码 / 离屏两张定帧 / 真窗口多帧。
+
+    这一页的**产品**面（表格骨架、数据行、滚动视口、空表容忍）在 check_panel_shell、
+    check_panel_empty_sessions、check_panel_row_data 三段里已经钉住了；本段钉的是
+    Task 8 新加的那三块内容与 Step 0 #3 的白底豁免收口：
+
+      ① 状态码 → 中文标签/配色的前端映射必须逐项等于引擎的 `STATES`（源码面）——
+         两侧各写一份表，抄错一个字就是界面上「tool_running」或色带和状态条不一样；
+      ② 表底/描边不再有写死色，且真的挂在 `Ui.CardKey` / `Ui.LineKey` 上（源码面），
+         配套的像素面是 check_panel_shell 那条「逐字节 #FFFFFFFF 归零」；
+      ③ 待处理那一格每帧**整串重算**，不许 `Text +=`（源码面 + 真窗口多帧面）——
+         Refresh 每几秒一帧、永远在跑，append 会把历史帧的条目叠成复读机；
+      ④ 竖向约束链上不许出现无限高容器（源码面）—— 见 check_panel_row_data ② 的像素面；
+      ⑤ 状态卡与待处理卡跟着快照走（离屏两面不同）—— 不是构造时写死的一行字。
+    """
+    print("\n== 概览页填实（状态映射 / 白底豁免收口 / 待处理不累加） ==")
+    ui_path = os.path.join(HERE, "bar", "Panel", "Ui.cs")
+    ov_path = os.path.join(HERE, "bar", "Panel", "Pages", "OverviewPage.cs")
+    if not (os.path.isfile(ui_path) and os.path.isfile(ov_path)):
+        check("概览页源码可读（Ui.cs 与 OverviewPage.cs）", False, f"{ui_path} / {ov_path}")
+        return
+    ui_src = open(ui_path, encoding="utf-8-sig", errors="replace").read()
+    ov_src = open(ov_path, encoding="utf-8-sig", errors="replace").read()
+    ov_code = strip_cs_comments(ov_src)
+    ui_code = strip_cs_comments(ui_src)
+
+    # ---- ① 前端状态映射 == 引擎 STATES ----
+    front = cs_state_map(ui_code)
+    want = {k: (v[0], v[2]) for k, v in ds.STATES.items()}
+    check("前端状态映射的键集与行数覆盖引擎 STATES 全部状态码",
+          len(front) == len(want) and set(front) == set(want),
+          f"前端解析出 {len(front)} 条 / 引擎 {len(want)} 条；"
+          f"多出 {sorted(set(front) - set(want))}，缺失 {sorted(set(want) - set(front))}，"
+          f"解析式 CS_STATE_ROW 认的是 {{ \"code\", (\"标签\", \"#RRGGBB\") }}")
+    bad = sorted(k for k in want if k in front and front[k] != want[k])
+    check("前端状态映射的中文标签与配色逐项等于引擎 STATES",
+          not bad and len(front) == len(want),
+          "; ".join(f"{k}：前端 {front[k]} ≠ 引擎 {want[k]}" for k in bad[:4])
+          if bad else f"逐项比对 {len(want)} 个状态码（标签 + 十六进制色）")
+    check("LabelOf 对不认识的状态码兜「未知」而不是把英文码甩到界面上",
+          'StateMap.TryGetValue' in ui_code and ': "未知"' in ui_code,
+          "LabelOf 里没有 TryGetValue + 「未知」兜底那一支")
+
+    # ---- ② 白底豁免收口：概览页不再有任何写死的纸色/描边色 ----
+    hard = [pat for pat in ("Brushes.White", "Brushes.Black", "E2E5EA", "#FFFFFF",
+                            "FromRgb(0xFF, 0xFF, 0xFF)") if pat.lower() in ov_code.lower()]
+    check("概览页代码里不再有写死的白底/描边字面量（Task 5 Step 0 #1 的豁免已收口）",
+          not hard, f"代码正文里还剩 {hard}（注释已剥掉，见 strip_cs_comments）")
+    check("概览页表格底色挂 Ui.CardKey、描边挂 Ui.LineKey",
+          bool(re.search(r"Ui\.Ref\(\s*_grid\s*,\s*WpfControls\.DataGrid\.BackgroundProperty\s*,"
+                         r"\s*Ui\.CardKey\s*\)", ov_code))
+          and bool(re.search(r"Ui\.Ref\(\s*_grid\s*,\s*WpfControls\.DataGrid\.BorderBrushProperty\s*,"
+                             r"\s*Ui\.LineKey\s*\)", ov_code)),
+          "没找到 Ui.Ref(_grid, DataGrid.BackgroundProperty, Ui.CardKey) / BorderBrush + Ui.LineKey")
+
+    # ---- ③ 待处理那一格：整串赋值，不许 append ----
+    ri = ov_code.find("public void Refresh(Snapshot snap)")
+    refresh = ov_code[ri:ri + 1400] if ri >= 0 else ""
+    check("找到概览页的 Refresh 站点", bool(refresh), "OverviewPage.cs 里没有 public void Refresh(Snapshot snap)")
+    check("待处理那一格每帧整串赋值，不做 Text +=（Refresh 每几秒就跑一次）",
+          bool(refresh) and "_waiting.Text +=" not in refresh
+          and "_waiting.Text = WaitingText(" in refresh,
+          "Refresh 里出现了 _waiting.Text +=（会把历史帧的待处理条目一路叠下去），"
+          "或不是整串赋值")
+
+    # ---- ④ 竖向约束链：表格那一行必须是有限高的 * 行，且不被无限高容器包着 ----
+    ti = ov_code.find("WpfControls.Grid TableArea()")
+    area = ov_code[ti:ti + 1200] if ti >= 0 else ""
+    check("表格拿到的是有限高度：表体行是 * 行定义，且 _grid 直接落进那一行",
+          "GridUnitType.Star" in area and "Grid.SetRow(_grid, 1)" in area,
+          "TableArea 里没有 Star 行定义或没有把 _grid 放进那一行")
+    check("表格外层没有竖向 StackPanel（Ui.Group / Ui.Column 都会把有限高换成无限高）",
+          bool(area) and "Ui.Group(" not in area and "Ui.Column(" not in area
+          and "new WpfControls.StackPanel" not in area,
+          "TableArea 里出现了 Ui.Group/Ui.Column/StackPanel —— 竖向 StackPanel 给子元素"
+          "无限高度，正是 Task 4 轮 2 修掉的那个缺陷（像素门禁看不见它）")
+
+    # ---- ⑤⑥ 像素面与真窗口面（都要编译产物） ----
+    if not os.path.isfile(BAR_EXE):
+        print("  （跳过：没有编译产物，离屏与真窗口两面跑不了）")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 DshBar 在跑")
+        return
+    eng_bin = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not check("概览页注入点就位", os.path.isfile(eng_bin), eng_bin):
+        return
+    before = python_pids()
+
+    def shot_and_stats(tag: str) -> tuple[str, int, dict | None]:
+        """出一张概览页离屏图，返回 (整幅 md5, 色数, 表格结构量)；读完就删（磁盘紧）。"""
+        out = os.path.join(ds.state_dir(), f"t8-{tag}.png")
+        if os.path.isfile(out):
+            os.remove(out)
+        p = run_shot("overview", out)
+        if p is None:
+            check(f"概览页 {tag}：--panel-shot", False, "120 秒没返回（离屏渲染卡死）")
+            return "", -1, None
+        head = ((p.stdout or "").strip().splitlines() or [""])[0]
+        got = read_png_rgba(out)
+        st = shot_table_stats(out)
+        if os.path.isfile(out):
+            os.remove(out)
+        if got is None:
+            return "", -1, st
+        return hashlib.md5(got[2]).hexdigest(), shot_dims(head)[2], st
+
+    hwnd = 0
+    try:
+        # ⑤ 离屏：同一份 sessions，只换状态码与待处理条数 → 画面必须跟着变
+        real = engine_swap(fake_overview_engine_source("needs_action", 2))
+        if real is None:
+            check("引擎拷贝可注入", False, eng_bin)
+            return
+        try:
+            fp_act, c_act, st_act = shot_and_stats("ov-action")
+        finally:
+            engine_restore(real)
+        check("概览页离屏出图（注入 needs_action + 2 条待处理）",
+              bool(fp_act) and c_act > 20, f"色数 {c_act}，指纹 {fp_act[:8]}")
+        real = engine_swap(fake_overview_engine_source("idle", 0))
+        try:
+            fp_idle, c_idle, _idle_st = shot_and_stats("ov-idle")
+        finally:
+            engine_restore(real)
+        check("概览页的状态卡与待处理卡跟着快照走（needs_action×2 / idle×0 两张离屏图不同）",
+              bool(fp_act) and bool(fp_idle) and fp_act != fp_idle,
+              f"两张指纹 {'相同' if fp_act == fp_idle else '不同'}"
+              f"（{fp_act[:8]}/{fp_idle[:8]}）：相同就是那两块卡在构造时写死、没接 Refresh")
+        # 两张定帧（数据量相同）都不许塌回占位页那一档：落笔占比与横向跨度还在。
+        check("注入帧出的图仍然是「画出表格」的形状（落笔占比与跨度没塌）",
+              st_act is not None and st_act["cover"] / st_act["total"] >= 0.35
+              and st_act["x1"] - st_act["x0"] + 1 >= st_act["w"] - 2,
+              f"needs_action 那张：cover={st_act and st_act['cover']}/"
+              f"{st_act and st_act['total']} 跨度={st_act and st_act['x1'] - st_act['x0'] + 1}/"
+              f"{st_act and st_act['w']}")
+
+        # ⑥ 真窗口多帧：待处理那一格不许累加
+        real = engine_swap(fake_overview_engine_source("needs_action", 2, watch=True))
+        try:
+            subprocess.Popen([BAR_EXE, "--panel", "overview"], cwd=os.path.dirname(BAR_EXE))
+            t0, hwnd = time.time(), 0
+            while time.time() - t0 < 25:
+                hwnd = top_window("dsh 控制台")
+                if hwnd:
+                    break
+                time.sleep(0.4)
+            if not check("真窗口：概览页面板已打开（--panel overview）", bool(hwnd),
+                         "找不到标题为 dsh 控制台 的顶层窗口"):
+                return
+            res = uia(hwnd, "text1")
+            if not check("真窗口：UIA 读得到概览页文字（text1 把换行折成 <NL>，一条不落）",
+                         uia_ok(res), str(res.get("ERR"))[:200]):
+                return
+            blob = "\n".join(res.get("TEXT", []))
+            ages = [a for a in (thresholds_age([t]) for t in res.get("TEXT", [])) if a is not None]
+            check("真窗口：概览页的状态卡读出中文标签，界面上没有英文状态码",
+                  ds.STATES["needs_action"][0] in blob and "needs_action" not in blob,
+                  f"含「{ds.STATES['needs_action'][0]}」={ds.STATES['needs_action'][0] in blob}，"
+                  f"「needs_action」={ 'needs_action' in blob}；界面文字开头 {blob[:120]!r}")
+            # 先等「下一帧真的进来了」—— 条件是这个帧里唯一会动的数：session.age_sec。
+            # 不钉固定 sleep 秒数（Task 7 的两条判据就是钉死 sleep 被打回的）：面板打开后
+            # 第一帧什么时候到、StateClient 何时重连都不定，等到条件出现才算数。
+            base_age = max(ages) if ages else None
+            moved = None
+            t1 = time.time()
+            while time.time() - t1 < 20:
+                r2 = uia(hwnd, "text1")
+                if uia_ok(r2):
+                    t2texts = r2.get("TEXT", [])
+                    a2 = [a for a in (thresholds_age([t]) for t in t2texts) if a is not None]
+                    if base_age is not None and any(a > base_age for a in a2):
+                        moved, blob = max(a2), "\n".join(t2texts)
+                        break
+                time.sleep(0.5)
+            if not check("真窗口：等到了第二帧（session.age_sec 涨上去了，多帧通路可用）",
+                         moved is not None,
+                         f"第一帧 age={base_age}，等满 20 秒没出现更大的 age —— "
+                         "下面那条「不累加」就只有一帧可看，不构成反证"):
+                return
+            n_jia, n_yi = blob.count("冒烟待处理甲"), blob.count("冒烟待处理乙")
+            check("真窗口：待处理卡跑过两帧后仍然各只有一行（Refresh 不许 += 累加）",
+                  n_jia == 1 and n_yi == 1,
+                  f"age 从 {base_age} 涨到 {moved}（至少两帧进来）后，"
+                  f"标记「冒烟待处理甲」出现 {n_jia} 次、「乙」{n_yi} 次 —— 各自都该是 1，"
+                  f">1 就是每帧又 append 了一遍，0 是没画出来")
+        finally:
+            subprocess.run(["taskkill", "/f", "/im", "DshBar.exe"], capture_output=True)
+            engine_restore(real)
+            time.sleep(2)
+            left = python_pids() - before
+            t2 = time.time()
+            while left and time.time() - t2 < 20:
+                time.sleep(1)
+                left = python_pids() - before
+            check("概览页真窗口场景：退出后无引擎孤儿子进程", not left, f"仍在跑 {sorted(left)}")
+            check("概览页真窗口场景：退出后 DshBar 已消失", not bar_processes(),
+                  str(bar_processes()))
+    except Exception as ex:
+        check("概览页门禁整段不抛", False, f"{type(ex).__name__}: {ex}")
 
 
 # ---------------------------------------------------------------- Task 6：通知页 / 运行页
@@ -1316,6 +1700,17 @@ switch ($Action) {
     foreach ($e in $all) {
       $n = $e.Current.Name
       if ($n -ne '' -and ($Name -eq '' -or $n.Contains($Name))) { Write-Output ("TEXT=" + $n) }
+    }
+  }
+  'text1' {
+    # 同 text，但把名字里的换行折成 <NL>。概览页「等你处理」那一格是**一个 TextBlock、
+    # 每个待处理项一行**（Text 里带 \\n），走 text 那条会被下面的按行解析拆成好几条，
+    # 「同一条标记出现了几次」（+= 累加的反证）就数不出来了。
+    foreach ($e in $all) {
+      $n = $e.Current.Name
+      if ($n -ne '' -and ($Name -eq '' -or $n.Contains($Name))) {
+        Write-Output ("TEXT=" + ($n -replace "`r?`n", '<NL>'))
+      }
     }
   }
   'togstate' {
@@ -2015,13 +2410,21 @@ def check_panel_settings_live() -> None:
                 if moved >= SCROLL_MIN:
                     break
                 time.sleep(0.5)
-            uia(hwnd, "scroll", value="up")
-            t_s = time.time()
-            while time.time() - t_s < 8.0:
-                back_diff = diff_of(base, grab())
+            # 「滚回顶部」也要重试：每次 uia() 都是新起一个 powershell 重新枚举控件树，
+            # 命中的未必是同一个 ScrollViewer（Task 8 三轮里有一次就是滚下去了却「回不来」，
+            # 下一轮又正常）。重试是给通路机会，不是给产品放水 —— 真滚不回来的话三次都不回来。
+            up_tries = 0
+            while up_tries < 3:
+                up_tries += 1
+                uia(hwnd, "scroll", value="up")
+                t_s = time.time()
+                while time.time() - t_s < 8.0:
+                    back_diff = diff_of(base, grab())
+                    if 0 <= back_diff <= LIVE_ROWS:
+                        break
+                    time.sleep(0.5)
                 if 0 <= back_diff <= LIVE_ROWS:
                     break
-                time.sleep(0.5)
             pct2 = (sd.get("PCT2") or ["-1"])[0]
         else:
             pct2 = "-1"
@@ -2031,7 +2434,8 @@ def check_panel_settings_live() -> None:
               moved >= SCROLL_MIN and 0 <= back_diff <= LIVE_ROWS,
               f"滚到底变化 {moved} 行（阈值 {SCROLL_MIN}：活的那行文字每帧只动 2~3 行，够不着它）、"
               f"滚回顶部后与基线差 {back_diff} 行（容 {LIVE_ROWS} 行 = 阈值行那点活字）；"
-              f"抓帧 {w0}x{h0}，两个数都是各等满 8 秒之后的最后一次实测"
+              f"抓帧 {w0}x{h0}，两个数都是各等满 8 秒之后的最后一次实测；"
+              f"「滚回顶部」共试了 {up_tries} 次（每次重新枚举控件树）"
               f"（VerticalPercent 本机恒报 {pct2}，不进判据）")
         print(f"  整页滚动现场：视口 {w0}x{h0}，滚到底变化 {moved} 行，滚回顶部与基线差 {back_diff} 行")
         if os.path.isfile(shot):
@@ -2319,66 +2723,133 @@ def row_hashes(rgb: bytes, w: int, h: int) -> list[str]:
     return [hashlib.md5(rgb[y * w * 3:(y + 1) * w * 3]).hexdigest() for y in range(h)]
 
 
+GAP_ROWS = 20
+"""`real_window_stats` 切纸色块时允许跨过的**非纸色段**最大行数（物理行）。
+线/表头文字那类短段实测 2~9 行，两张卡之间的空隙实测 32 行 —— 20 落在中间，
+100%~150% 缩放下这个次序都不变（Task 8 换主题刷后表格被行分隔线切成一片小段，
+逐行硬切会让 lines 恒 0、等帧那条 while 白跑满 20 秒）。"""
+
+
 def real_window_stats(rgb: bytes, w: int, h: int) -> dict:
     """真实窗口一帧的结构量：表格顶沿、表头文字那条墨迹带、成排的横向分隔线、
     最右条带里的整页滚动条滑块像素。
 
     横向探测带取 30%~90%：左边避开 188 逻辑像素的侧栏，右边避开窗口最右那 1px 描边。
-    顶沿用「纯白占多数」认定 —— 那是 Pages.cs 里写死的 `Background = Brushes.White`，
-    Task 5 Step 0 把它换成主题刷时这条口径要跟着改；找不到顶沿返回 -1，
-    调用处记 ✗，不会静默假绿。
 
-    「分隔线」= 这一行被同一种非白色占掉一半以上，且上下 4 物理像素内**都**有白底行，
-    连续的线行归并成一条。两侧都要贴白底是必需的：表格下面那一大片主题底色
-    （本机 #FAFAFA）也是整行同色，不加这道限定空表会被数成 26 条「线」，
-    等待条件就成了摆设（本机实测）。125% 缩放下 1 逻辑像素的线会糊成两行
-    （实测 y=111 是 #F7F7F7、y=112 是 #E2E2E2），所以按连续段归并、允许几像素缓冲。
+    【Task 8 的口径变更：顶沿不再用「逐字节纯白占多数」认定，改成按当前主题现量纸色】
+    旧口径钉的是 Pages.cs 里写死的 `Background = Brushes.White`（Task 5 Step 0 #1 的豁免）。
+    本任务把表底换成 `Ui.CardKey` 后实测：真窗口那一片合成出来是 **#FEFEFE**（卡片键在浅底
+    是半透明 #FEFEFE 贴在窗口底 #FAFAFA 上），旧的 `#FFFFFF` 判据从此**一条都认不出来** ——
+    `top=-1`、`lines=0`，等帧那条 while 会一直跑到 20 秒时限才记 ✗（简报点名的「不是变红、
+    是变慢死」就是这里）。现在纸色 = 探测带里**所有像素的众数**，深浅主题都跟着走。
+
+    纸色块（block）：连续成片纸色的行段。概览页现在有三块 —— 状态卡、会话表、等你处理卡，
+    中间被 18 DIP 的下边距（窗口底色 #FAFAFA，不是纸色）隔开。表格是**含分隔线最多的那一块**
+    （实测 29 行时表格块 8 条线、两张卡各 0 条），`top` 取的就是这一块的顶行，
+    和旧口径里「表格顶沿」是同一个东西 —— 旧版整页只有表格，第一块就是表格。
+
+    「分隔线」= 这一行被同一种非纸色占掉一半以上，且上下 4 物理像素内**都**有纸色行，
+    连续的线行归并成一条。两侧都要贴纸色是必需的：卡片外面那片主题底色（本机 #FAFAFA）
+    也是整行同色，不加这道限定空表会被数成 26 条「线」，等待条件就成了摆设（本机实测）。
+    125% 缩放下 1 逻辑像素的线会糊成两行（实测 y=111 是 #F7F7F7、y=112 是 #E2E2E2），
+    所以按连续段归并、允许几像素缓冲。
 
     表头下沿**不能**拿「顶沿往下第一条线」当基准 —— 本机实测表头与第一行数据之间
     根本不画线（GridLinesVisibility=Horizontal 只画行与行之间），第一条线在第一行
     数据下面（y=111），拿它当基准会把第一行也圈进「不许动」，修好了照样红。
-    改成量表头**文字的墨迹带**：顶沿往下第一段连续墨迹（容 3 行空隙、撞线即停），
+    改成量表头**文字的墨迹带**：表格块顶沿往下第一段连续墨迹（容 3 行空隙、撞线即停），
     它的下沿才是判据②的基准线（本机实测 y=38..52）。
     """
     x0, x1 = int(w * 0.30), int(w * 0.90)
     band = max(1, x1 - x0)
-    white, dom = [0] * h, [(b"", 0)] * h
+    counters: list[collections.Counter] = []
+    allc: collections.Counter = collections.Counter()
     for y in range(h):
         base = y * w * 3
         cnt: collections.Counter = collections.Counter()
         for x in range(x0, x1):
             cnt[rgb[base + x * 3:base + x * 3 + 3]] += 1
-        white[y] = cnt.get(b"\xff\xff\xff", 0)
-        del cnt[b"\xff\xff\xff"]
-        dom[y] = cnt.most_common(1)[0] if cnt else (b"", 0)
+        counters.append(cnt)
+        allc.update(cnt)
+    # 纸色 = 探测带众数（实测浅主题 #FEFEFE=卡片键、旧写死白底时是 #FFFFFF，
+    # 两种形态下都是画面里最大的一片同色），不写死任何字面量。
+    paper = allc.most_common(1)[0][0] if allc else b"\x00\x00\x00"
+    paper_n = [c.get(paper, 0) for c in counters]
+    dom: list[tuple[bytes, int]] = []
+    for c in counters:
+        rest = c.copy()
+        rest.pop(paper, None)
+        dom.append(rest.most_common(1)[0] if rest else (b"", 0))
 
-    def is_white(y: int) -> bool:
-        return 0 <= y < h and white[y] * 5 >= band * 2
+    def is_paper(y: int) -> bool:
+        return 0 <= y < h and paper_n[y] * 5 >= band * 2
 
     def is_line(y: int) -> bool:
         return 0 <= y < h and dom[y][1] * 2 >= band
 
-    def near_white(y: int) -> bool:
-        return (any(is_white(y - k) for k in (2, 3, 4))
-                and any(is_white(y + k) for k in (2, 3, 4)))
+    def near_paper(y: int) -> bool:
+        return (any(is_paper(y - k) for k in (2, 3, 4))
+                and any(is_paper(y + k) for k in (2, 3, 4)))
 
     def has_ink(y: int) -> bool:
-        """有文字墨迹：非白像素成把，但不是整行的线。"""
-        return 0 <= y < h and not is_line(y) and band - white[y] >= 40
+        """有文字墨迹：非纸色像素成把，但不是整行的线。"""
+        return 0 <= y < h and not is_line(y) and band - paper_n[y] >= 40
 
-    top = next((y for y in range(h) if is_white(y)), -1)
+    # 纸色块切出来，表格 = 含分隔线最多的那一块（并列时取更高的那块）。
+    # 段必须**跨过短线**才算一块：125% 缩放下一根 1 DIP 的行分隔线实测糊成两行
+    # （y=284 是 #F6F6F6、y=285 是 #E1E1E1，两侧都是纸色），逐行硬切会把表格切成
+    # 一-row-一块，块里永远不含线 → lines 恒 0、等帧那条 while 跑满 20 秒才红
+    # （就是简报点名的「不是变红，是变慢死」的第二处）。
+    # GAP_ROWS=20 物理行的容差是两侧都量过的：线/表头文字那种非纸色段实测 2~9 行，
+    # 两张卡之间的空隙实测 32 行（168~197，状态卡底描边 + 18 DIP 下边距 + 「会话」标题），
+    # 100%~150% 缩放下这个次序不变（20 介于两者之间）。
+    blocks, yy = [], 0
+    while yy < h:
+        if is_paper(yy):
+            s0 = e0 = yy
+            yy += 1
+            while yy < h:
+                if is_paper(yy):
+                    e0 = yy
+                    yy += 1
+                    continue
+                k = yy
+                while k < h and not is_paper(k):
+                    k += 1
+                if k - yy > GAP_ROWS or k >= h:
+                    break
+                yy = k
+            blocks.append((s0, e0))
+        else:
+            yy += 1
+
+    def line_count(a: int, b: int) -> int:
+        n, y2 = 0, a
+        while y2 <= b:
+            if is_line(y2) and near_paper(y2):
+                n += 1
+                while y2 <= b and is_line(y2):
+                    y2 += 1
+                continue
+            y2 += 1
+        return n
+
+    top, bottom = -1, h - 1
+    if blocks:
+        best = max(blocks, key=lambda bl: (line_count(bl[0], bl[1]), bl[1] - bl[0]))
+        top, bottom = best
     groups, y = [], top + 1 if top >= 0 else h
-    while y < h:
-        if is_line(y) and near_white(y):
+    while y <= bottom:
+        if is_line(y) and near_paper(y):
             groups.append(y)
-            while y < h and is_line(y):
+            while y <= bottom and is_line(y):
                 y += 1
             continue
         y += 1
-    head0 = next((y for y in range(max(0, top), h) if has_ink(y)), -1)
+    head0 = next((y for y in range(max(0, top), bottom + 1) if has_ink(y)), -1)
     head1, gap = head0, 0
     y = head0
-    while head0 >= 0 and y + 1 < h:
+    while head0 >= 0 and y + 1 <= bottom:
         y += 1
         if has_ink(y):
             head1, gap = y, 0
@@ -2394,6 +2865,7 @@ def real_window_stats(rgb: bytes, w: int, h: int) -> dict:
                 gray += 1
                 gray_x0 = x if gray_x0 < 0 else gray_x0
     return {"top": top, "lines": len(groups), "first_line": groups[0] if groups else -1,
+            "paper": paper, "blocks": len(blocks),
             "head0": head0, "head1": head1, "gray": gray, "gray_x0": gray_x0}
 
 
@@ -2570,6 +3042,12 @@ def check_panel_real_scroll() -> None:
             return
         first_diff = changed[0] if changed else -1
         in_head = sum(1 for y in changed if st0["top"] <= y <= st0["head1"])
+        # Task 8 之后概览页的表格顶沿**上面**多了状态卡（大字 + 「静默 N 秒」摘要），
+        # 那一带每帧都在动。原来这条拿「整屏第一条变化」当表头是否被滚走的证据，
+        # 于是状态卡的活字被当成「表头被推走」（实测红过一次：第一条变化在 y=29，
+        # 而表格顶沿在 y=199）。判据改成只看表格区以内。
+        first_in_table = next((y for y in changed if y >= st0["top"]), -1)
+        above_top = sum(1 for y in changed if y < st0["top"])
         st1 = real_window_stats(rgb2, w2, h2)
         print(f"  基线：表格顶沿 y={st0['top']}、表头墨迹带 y={st0['head0']}..{st0['head1']}、"
               f"分隔线 {st0['lines']} 条、最右条带滑块像素 {st0['gray']}（x0={st0['gray_x0']}）")
@@ -2584,15 +3062,23 @@ def check_panel_real_scroll() -> None:
               f"够不上 {WHEEL_MIN} 行就先看上面那条送达自检——它红是送达问题（本环境的前台锁那一类），"
               f"它绿而这条红才是那 29 行在真实面板里够不着")
         check("真实窗口：滚轮滚过之后表头没有被滚出视野",
-              first_diff > st0["head1"],
-              f"第一条变化的行在 y={first_diff}，判据要求 > 表头墨迹带下沿 y={st0['head1']}"
+              first_in_table > st0["head1"],
+              f"表格区内第一条变化的行在 y={first_in_table}，判据要求 > 表头墨迹带下沿 y={st0['head1']}"
               f"（顶沿 y={st0['top']}、表头文字 y={st0['head0']}..{st0['head1']}）："
-              f"顶沿到表头下沿之间就是表头，整页滚动一动它就花；"
+              f"顶沿到表头下沿之间就是表头，整页滚动一动它就花。"
+              f"（整屏第一条在 y={first_diff} —— 顶沿以上是状态卡，那里每帧都动，不算这条的账）；"
               + (f"送达通路={way}、变化行 {len(changed)} 条 —— 一条都没动是压根没滚起来，"
                  f"先看上面那条「滚轮送达通道自检」，它红就是送达失败（本环境的前台锁那一类），"
                  f"不是表头被滚走" if not changed
-                 else f"变化起点 {first_diff} 落在表头带内 {in_head} 条 —— "
+                 else f"表格区内起点 {first_in_table} 落在表头带内 {in_head} 条 —— "
                       f"这是整页滚动把表头一起推走了，送达通路={way} 与此无关"))
+        # 上一条把顶沿以上豁免了，这一条就是那条豁免的**对账**：豁免只给状态卡的活字，
+        # 不给整页位移。外壳一旦又把页面包进 ScrollViewer（Task 4 轮 2 那个缺陷的形状），
+        # 顶沿以上会跟着状态卡一起被推走，变化行几十起，这里当场红。
+        check("真实窗口：表格顶沿以上只许状态卡的活字在动（豁免不等于放过）",
+              above_top <= 12,
+              f"顶沿 y={st0['top']} 以上有 {above_top} 行变化（阈值 12 = 大字 + 摘要那两三行"
+              f"再放宽一档）；整页滚动会把这一带整体推走，量级差几十倍")
         check("真实窗口：外壳没有整页滚动条（页面拿到的是有限高度）",
               st0["gray"] <= 60,
               f"最右侧 20 物理像素条带里 {st0['gray']} 个中灰滑块像素"
@@ -3144,6 +3630,111 @@ def log_tail(offset: int) -> str:
             return fh.read()
     except OSError:
         return ""
+
+
+def _hue(r: int, g: int, b: int) -> float:
+    """RGB → 色相角度（0-360）。用来判「这是不是紫色」，不是用来做色彩管理。"""
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx == mn:
+        return -1.0
+    if mx == r:
+        h = (g - b) / (mx - mn)
+    elif mx == g:
+        h = 2.0 + (b - r) / (mx - mn)
+    else:
+        h = 4.0 + (r - g) / (mx - mn)
+    return ((h * 60.0) + 360.0) % 360.0
+
+
+# 紫色相区间。245° 以下算蓝（原 answering 的 #2563EB 是 221°），
+# 300° 以上算品红/粉（配色积累里的 #F58FA6 是 345°）—— 两端都不误伤。
+PURPLE_LO, PURPLE_HI = 245.0, 300.0
+
+
+def check_brand_palette() -> None:
+    """品牌视觉的两条底线：不许有紫色、材质必须真是三档可切。
+
+    为什么钉「结果」而不是「过程」：紫色是用户明确否决的东西，而它有一百种回来的路
+    —— 新加一个状态、换个主题刷、有人嫌橙不好看偷偷调回去。逐条钉「某个常数是几号」
+    挡不住这些，只有把**源码里出现的每一个颜色字面量**都过一遍色相才挡得住。
+    同理材质：三档不是注释里说说，是 Settings 的合法值、外观页的选择器、
+    App 里的落点三处都得在，少一处就退化成「只有一档」。
+    """
+    print("\n== 品牌配色（无紫 / 三档材质） ==")
+    files = [os.path.join(HERE, "dsh_state.py")]
+    for root, dirs, names in os.walk(os.path.join(HERE, "bar")):
+        dirs[:] = [d for d in dirs if d not in ("bin", "obj")]
+        files += [os.path.join(root, n) for n in names if n.endswith(".cs")]
+
+    viol: list[str] = []
+    seen = 0
+    for path in files:
+        try:
+            raw = open(path, encoding="utf-8-sig", errors="replace").read()
+        except OSError:
+            continue
+        ext = path.rsplit(".", 1)[-1].lower()
+        if ext == "cs":
+            text = strip_cs_comments(raw)
+        else:
+            text = "\n".join(l.split("#")[0] for l in raw.splitlines())
+        hits = []
+        for m in re.finditer(r"#([0-9A-Fa-f]{6})\b", text):
+            hits.append(tuple(int(x, 16) for x in
+                              (m.group(1)[0:2], m.group(1)[2:4], m.group(1)[4:6])))
+        for m in re.finditer(r"0x[0-9A-Fa-f]{2}([0-9A-Fa-f]{6})u?", text):
+            hits.append(tuple(int(x, 16) for x in
+                              (m.group(1)[0:2], m.group(1)[2:4], m.group(1)[4:6])))
+        for m in re.finditer(r"From(?:Rgb|Argb)\(([^)]*)\)", text):
+            # 直接抓括号里的参数再解析：上一版把第一个分量写成了非捕获组，
+            # FromRgb(124, 58, 237) 只剩两个数可判 —— 反证当场把它抓出来了。
+            vals = []
+            for x in [t.strip() for t in m.group(1).split(",") if t.strip()]:
+                try:
+                    vals.append(int(x, 16) if x.lower().startswith("0x") else int(x))
+                except ValueError:
+                    vals = []
+                    break
+            if len(vals) == 4:
+                vals = vals[1:]        # FromArgb(a, r, g, b)
+            if len(vals) == 3:
+                hits.append(tuple(vals))
+        for r0, g0, b0 in hits:
+            seen += 1
+            h = _hue(r0, g0, b0)
+            if PURPLE_LO <= h <= PURPLE_HI:
+                viol.append(f"{os.path.relpath(path, HERE)}: #{r0:02X}{g0:02X}{b0:02X} 色相 {h:.0f}°")
+    check(f"全部源码里的颜色字面量都不落在紫色相 {PURPLE_LO:.0f}°~{PURPLE_HI:.0f}°"
+          f"（共扫 {seen} 个）",
+          not viol, "出现紫色相：" + " | ".join(viol[:6]))
+
+    app_src = open(os.path.join(HERE, "bar", "App.cs"),
+                      encoding="utf-8-sig", errors="replace").read()
+    check("强调色被显式钉成品牌色（原生控件的选中点会跟系统主题色，本机那一个是紫）",
+          "AccentFillColorPrimary" in app_src and "ApplyBrandAccent" in app_src,
+          "App.cs 里没有 ApplyBrandAccent / 没覆盖 AccentFillColorPrimary")
+    check("RadioButton 的模板被接管（WPF-UI 4.2 没有 RadioButton，原生那个不读强调色资源）",
+          "ApplyFluentControls()" in app_src
+          and "typeof(System.Windows.Controls.RadioButton)" in app_src,
+          "没找到 ApplyFluentControls 或没把隐式样式挂到 RadioButton 类型上 —— "
+          "只覆盖资源的话选中圈仍是系统紫")
+
+    st = open(os.path.join(HERE, "bar", "Settings.cs"),
+                 encoding="utf-8-sig", errors="replace").read()
+    check("材质合法值恰是云母 / 毛玻璃 / 液态玻璃三档",
+          all(k in st for k in ('"mica"', '"acrylic"', '"glass"'))
+          and "BackdropKinds" in st and "SafeBackdrop" in st,
+          "Settings.cs 里三档取值或 SafeBackdrop 不在了")
+    ap = open(os.path.join(HERE, "bar", "Panel", "Pages", "AppearancePage.cs"),
+                 encoding="utf-8-sig", errors="replace").read()
+    check("外观页真的摆了三档材质选择器，且点下去会当场生效",
+          ap.count("cfg.Backdrop") >= 3 and "App.Config.Backdrop" in ap
+          and "界面材质" in ap,
+          f"外观页里 cfg.Backdrop 出现 {ap.count('cfg.Backdrop')} 次（应为 3 档）")
+    check("自绘玻璃档的卡片是半透明的（不半透明就等于没有液态玻璃这一档）",
+          "GlassTintLight" in open(os.path.join(HERE, "bar", "Panel", "Ui.cs"),
+                                      encoding="utf-8-sig", errors="replace").read(),
+          "Ui.cs 里找不到玻璃档的半透明卡片画刷")
 
 
 def check_balance_key_handling() -> None:
@@ -3738,6 +4329,7 @@ def main() -> int:
     # 见 check_panel_request_guard 的注释）。
     check_panel_request_guard()
     check_balance_key_handling()
+    check_brand_palette()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
         # 「空表那张」先用假引擎量好：它是本段所有「有没有数据行」门禁的基线
@@ -3752,6 +4344,9 @@ def main() -> int:
         # 行数与视口那两条也借同一份产物目录注入假引擎，
         # 所以整段都在 check_gui 之前 —— check_gui 会真的用这份拷贝起引擎。
         check_panel_row_data(empty_base)
+        # Task 8：概览页填实的三面（源码 / 离屏两张定帧 / 真窗口多帧）。
+        # 它同样要借产物目录那份引擎拷贝注入定死的帧，所以排在 check_gui 之前。
+        check_overview_page()
         # 通知页/运行页的离屏面：同样要借这份引擎拷贝注入「定死的一帧」，所以也排在 check_gui 前。
         check_pages_filled()
         # records:null 的帧要在**状态栏**上验（静默冻结是这条缺陷的表现，不是红），

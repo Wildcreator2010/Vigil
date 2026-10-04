@@ -148,15 +148,164 @@ namespace DshBar
         /// Apply 会去动已存在窗口的背景，Task 3 起就定死 None，本任务不翻案（记入报告）。
         /// "system" 由 FluentTheme() 就地解析成当前系统深浅，与启动路径同一口径。
         /// </summary>
+        /// <summary>
+        /// 把 WPF-UI 的强调色钉成品牌橙。
+        ///
+        /// 为什么必须显式覆盖：单选按钮选中态、开关、焦点框、进度条全都吃
+        /// `SystemAccentColor*` 这一族资源，而它默认跟着**系统的 Windows 强调色**走 ——
+        /// 本机那一个是紫色，于是「界面材质」那行的选中圈直接是紫的。
+        /// 用户明确否决紫色，所以不能只改状态色板，强调色这一族要一起钉死。
+        ///
+        /// 字典必须**追加在最后**：WPF 查找合并字典是后加入者优先，插在 ThemesDictionary
+        /// 前面会被它盖掉。而 ApplicationThemeManager.Apply 每次都可能重排那两份字典，
+        /// 所以它在 ApplyTheme 末尾再调一次。
+        /// </summary>
+        static void ApplyBrandAccent()
+        {
+            try
+            {
+                var app = System.Windows.Application.Current;
+                if (app == null) return;
+                if (_accentDict == null)
+                {
+                    _accentDict = new System.Windows.ResourceDictionary();
+                    // 两族都要覆盖：`SystemAccentColor*` 是旧的那套，而 WPF-UI 4.2 的
+                    // Fluent 控件（单选圈、开关、焦点框）实际吃 `AccentFillColor*` ——
+                    // 第一版只覆盖了前者，选中圈仍然是系统紫，白改。
+                    SetAccent("AccentFillColorPrimary", 0xD8, 0x7D, 0x44);
+                    SetAccent("AccentFillColorDefault", 0xC5, 0x6B, 0x33);
+                    SetAccent("AccentFillColorSecondary", 0xB8, 0x5F, 0x2B);
+                    SetAccent("AccentFillColorTertiary", 0xE9, 0xA9, 0x7C);
+                    SetAccent("AccentFillColorDisabled", 0xC7, 0xC1, 0xB8);
+                    SetAccent("SystemAccentColor", 0xD8, 0x7D, 0x44);
+                    SetAccent("SystemAccentColorPrimary", 0xC5, 0x6B, 0x33);
+                    SetAccent("SystemAccentColorSecondary", 0xB8, 0x5F, 0x2B);
+                    SetAccent("SystemAccentColorTertiary", 0xE9, 0xA9, 0x7C);
+                    // 强调色上的文字：橙底白字对比约 2.6:1，配深色字更稳，这里取白
+                    // 并把橙压深一档（Default/Secondary 已是深色），保证勾选圈里的白点看得清。
+                    SetAccent("AccentTextFillColorPrimary", 0xFF, 0xFF, 0xFF);
+                    SetAccent("AccentTextFillColorSecondary", 0xFF, 0xFF, 0xFF);
+                    SetAccent("AccentTextFillColorTertiary", 0xFF, 0xFF, 0xFF);
+                    SetAccent("AccentFillColorSelectedText", 0xFF, 0xFF, 0xFF);
+                    SetAccent("TextOnAccentFillColorPrimary", 0xFF, 0xFF, 0xFF);
+                    SetAccent("TextOnAccentFillColorSecondary", 0xFF, 0xFF, 0xFF);
+                    SetAccent("TextOnAccentFillColorSelectedText", 0xFF, 0xFF, 0xFF);
+                }
+                var merged = app.Resources.MergedDictionaries;
+                int at = merged.IndexOf(_accentDict);
+                if (at >= 0) merged.RemoveAt(at);
+                merged.Add(_accentDict);
+            }
+            catch (Exception ex) { Log($"强调色覆盖失败: {ex.Message}"); }
+        }
+
+        static System.Windows.ResourceDictionary _accentDict;
+
+        /// <summary>一个键同时给两份：不带后缀的是 Color，带 Brush 的是冻结画刷。</summary>
+        static void SetAccent(string key, byte r, byte g, byte b)
+        {
+            var c = System.Windows.Media.Color.FromRgb(r, g, b);
+            _accentDict[key] = c;
+            var br = new System.Windows.Media.SolidColorBrush(c);
+            br.Freeze();
+            _accentDict[key + "Brush"] = br;
+        }
+
+        /// <summary>
+        /// 自己接管 RadioButton 的样子。
+        ///
+        /// 为什么绕不开：WPF-UI 4.2 里**没有** RadioButton 这个控件（编译期就证实了），
+        /// 而原生 WPF 那个的选中点是 Aero2 主题直接从**系统主题色**取的，
+        /// 不读 WPF-UI 的 `AccentFillColor*` 资源 —— 所以只覆盖资源的话，
+        /// 「界面材质」那三个圈会一直是系统紫（本机实测就是这样）。
+        /// 唯一稳的办法是换模板，让圈和点都显式吃我们自己钉过的强调色。
+        /// </summary>
+        const string RadioStyleXaml =
+            "<Style TargetType='RadioButton' " +
+            "xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
+            "xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>" +
+            "<Setter Property='Foreground' Value='{DynamicResource TextFillColorPrimaryBrush}'/>" +
+            "<Setter Property='SnapsToDevicePixels' Value='True'/>" +
+            "<Setter Property='Template'>" +
+            "<Setter.Value>" +
+            "<ControlTemplate TargetType='RadioButton'>" +
+            "<StackPanel Orientation='Horizontal' Background='Transparent'>" +
+            "<Grid Width='20' Height='20' VerticalAlignment='Center'>" +
+            "<Ellipse x:Name='ring' StrokeThickness='1.5' " +
+            "Fill='{DynamicResource ControlFillColorDefaultBrush}' " +
+            "Stroke='{DynamicResource ControlStrokeColorDefaultBrush}'/>" +
+            "<Ellipse x:Name='dot' Margin='5' Visibility='Collapsed' " +
+            "Fill='{DynamicResource AccentFillColorPrimaryBrush}'/>" +
+            "</Grid>" +
+            "<ContentPresenter Margin='8,0,0,0' VerticalAlignment='Center'/>" +
+            "</StackPanel>" +
+            "<ControlTemplate.Triggers>" +
+            "<Trigger Property='IsChecked' Value='True'>" +
+            "<Setter TargetName='dot' Property='Visibility' Value='Visible'/>" +
+            "<Setter TargetName='ring' Property='Stroke' Value='{DynamicResource AccentFillColorPrimaryBrush}'/>" +
+            "</Trigger>" +
+            "<Trigger Property='IsMouseOver' Value='True'>" +
+            "<Setter TargetName='ring' Property='Opacity' Value='0.75'/>" +
+            "</Trigger>" +
+            "<Trigger Property='IsEnabled' Value='False'>" +
+            "<Setter Property='Opacity' Value='0.45'/>" +
+            "</Trigger>" +
+            "</ControlTemplate.Triggers>" +
+            "</ControlTemplate>" +
+            "</Setter.Value>" +
+            "</Setter>" +
+            "</Style>";
+
+        static void ApplyFluentControls()
+        {
+            try
+            {
+                var app = System.Windows.Application.Current;
+                if (app == null) return;
+                if (_radioStyle == null)
+                    _radioStyle = (System.Windows.Style)System.Windows.Markup.XamlReader.Parse(RadioStyleXaml);
+                // 隐式样式的键就是控件类型本身（等价于 XAML 里不写 x:Key 的 Style）
+                app.Resources[typeof(System.Windows.Controls.RadioButton)] = _radioStyle;
+            }
+            catch (Exception ex) { Log($"RadioButton 模板注入失败: {ex.Message}"); }
+        }
+
+        static System.Windows.Style _radioStyle;
+
         internal static void ApplyTheme()
         {
             try
             {
                 Wpf.Ui.Appearance.ApplicationThemeManager.Apply(
-                    FluentTheme(), Wpf.Ui.Controls.WindowBackdropType.None, false);
+                    FluentTheme(), SystemBackdrop(), false);
+                // 材质旗标必须在这里就落定，不能只在 PanelWindow.ApplyMaterial 里设：
+                // 离屏 --panel-shot 那条路径压根不建窗口，不这样设的话卡片永远画成实心档，
+                // 「液态玻璃」的截图就和真窗口不一致（卡片半透明/圆角 18 全看不见）。
+                Ui.Glass = GlassMode;
+                Ui.RefreshMaterial();
+                ApplyBrandAccent();
+                ApplyFluentControls();
+                PanelWindow.Instance?.ApplyMaterial();
             }
             catch (Exception ex) { Log($"应用主题失败: {ex.Message}"); }
         }
+
+        /// <summary>
+        /// 当前设置对应的外壳材质。三档里只有两档是系统材质：
+        /// mica / acrylic 直接交给 DWM，glass 那档 WPF-UI 4.2 根本没有这个枚举
+        /// （程序集里连 "Liquid" 字样都搜不到），所以用 Mica 打底、再由
+        /// PanelWindow.ApplyMaterial 叠自绘的半透明层与内高光去近似它。
+        /// </summary>
+        static Wpf.Ui.Controls.WindowBackdropType SystemBackdrop()
+        {
+            string b = Settings.SafeBackdrop(_settings?.Backdrop);
+            return b == "mica" || b == "glass"
+                ? Wpf.Ui.Controls.WindowBackdropType.Mica
+                : Wpf.Ui.Controls.WindowBackdropType.Acrylic;
+        }
+
+        /// <summary>当前是不是自绘玻璃档（页面材质与卡片透明度都看这一格）。</summary>
+        internal static bool GlassMode => Settings.SafeBackdrop(_settings?.Backdrop) == "glass";
 
         /// <summary>
         /// showBar 决定状态条停靠/消失。隐藏 = Native.Undock（SWP_HIDEWINDOW + 脱离任务栏父子关系），
@@ -894,7 +1043,7 @@ namespace DshBar
 
             _tray = new NotifyIcon
             {
-                Icon = StatusIcon("#9CA3AF", "?"),
+                Icon = StatusIcon("#8E918A", "?"),
                 Text = "dsh 状态检测",
                 Visible = true,
                 ContextMenuStrip = menu,

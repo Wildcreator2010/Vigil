@@ -44,6 +44,18 @@ namespace DshBar
             showBar.Checked += (s, e) => SetBar(true);
             showBar.Unchecked += (s, e) => SetBar(false);
 
+            // 三档界面材质：云母 / 毛玻璃 / 自绘液态玻璃。点了当场生效，不用重开面板。
+            var mica = Radio("云母 Mica", "mica", cfg.Backdrop);
+            var acrylic = Radio("毛玻璃 Acrylic", "acrylic", cfg.Backdrop);
+            var glass = Radio("液态玻璃", "glass", cfg.Backdrop);
+            foreach (var rb in new[] { mica, acrylic, glass })
+                rb.Checked += (s, e) =>
+                {
+                    App.Config.Backdrop = Settings.SafeBackdrop((string)((WpfControls.RadioButton)s).Tag);
+                    App.ApplyTheme();
+                    App.SaveSettings();
+                };
+
             var scroll = new WpfControls.ScrollViewer
             {
                 HorizontalScrollBarVisibility = WpfControls.ScrollBarVisibility.Disabled,
@@ -56,6 +68,10 @@ namespace DshBar
                         "面板默认浅色（白底黑字）；任务栏状态条始终跟随系统深浅色，不受这里影响。",
                         Ui.Row2(light, dark, sys))),
                 Ui.Group("显示模式",
+                    Ui.Row("界面材质",
+                        "云母最实、只染一点桌面色；毛玻璃真的会把身后模糊掉；液态玻璃是半透明卡片叠大圆角" +
+                        "加一圈内高光，看着最透。换档当场生效。",
+                        Ui.Row2(mica, acrylic, glass)),
                     Ui.Row("任务栏状态条", "隐藏后仍可通过托盘图标打开本面板。", showBar)));
             // 主题底色用 Border 铺满整页：裸 ContentControl 的默认模板里没有画 Background 的
             // chrome（只有 ContentPresenter），把 Background 挂在它身上等于没挂——离屏实测
@@ -71,6 +87,9 @@ namespace DshBar
 
         static WpfControls.RadioButton Radio(string text, string value, string current)
         {
+            // 必须用 WPF-UI 的 Fluent RadioButton：原生那个的选中点直接取**系统主题色**，
+            // 不读 WPF-UI 的强调色资源，所以覆盖 AccentFillColor* 对它无效
+            // （第一版就是踩在这上面，选中圈一直是系统紫）。
             var rb = new WpfControls.RadioButton
             {
                 Content = text,

@@ -46,18 +46,25 @@ BLOCKING_TOOLS = {"ask_user_question": "问题", "exit_plan_mode": "计划确认
 ANSWER_TOOLS = set(BLOCKING_TOOLS)
 
 # state -> (中文标签, 图标字母, #RRGGBB, 提示优先级)
+# 状态色板 2026-10-04 重定：全部取自用户自己的配色积累（「落日猎人」+「完美风暴」两套），
+# 色号是从图里**采样像素**得到的，不是照图上印的 hex 抄 —— 图上 Forest Green 印成了
+# #1F2A36（与另一套的 Wet Asphalt 重号），真实色块是 #3E6143。
+# 原来的「疑似卡住」是 #7C3AED 紫，用户明确否决，整套里不再出现任何紫色相。
+# 语义排布：橙=该你了（needs_action），红=坏了（error），锈黄=可疑（stalled），
+# 冷色三档=还在动，荧光信号绿=成了，灰三档=停着/不知道。
+# 前端 bar/Panel/Ui.cs 的 StateMap 必须逐项一致，冒烟有门禁钉着。
 STATES = {
-    "needs_action": ("需要操作", "!", "#DC2626", 90),
-    "error": ("出错了", "X", "#BE123C", 80),
-    "stalled": ("疑似卡住", "S", "#7C3AED", 70),
-    "thinking": ("正在思考", "T", "#D97706", 60),
-    "tool_running": ("正在执行工具", "W", "#0D9488", 58),
-    "answering": ("正在回答", "A", "#2563EB", 56),
-    "done": ("回答完成", "D", "#16A34A", 40),
-    "aborted": ("已中断", "K", "#64748B", 30),
-    "idle": ("待命", "I", "#6B7280", 20),
-    "offline": ("未运行", "O", "#9CA3AF", 10),
-    "unknown": ("未知", "?", "#9CA3AF", 0),
+    "needs_action": ("需要操作", "!", "#D87D44", 90),
+    "error": ("出错了", "X", "#C65B51", 80),
+    "stalled": ("疑似卡住", "S", "#C3A559", 70),
+    "thinking": ("正在思考", "T", "#92A5A0", 60),
+    "tool_running": ("正在执行工具", "W", "#54644A", 58),
+    "answering": ("正在回答", "A", "#7F8E6B", 56),
+    "done": ("回答完成", "D", "#BFD268", 40),
+    "aborted": ("已中断", "K", "#5A6363", 30),
+    "idle": ("待命", "I", "#D2D2C8", 20),
+    "offline": ("未运行", "O", "#2E3844", 10),
+    "unknown": ("未知", "?", "#8E918A", 0),
 }
 
 

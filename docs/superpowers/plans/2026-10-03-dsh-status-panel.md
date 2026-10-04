@@ -2155,7 +2155,10 @@ namespace DshBar
             };
             var head = Ui.Column(Ui.Heading("概览"), statusCard);
             WpfControls.Grid.SetRow(head, 0);
-            var table = Ui.Group("会话", _grid);
+            // 表格那一行**也不能用 Ui.Group**：Group 的卡体是竖向 StackPanel，
+            // 会把 * 行给的有限高度又换成无限高（实现 Task 8 时实测出来的，
+            // 我第一版改成本段时也没看出来）。表格区自己用 Auto + * 两行，见 OverviewPage.TableArea()。
+            var table = TableArea();
             WpfControls.Grid.SetRow(table, 1);
             var wait = Ui.Group("等你处理", _waiting);
             WpfControls.Grid.SetRow(wait, 2);
@@ -2267,144 +2270,55 @@ git commit -m "feat(panel): 概览页填实（当前状态卡 + 全部会话表 
 
 ---
 
-### Task 9: 关于页与开源清单的应用内呈现
+### Task 9: 关于页（Logo + 作者 + 从 THIRD-PARTY-NOTICES.md 解析清单）
+
+> **2026-10-04 修订**：原计划的「在 C# 里手抄 8 条清单」作废。理由与 AF-Media-Bar 自己的
+> 注释一致 —— 开源清单必须与工程文件里的真实依赖逐项一致，否则这一节就是装饰；
+> 手抄的第二份必然漂移。改成**从 `THIRD-PARTY-NOTICES.md` 解析**，单一事实源。
 
 **Files:**
 - Create: `bar/Panel/Pages/AboutPage.cs`
-- Modify: `bar/Panel/Pages/Pages.cs`（按 Task 8 Step 3 的结论处理）
+- Modify: `bar/Panel/Pages/Pages.cs`（删 `AboutPage` 占位）
+- Modify: `bar/DshBar.csproj`（把 `assets/logo.png` 作为 Resource 嵌入）
+- Modify: `bar/App.cs`（托盘图标改用 `assets/dsh.ico`；新增 `App.RepoRoot` / `VersionText` / 清单解析）
 - Test: `smoke_test.py`
 
 **Interfaces:**
-- Consumes: 程序集 `Version`、`LICENSE` 与 `THIRD-PARTY-NOTICES.md` 的路径。
-- Produces: 关于页显示版本号、MIT 摘要、第三方清单（含 WPF-UI 传递依赖与 Segoe 字体的例外说明），两个按钮打开 `LICENSE` / `THIRD-PARTY-NOTICES.md`。
+- Consumes: `bar/assets/logo.png`（已生成，256 透明底）、`bar/assets/dsh.ico`（16/32/48）；
+  `THIRD-PARTY-NOTICES.md` 的条目结构；`App.DataDir` / `App.LogPath` / `App.RevealInExplorer`。
+- Produces: `AboutPage`；`internal static string RepoRoot`、`internal static string VersionText`、
+  `internal static List<LicenseEntry> ReadThirdPartyNotices()`。
 
-- [ ] **Step 1: App 暴露仓库根目录与版本**
+- [ ] **Step 1: 清单解析器（单一事实源）**
 
-`bar/App.cs` 加：
+`LicenseEntry { Name, Version, License, Url, Note }`，从 `THIRD-PARTY-NOTICES.md` 的
+条目结构解析。**解析失败或条目数为 0 必须显式报错**，不许静默画一张空表 ——
+空表在像素门禁里和「这一页还没填」长得一样。
 
-```csharp
-        internal static string RepoRoot
-        {
-            get
-            {
-                string here = AppContext.BaseDirectory;
-                var dir = new DirectoryInfo(here);
-                for (int i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
-                    if (File.Exists(Path.Combine(dir.FullName, "THIRD-PARTY-NOTICES.md")))
-                        return dir.FullName;
-                return Path.GetFullPath(Path.Combine(here, "..", "..", "..", ".."));
-            }
-        }
+- [ ] **Step 2: 关于页四区**
 
-        internal static string VersionText
-        {
-            get
-            {
-                var v = typeof(App).Assembly.GetName().Version;
-                return v == null ? "未知" : $"{v.Major}.{v.Minor}.{v.Build}";
-            }
-        }
-```
+① 身份区：Logo 大图 + 项目名 + 版本 + **作者 Wildcreator** + 仓库链接；
+② 开源许可清单：Step 1 解析出来的条目，逐行「名称 / 版本 / SPDX / 用途」；
+③ 非 MIT 例外单独一区（Segoe Fluent Icons 等），不能混在 MIT 列表里；
+④ 数据与诊断：数据目录、日志位置，复用运行页已有的 `RevealInExplorer` 通路。
 
-- [ ] **Step 2: 写 `AboutPage.cs`**
+不做赞赏码 / 赞助者 / 联网拉贡献者头像（本项目单机自用，联网清单引入新的隐私面）。
 
-```csharp
-using System.IO;
-using System.Windows;
-using System.Windows.Media;
-using WpfControls = System.Windows.Controls;
-using UiControls = Wpf.Ui.Controls;
+- [ ] **Step 3: 托盘图标换成 Logo**
 
-namespace DshBar
-{
-    internal sealed class AboutPage : WpfControls.ContentControl, IPanelPage
-    {
-        static WpfControls.TextBlock Head(string text, double size, bool strong)
-        {
-            var tb = new WpfControls.TextBlock
-            {
-                Text = text,
-                FontSize = size,
-                FontWeight = strong ? FontWeights.SemiBold : FontWeights.Normal,
-                TextWrapping = TextWrapping.Wrap,
-            };
-            Ui.Ref(tb, WpfControls.TextBlock.ForegroundProperty, strong ? Ui.InkKey : Ui.InkDimKey);
-            return tb;
-        }
+`assets/dsh.ico` 已生成。注意 csproj 的 `ApplicationIcon`（exe 文件图标）与
+`NotifyIcon.Icon`（托盘运行时图标）是两件事，都要改；ico 需要随产物部署。
 
-        static readonly string[][] Notices =
-        {
-            new[] { "WPF-UI 4.2.0", "MIT", "© 2021-2025 Leszek Pomianowski and WPF UI Contributors", "控制台窗口外壳与表单控件" },
-            new[] { "VirtualizingWrapPanel 2.0.6", "MIT", "© 2019 S. Bäumlisberger", "WPF-UI 内含，随其一并传递" },
-            new[] { "fluentui-system-icons 1.1.242", "MIT", "© 2020 Microsoft Corporation", "WPF-UI 内含图标" },
-            new[] { "dotnet/wpf 8.0", "MIT", "© Microsoft Corporation", "WPF-UI 内含" },
-            new[] { "microsoft-ui-xaml 3.0", "MIT", "© Microsoft Corporation", "WPF-UI 内含" },
-            new[] { "Segoe Fluent Icons 3.0", "微软专有字体许可（非 MIT）", "© Microsoft Corporation", "仅引用系统已装字体，不随包分发" },
-            new[] { "AF-Media-Bar", "MIT", "© 2026 AmorFate", "停靠方式与分组/行布局的设计参照，未复制源码" },
-            new[] { ".NET 10 Windows Desktop / Python 3.14", "运行时依赖", "-", "不随附其代码" },
-        };
+- [ ] **Step 4: 门禁**
 
-        public AboutPage()
-        {
-            var rows = new WpfControls.StackPanel();
-            foreach (var n in Notices)
-            {
-                rows.Children.Add(new WpfControls.Grid { Margin = new Thickness(14, 8, 14, 8), Children =
-                {
-                    new WpfControls.StackPanel { Children =
-                    {
-                        Head(n[0] + "  ·  " + n[1], 13, true),
-                        Head(n[2] + " — " + n[3], 12, false),
-                    } },
-                } });
-                var sep = new WpfControls.Border { Height = 1, Margin = new Thickness(14, 0, 14, 0) };
-                Ui.Ref(sep, WpfControls.Border.BackgroundProperty, Ui.LineKey);
-                rows.Children.Add(sep);
-            }
+- 清单条目数 == `THIRD-PARTY-NOTICES.md` 解析出的条目数（两侧同源，不许写死数字）；
+- 关于页离屏色数显著高于「一行占位文字」，且 Logo 真的画出来了（不透明像素显著增加）；
+- 「作者 Wildcreator」在界面上（UIA 文本或离屏比对，选能真的红的那种）；
+- 解析器遇到畸形 md 时返回空并让页面显示错误行，而不是抛异常把面板带崩。
 
-            var openLicense = new UiControls.Button { Content = "打开 LICENSE", Padding = new Thickness(12, 5, 12, 5) };
-            openLicense.Click += (s, e) => App.OpenInExplorer(Path.Combine(App.RepoRoot, "LICENSE"));
-            var openNotices = new UiControls.Button { Content = "打开完整第三方声明", Padding = new Thickness(12, 5, 12, 5), Margin = new Thickness(8, 0, 0, 0) };
-            openNotices.Click += (s, e) => App.OpenInExplorer(Path.Combine(App.RepoRoot, "THIRD-PARTY-NOTICES.md"));
+- [ ] **Step 5: 验证**
 
-            Content = Ui.Column(
-                Ui.Heading("关于"),
-                Ui.Group("版本",
-                    Ui.Row("dsh 任务栏状态栏", $"版本 {App.VersionText} · 许可证 MIT · © 2026 Wildcreator", null),
-                    Ui.Row("开源声明", "本项目与全部第三方（含 WPF-UI 的传递依赖）的许可证如下。",
-                        Ui.Row2(openLicense, openNotices))),
-                Ui.Group("第三方清单", rows));
-        }
-
-        public void Refresh(Snapshot snap) { }
-    }
-}
-```
-
-- [ ] **Step 3: 从 `Pages.cs` 删掉 `AboutPage` 占位类，并按需处理 `PageBase`**
-
-- [ ] **Step 4: 编译 + 关于页断言**
-
-Run: `cd bar && dotnet build -c Release --nologo > ../b.log 2>&1; echo $?; grep -a ": warning\|: error" ../b.log | head`
-Expected: `0`，无输出。
-
-`smoke_test.py` 的 `check_panel_shell()` 循环之后已有 overview/about 对比断言；再补一条"关于页画出了清单"的断言：
-
-```python
-    if "about" in shots:
-        check("关于页画出了第三方清单（颜色种类足够多）", shots["about"] > 250,
-              f"colors={shots['about']}")
-```
-
-Run: `python smoke_test.py --gui`
-Expected: 退出码 0。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add bar/Panel/ bar/App.cs smoke_test.py
-git commit -m "feat(panel): 关于页在应用内呈现版本与开源清单"
-```
+`cd bar && dotnet build -c Release -t:Rebuild` 0/0；`python smoke_test.py --gui` 连续三轮。
 
 ---
 
@@ -2506,3 +2420,61 @@ git commit -m "feat(panel): 二次实例改为转交打开面板"
 - 面板 6 页均可从托盘/右键/命令行到达，浅色默认可读，全部文案中文。
 - `LICENSE` 与 `THIRD-PARTY-NOTICES.md` 覆盖 WPF-UI 及其 5 项传递依赖、AF-Media-Bar、运行时依赖，且 Segoe 字体的非 MIT 例外已显式标注。
 - README 不再声称编译不需要联网，且新增控制台面板与开源协议两节。
+
+---
+
+### Task 11: 品牌配色落地（落日猎人界面色 + 无紫状态色板）
+
+**Files:**
+- Modify: `dsh_state.py`（`STATES` 的 11 个 hex）
+- Modify: `bar/Panel/Ui.cs`（`StateMap` 逐项跟着改）
+- Modify: `bar/Theme.cs`（状态条的界面色：胶囊底、文字、分隔线、进度槽）
+- Modify: `bar/Panel/Ui.cs`（新增品牌键：强调/描边/卡片底）
+- Test: `smoke_test.py`、`test_dsh_state.py`
+
+**Interfaces:**
+- Consumes: spec 增补 V2/V4 两张表。
+- Produces: `Ui.AccentKey/AccentHex`、`Ui.LineWarmHex`、`Ui.CardPaperHex`；
+  `Ui.StateMap` 与引擎 `STATES` 逐项一致（Task 8 的门禁已经钉着这条）。
+
+- [ ] **Step 1: 先改引擎，再改前端，最后让门禁去比对**
+
+`dsh_state.py` 的 `STATES` 按 spec V4 换 11 个 hex。注意 `needs_action` 与 `error`
+**互换了色相语义**（橙=该你了、红=坏了），凡是断言里写死旧 hex 的地方都要跟着改：
+`grep -n "DC2626\|BE123C\|7C3AED" *.py bar/*.cs bar/Panel/**/*.cs` 必须只剩注释里的历史说明。
+
+- [ ] **Step 2: 加一条「全仓库不得再出现紫色」的门禁**
+
+钉的是**结果**不是过程：扫 `dsh_state.py`、`bar/**/*.cs`（剥注释）里出现的 hex 字面量，
+命中 `#7C3AED` / `#8E7CFF` / `#A26DAA` / 任何 `hue ∈ [250°, 300°]` 的色即红。
+理由：紫色是用户明确否决的，而它可能从别处（新页面、新状态、深色主题）又长回来。
+
+- [ ] **Step 3: 界面色接进 Theme.cs 与 Ui.cs**
+
+状态条的深浅两套配色按 spec V2 换。面板侧新增品牌键，**卡片底必须不透明**（见 Task 12）。
+
+- [ ] **Step 4: 验证**
+
+`python test_dsh_state.py`、`--live`、`cd bar && dotnet build -c Release -t:Rebuild`、
+`python smoke_test.py --gui` 连续三轮。状态色改了，**状态条的像素门禁**
+（`check_gui` 里按色相/色值认状态的那几条）会跟着动，必须逐条重量而不是放宽阈值。
+
+---
+
+### Task 12: 面板毛玻璃外壳与圆角
+
+**Files:**
+- Modify: `bar/Panel/PanelWindow.xaml`（`WindowBackdropType="Acrylic"`、圆角）
+- Modify: `bar/Panel/Ui.cs`（卡片圆角与实心底）
+- Test: `smoke_test.py`
+
+- [ ] **Step 1: 只让外壳和侧栏透明，卡片一律不透明**
+
+理由见 spec V3：离屏 `RenderTargetBitmap` 拿不到系统合成的 backdrop，卡片一旦透明，
+桌面就渗进「真窗口取样框 vs 离屏参照」的比对里，直达页那段门禁会随壁纸时红时绿。
+做完必须证明：换一张桌面壁纸（或改 `Background` 为纯色）后，
+`check_panel_direct_page` 的六页重合度**不变**。这条是本任务的验收核心。
+
+- [ ] **Step 2: 圆角 8 → 12，并确认描边不被圆角切掉**
+
+- [ ] **Step 3: 验证**（同 Task 11 Step 4，外加连续三轮）

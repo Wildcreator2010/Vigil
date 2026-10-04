@@ -25,12 +25,18 @@ namespace DshBar
             }
         }
 
-        public static uint Fill => Light ? 0xE6FFFFFFu : 0xCC1D1F24u;
-        public static uint Stroke => Light ? 0x33000000u : 0x2AFFFFFFu;
-        public static uint TextPrimary => Light ? 0xF21A1D23u : 0xF2F5F7FAu;
-        public static uint TextSecondary => Light ? 0xB35A6270u : 0xB3AAB2BFu;
-        public static uint TextDim => Light ? 0x806B7480u : 0x80828C99u;
-        public static uint Track => Light ? 0x1F000000u : 0x2AFFFFFFu;
-        public static uint Alert => 0xFFDC2626u;
+        // 2026-10-04 换成品牌色（用户自己的配色积累「落日猎人」，色号按像素采样）：
+        // 浅底用暖纸白 + 夜影黑字，深底用夜巡蓝 + 米白字；次级文字走松木灰/黄昏云。
+        // 状态栏嵌在任务栏里，仍然跟系统深浅走 —— 只是把冷灰换成同一套里的暖灰。
+        public static uint Fill => Light ? 0xE6FBF8F3u : 0xCC2E3844u;
+        public static uint Stroke => Light ? 0x40B0A788u : 0x2A92A5A0u;
+        public static uint TextPrimary => Light ? 0xF22B2A23u : 0xF2EDE9E1u;
+        public static uint TextSecondary => Light ? 0xB35D4B3Fu : 0xB3B0A788u;
+        public static uint TextDim => Light ? 0x808A5631u : 0x8092A5A0u;
+        public static uint Track => Light ? 0x1F2B2A23u : 0x2A92A5A0u;
+        /// <summary>警示色：晚霞红（原 #DC2626 随状态色板一起换掉）。</summary>
+        public static uint Alert => 0xFFC65B51u;
+        /// <summary>强调色：暮光橙。进度槽已填满的那一截用它。</summary>
+        public static uint Accent => 0xFFD87D44u;
     }
 }

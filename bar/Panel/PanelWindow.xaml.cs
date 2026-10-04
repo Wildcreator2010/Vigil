@@ -24,6 +24,9 @@ namespace DshBar
             Nav.SelectedIndex = 0;
             Instance = this;
             App.SnapshotChanged += OnSnapshotChanged;
+            // 新建的窗口不会自己继承上次 ApplyTheme 时设过的材质，得当场补一次；
+            // 否则「关了再开」会退回 XAML 里写死的那一档。
+            ApplyMaterial();
             // 关窗只是藏起来：视觉树留着，下次打开不重建；真正销毁只在退出时
             Closing += (s, e) =>
             {
@@ -44,6 +47,39 @@ namespace DshBar
         {
             if (Host.Content is IPanelPage p) p.Refresh(App.Latest);
         });
+
+        /// <summary>
+        /// 按当前材质重画外壳：窗口 backdrop、侧栏通透度、以及每一张卡。
+        ///
+        /// backdrop 走 FluentWindow 自己的依赖属性（DLL 里有 OnWindowBackdropTypeChanged
+        /// 这个处理器），不是 ApplicationThemeManager 那个全局 Apply —— 后者管的是主题字典，
+        /// 材质要落在具体窗口上。
+        /// glass 档的窗口材质仍是 Mica：WPF-UI 4.2 没有 Liquid Glass，
+        /// 「液态」是靠侧栏与卡片那两层半透明 + 大圆角 + 内高光近似出来的。
+        /// </summary>
+        internal void ApplyMaterial()
+        {
+            string b = Settings.SafeBackdrop(App.Config?.Backdrop);
+            WindowBackdropType = b == "acrylic"
+                ? Wpf.Ui.Controls.WindowBackdropType.Acrylic
+                : Wpf.Ui.Controls.WindowBackdropType.Mica;
+            Ui.Glass = b == "glass";
+            if (Ui.Glass)
+            {
+                // 侧栏跟着透：Mica 会把它染上桌面色调，三档里只有这一档看得见"融进去"
+                Rail.Background = new System.Windows.Media.SolidColorBrush(
+                    Wpf.Ui.Appearance.ApplicationThemeManager.GetAppTheme()
+                        == Wpf.Ui.Appearance.ApplicationTheme.Dark
+                        ? System.Windows.Media.Color.FromArgb(0x66, 0x20, 0x20, 0x20)
+                        : System.Windows.Media.Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF));
+            }
+            else
+            {
+                Rail.SetResourceReference(
+                    WpfControls.Border.BackgroundProperty, "LayerFillColorDefaultBrush");
+            }
+            Ui.RefreshMaterial();
+        }
 
         public void ShowOn(string key)
         {
