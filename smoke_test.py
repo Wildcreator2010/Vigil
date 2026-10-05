@@ -302,6 +302,172 @@ def check_python_resolution() -> None:
               f"毒化目录 {pdir}，实选 {kv2.get('python')}")
 
 
+SETUP_EXE = os.path.join(HERE, "setup", "bin", "Release", "net48", "Vigil-Setup.exe")
+BAR_OUT = os.path.join(HERE, "bar", "bin", "Release", "net10.0-windows")
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Vigil"
+E2E_ROOT = os.path.join(os.environ.get("TEMP", HERE), "vigil-e2e")
+E2E_PKG = os.path.join(E2E_ROOT, "pkg")             # 模拟分发目录：Vigil-Setup.exe + app\
+E2E_TARGET = os.path.join(E2E_ROOT, "installed")    # 安装目标
+E2E_LNK = os.path.join(os.environ.get("APPDATA", HERE),
+                       "Microsoft", "Windows", "Start Menu", "Programs", "Vigil.lnk")
+
+
+def reg_kv(key: str, value: str) -> str | None:
+    """读 HKCU 任意键的任意值。既有的 reg_run_value() 只管 Run 键那一项，卸载项要另读。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            v, _ = winreg.QueryValueEx(k, value)
+            return v
+    except OSError:
+        return None
+
+
+def long_path(p: str) -> str:
+    r"""把 8.3 短路径还原成长路径再比。
+
+    这台机器的 `%TEMP%` 就是 `C:\Users\WILDCR~1\AppData\...` 那种短形式，而
+    `WScript.Shell` 读回来的 `TargetPath` 是长形式，不还原就对不上（实测红过一次）。
+    """
+    if not p:
+        return ""
+    buf = ctypes.create_unicode_buffer(4096)
+    n = ctypes.windll.kernel32.GetLongPathNameW(p, buf, 4096)
+    return os.path.normcase(buf.value if n else p)
+
+
+def shortcut_target(path: str) -> str | None:
+    """用 WScript.Shell 把 .lnk 读回来验 TargetPath —— 只验文件在等于没验。"""
+    if not os.path.isfile(path):
+        return None
+    ps = ("$w=(New-Object -ComObject WScript.Shell).CreateShortcut('%s'); $w.TargetPath"
+          % path.replace("'", "''"))
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True, errors="replace", timeout=60)
+    return r.stdout.strip() or None
+
+
+def check_installer_e2e() -> None:
+    """静默装到 %TEMP% 再卸掉：装/卸两条路径的唯一真证据。
+
+    载荷用**框架依赖**的开发产物（6.7MB，`BAR_OUT`）而不是 185MB 自包含包：这段验的是
+    "安装/卸载动作对不对"，随附解释器对不对由 verify_package.py 验。两件事分开，
+    别让冒烟等一次 publish。
+
+    这段会 taskkill /f 掉正在跑的状态栏（安装器 spec §5.2 第 1 步本来就要求这么干，
+    `--gui` 段也是这么干的），所以**必须保存并恢复**：原 Run 值、原本是否在跑、跑的是
+    哪个 exe。恢复放在 finally，中途断言失败也要还原。
+    """
+    print("\n== 安装器端到端 ==")
+    if not os.path.isfile(SETUP_EXE):
+        check("Vigil-Setup.exe 存在", False, "先跑 --setup 或 package.cmd")
+        return
+    if not os.path.isfile(os.path.join(BAR_OUT, "Vigil.exe")):
+        check("演练用的开发产物就位", False, f"缺 {BAR_OUT}\\Vigil.exe，先跑 build.cmd")
+        return
+
+    saved_run = reg_run_value()
+    was_running = bool(bar_processes())
+    shutil.rmtree(E2E_ROOT, ignore_errors=True)
+    os.makedirs(os.path.join(E2E_PKG, "app"))
+    shutil.copytree(BAR_OUT, os.path.join(E2E_PKG, "app"), dirs_exist_ok=True)
+    setup = os.path.join(E2E_PKG, "Vigil-Setup.exe")
+    shutil.copy(SETUP_EXE, setup)
+
+    try:
+        r = subprocess.run([setup, "/S", f"/D={E2E_TARGET}", "/NO-START"],
+                           capture_output=True, timeout=900)
+        check("静默安装退出码 0", r.returncode == 0,
+              f"rc={r.returncode}，见 {os.path.join(ds.state_dir(), 'setup.log')}")
+        for rel in ("Vigil.exe", "Vigil.dll", "dsh_state.py", "Vigil-Setup.exe", "Wpf.Ui.dll"):
+            check(f"装完有 {rel}", os.path.isfile(os.path.join(E2E_TARGET, rel)), E2E_TARGET)
+        check("Run 值格式与 App.cs 的写法逐字一致（带引号的 exe 全路径）",
+              reg_run_value() == '"' + os.path.join(E2E_TARGET, "Vigil.exe") + '"',
+              f"实得 {reg_run_value()!r}")
+        check("卸载注册项的 UninstallString 指向安装目录里那份向导",
+              os.path.join(E2E_TARGET, "Vigil-Setup.exe")
+              in (reg_kv(UNINSTALL_KEY, "UninstallString") or ""),
+              reg_kv(UNINSTALL_KEY, "UninstallString") or "键不存在")
+        check("卸载注册项写了 DisplayVersion（「设置 → 应用」里要有版本号）",
+              bool(reg_kv(UNINSTALL_KEY, "DisplayVersion")), "")
+        check("开始菜单 .lnk 存在且 TargetPath 指向装好的 exe",
+              os.path.isfile(E2E_LNK)
+              and long_path(shortcut_target(E2E_LNK) or "")
+              == long_path(os.path.join(E2E_TARGET, "Vigil.exe")),
+              f"lnk={os.path.isfile(E2E_LNK)} target={shortcut_target(E2E_LNK)}")
+        check("安装目录里没有 .new/.old 残留",
+              not os.path.exists(E2E_TARGET + ".new") and not os.path.exists(E2E_TARGET + ".old"), "")
+
+        # 再装一次：走的是 Swap() 里"目标已存在 → 先改名成 .old 再换回来"那条分支。
+        # 不验它的话，升级路径整个是空的，而它恰恰是换电脑后最常走的一条。
+        again = subprocess.run([setup, "/S", f"/D={E2E_TARGET}", "/NO-START"],
+                               capture_output=True, timeout=900)
+        check("重复安装（升级/修复）退出码 0", again.returncode == 0,
+              f"rc={again.returncode}，见 {os.path.join(ds.state_dir(), 'setup.log')}")
+        check("重复安装后 exe 仍在", os.path.isfile(os.path.join(E2E_TARGET, "Vigil.exe")), "")
+        check("重复安装后没有留下 .new/.old 残留",
+              not os.path.exists(E2E_TARGET + ".new") and not os.path.exists(E2E_TARGET + ".old"),
+              "残留就是 Swap 的回收步骤没跑完")
+        check("载荷被压平到安装目录根，没有多出一层 app\\",
+              not os.path.isfile(os.path.join(E2E_TARGET, "app", "Vigil.exe")),
+              "多一层说明 CopyTree 把 PayloadDir 自己当文件复制了")
+
+        u = subprocess.run([os.path.join(E2E_TARGET, "Vigil-Setup.exe"), "/UNINSTALL", "/S"],
+                           capture_output=True, timeout=300)
+        check("从安装目录静默卸载退出码 0", u.returncode == 0, f"rc={u.returncode}")
+        deadline = time.time() + 30
+        while os.path.isdir(E2E_TARGET) and time.time() < deadline:
+            time.sleep(0.5)
+        check("安装目录已删除", not os.path.isdir(E2E_TARGET), E2E_TARGET)
+        check("Run 值已删", reg_run_value() is None, "")
+        check("卸载注册项已删", reg_kv(UNINSTALL_KEY, "DisplayName") is None, "")
+        check("开始菜单 .lnk 已删", not os.path.isfile(E2E_LNK), E2E_LNK)
+        check("默认保留 %LOCALAPPDATA%\\Vigil 数据目录（卸载不毁设置）",
+              os.path.isdir(ds.state_dir()), ds.state_dir())
+    finally:
+        # winreg 的 HKEY 对象没有 .DeleteValue()（那是 win32api 的写法），删值得用模块函数；
+        # 而且卸载已经把它删了，这里要能容忍"本来就没有/已经被删"。
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if saved_run is None:
+                try:
+                    winreg.DeleteValue(k, RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+            else:
+                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, saved_run)
+        if was_running and saved_run:
+            exe = saved_run.strip('"')
+            if os.path.isfile(exe):
+                subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        shutil.rmtree(E2E_ROOT, ignore_errors=True)
+
+
+def check_setup_contract() -> None:
+    """bar/App.cs 与 setup/Installer.cs 之间那几处必须一致的字面量。
+
+    向导编到 net48，不能引用主程序程序集，Run 键/值名/数据目录名是**抄的第二份**。
+    漂了的代价不是编译错误，是面板「开机自动启动」的勾态变假、或者卸完载 Run 值还留着
+    —— 下次开机弹「找不到 Vigil.exe」。这类东西没有别的门禁会红，只能钉在这里。
+    """
+    print("\n== 两个 exe 的契约 ==")
+    app_cs = open(os.path.join(HERE, "bar", "App.cs"), encoding="utf-8").read()
+    setup_path = os.path.join(HERE, "setup", "Installer.cs")
+    if not os.path.isfile(setup_path):
+        check("setup/Installer.cs 存在", False, setup_path)
+        return
+    inst_cs = open(setup_path, encoding="utf-8").read()
+    check("Run 键路径两边各出现一次（改一处就要改另一处）",
+          app_cs.count(r"Software\Microsoft\Windows\CurrentVersion\Run") == 1
+          and inst_cs.count(r"Software\Microsoft\Windows\CurrentVersion\Run") == 1,
+          f"App.cs {app_cs.count('CurrentVersion')} 次")
+    check("值名 Vigil 两边都有",
+          'RunValue = "Vigil"' in app_cs and 'RunKeyValueName = "Vigil"' in inst_cs, "")
+    check("Run 值写法两边都是带引号的 exe 路径",
+          r'Environment.ProcessPath}\"' in app_cs and r'MainExeName)}\"' in inst_cs,
+          "任一边丢了那对引号，安装目录带空格时开机路径就断")
+    check("数据目录名两边都是 Vigil",
+          'StateDirName = "Vigil"' in app_cs and '"Vigil"' in inst_cs, "")
+
+
 def check_engine_copy() -> None:
     print("\n== 产物一致性 ==")
     if not os.path.isfile(BAR_EXE):
@@ -4423,8 +4589,11 @@ def main() -> int:
     if full or "--build" in args:
         check_build()
         check_python_resolution()
+    check_setup_contract()
     check_engine_copy()
     check_licenses()
+    if full or "--setup" in args:
+        check_installer_e2e()
     # 纯读源码、无副作用，所以不放 --gui：默认那轮也要钉住「开窗委托体自带 try」
     # 和「请求文件在开窗之后才删」这两条（外部没法让 PanelWindow 构造必然抛，
     # 见 check_panel_request_guard 的注释）。

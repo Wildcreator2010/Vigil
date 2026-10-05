@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net48 = Win10 1607+/Win11 系统自带，所以向导只有几 KB，而不是再背一份 155MB 的
+         自包含 .NET 10 运行时（spec §3 实测：主程序自包含 publish 是 161MB/255 个文件）。
+         纯代码 WPF，本工程禁止出现 .xaml：XAML 标记编译要 PresentationBuildTasks，
+         它不在 dotnet SDK 里，只有装了 VS 的机器编得动。
+         也不写 <UseWPF>：那个开关会把 SDK 拉进 XAML 编译管线，net48 + 无 VS 时正是它编不动。 -->
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>Vigil-Setup</AssemblyName>
+    <RootNamespace>Vigil.Setup</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\bar\assets\dsh.ico</ApplicationIcon>
+    <WarningLevel>4</WarningLevel>
+    <!-- 版本号不在这里写：package.cmd 用同一个 -p:Version 同时喂主程序和向导，
+         两边 AssemblyVersion 相等才有意义（冒烟的契约门禁看这个）。 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="PresentationFramework" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+    <!-- dynamic 调 WScript.Shell 建 .lnk 的运行期支撑；net48 不默认引用 -->
+    <Reference Include="Microsoft.CSharp" />
+    <!-- 「浏览…」用 FolderBrowserDialog；系统程序集，不是新依赖 -->
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 不装 VS/.NET Framework SDK 也能编 net48 的关键 -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
