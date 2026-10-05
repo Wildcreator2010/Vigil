@@ -346,6 +346,89 @@ def shortcut_target(path: str) -> str | None:
     return r.stdout.strip() or None
 
 
+def setup_window_dump(*extra_args: str) -> dict[str, str] | None:
+    """开一次向导 GUI，用 UIA 把界面上的文字与按钮名读回来，读完收干净。
+
+    失败（等不到窗口 / UIA 报错）返回 None，由调用处记 ✗。
+    """
+    if not os.path.isfile(SETUP_EXE):
+        return None
+    proc = subprocess.Popen([SETUP_EXE, *extra_args], cwd=os.path.dirname(SETUP_EXE))
+    try:
+        deadline = time.time() + 30
+        hwnd = 0
+        while time.time() < deadline and not hwnd:
+            hwnd = top_window("Vigil 安装")
+            time.sleep(0.5)
+        if not hwnd:
+            return None
+        res = uia(hwnd, "text")
+        if not uia_ok(res):
+            return None
+        return {"names": "\n".join(res.get("TEXT", [])),
+                "buttons": "|".join(res.get("BUTTONS", [])),
+                "edits": str(len(res.get("EDITS", [])))}
+    finally:
+        proc.kill()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+        # 窗口杀完进程可能还在（WPF 的 ShutdownMode 与子进程），统一再收一次。
+        subprocess.run(["taskkill", "/f", "/im", "Vigil-Setup.exe"], capture_output=True)
+
+
+def check_setup() -> None:
+    print("\n== 安装向导 ==")
+    if not shutil.which("dotnet"):
+        check("dotnet 可用", False, "PATH 里没有 dotnet")
+        return
+    log = os.path.join(HERE, "setup-build.log")
+    with open(log, "w", encoding="utf-8") as f:      # 别接管道：管道会吞掉退出码
+        p = subprocess.run(["dotnet", "build", "setup/Vigil.Setup.csproj", "-c", "Release",
+                            "--nologo", "-t:Rebuild"], stdout=f, stderr=subprocess.STDOUT,
+                           timeout=900, cwd=HERE)
+    text = open(log, encoding="utf-8", errors="replace").read()
+    warns = [l for l in text.splitlines() if ": warning " in l]
+    errs = [l for l in text.splitlines() if ": error " in l]
+    check("向导编译成功", p.returncode == 0, text[-400:])
+    check("向导 0 错误", not errs, "\n".join(errs[:3]))
+    check("向导 0 警告", not warns, "\n".join(dict.fromkeys(w.split(": warning ")[1][:120] for w in warns)))
+    check("向导产物很小（靠系统自带的 .NET Framework，不是再来一份 155MB 运行时）",
+          os.path.isfile(SETUP_EXE) and os.path.getsize(SETUP_EXE) < 200_000,
+          f"{os.path.getsize(SETUP_EXE) if os.path.isfile(SETUP_EXE) else '缺文件'} 字节")
+    check("输出里没有 PresentationFramework.dll（证明真的靠系统运行时）",
+          not os.path.isfile(os.path.join(os.path.dirname(SETUP_EXE), "PresentationFramework.dll")), "")
+    check("setup/ 里没有 .xaml（XAML 标记编译不在 dotnet SDK 里，带了就编不动）",
+          not glob.glob(os.path.join(HERE, "setup", "**", "*.xaml"), recursive=True), "")
+
+    # 两种安装状态各开一次窗口。不指 /D= 的话文案就取决于本机装没装过，门禁会随机器漂；
+    # 指两个定死的目录，「安装」和「修复」这两条才同时可验。
+    fresh = os.path.join(E2E_ROOT, "gui-fresh")
+    same = os.path.join(E2E_ROOT, "gui-same")
+    shutil.rmtree(E2E_ROOT, ignore_errors=True)
+    os.makedirs(os.path.join(same))
+    shutil.copy(os.path.join(BAR_OUT, "Vigil.exe"), os.path.join(same, "Vigil.exe"))
+
+    dump = setup_window_dump("/D=" + fresh)
+    check("双击即用的安装窗口（标题「Vigil 安装」，UIA 读得到）", dump is not None,
+          "30 秒内没等到窗口，或 UIA 读不出内容")
+    if dump:
+        check("界面上有安装目录、开机自动启动、快捷方式三样东西",
+              all(k in dump["names"] for k in ("安装目录", "开机自动启动", "快捷方式")),
+              dump["names"][:400])
+        check("未安装状态主按钮写「安装」（不是「修复」）",
+              "安装" in dump["buttons"] and "修复" not in dump["buttons"],
+              f"BUTTONS={dump['buttons']}")
+        check("目录框是一个能改的编辑框（不是只读标签）", dump["edits"] != "0", dump["edits"])
+
+    dump2 = setup_window_dump("/D=" + same)
+    check("已装同版本时主按钮写「修复」",
+          dump2 is not None and "修复" in dump2["buttons"],
+          "" if dump2 else "没等到窗口")
+    shutil.rmtree(E2E_ROOT, ignore_errors=True)
+
+
 def check_installer_e2e() -> None:
     """静默装到 %TEMP% 再卸掉：装/卸两条路径的唯一真证据。
 
@@ -4593,6 +4676,7 @@ def main() -> int:
     check_engine_copy()
     check_licenses()
     if full or "--setup" in args:
+        check_setup()
         check_installer_e2e()
     # 纯读源码、无副作用，所以不放 --gui：默认那轮也要钉住「开窗委托体自带 try」
     # 和「请求文件在开窗之后才删」这两条（外部没法让 PanelWindow 构造必然抛，
