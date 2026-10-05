@@ -2234,12 +2234,21 @@ switch ($Action) {
     # 挤压后的排版，比样照样 0.95+（Task 7 复核 I4）。所以直接量控件的包围盒。
     # 只算 Name 长度 >= 24 的 TextBlock：标题和按钮文字本来就短，不参与。
     # 外壳宽度是这条换算的分母，它自己由「面板窗口是默认的 960×640」那条前提断言钉着。
+    #
+    # **只看内容列**（左边距 > 188 DIP，即侧栏之外）：这条量的是 Ui.Row 的 Star 列被
+    # 右侧字段挤没挤，而侧栏那行 VersionLine 的窄是它自己的设计（188 宽的铁轨里
+    # 减掉边距只剩 ~164 DIP，还带 TextWrapping）。把它算进来，量到的就不是"被挤坏"
+    # 而是"侧栏本来就窄"。改名那次（c5ea33e）给 VersionText 加了种加词代号，
+    # 长度从 <24 涨到 34，于是这条一直在替侧栏报警 —— 面板当时又开不出来，没人看见。
+    # 换算成 DIP 再比，别学 scrolls 那个 -gt 200 的裸像素（DPI 一缩放就偏）。
     $scW = $root.Current.BoundingRectangle.Width / 960.0
     $min = -1; $who = ''
     foreach ($e in $all) {
       if ($e.Current.ClassName -ne 'TextBlock') { continue }
       $n = $e.Current.Name
       if ($n.Length -lt 24) { continue }
+      $x = $e.Current.BoundingRectangle.X
+      if ((($x - $rx) / $scW) -lt 190) { continue }
       $wd = [int](($e.Current.BoundingRectangle.Width) / $scW)
       if ($min -lt 0 -or $wd -lt $min) { $min = $wd; $who = $n.Substring(0, 20) }
     }
