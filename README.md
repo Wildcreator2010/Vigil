@@ -24,9 +24,13 @@
 ## 快速开始
 
 ```bat
-build.cmd        :: dotnet build -c Release
+build.cmd        :: dotnet build -c Release（开发期：框架依赖，只在装了 .NET 10 SDK 的机器上跑）
 start-bar.bat    :: 启动 bar\bin\Release\net10.0-windows\Vigil.exe
+package.cmd      :: 出可分发到任何电脑的零前置安装包（见下一节）
 ```
+
+`build.cmd` 和 `package.cmd` 是两条路，别混：前者 6.7MB、秒编、要求本机有运行时；
+后者 184MB 自包含、要跑几分钟、产物什么都不要求。
 
 启动前可以先验证引擎能读懂你机器上的 dsh 会话：
 
@@ -39,10 +43,46 @@ python test_dsh_state.py --live
 
 ```bat
 python smoke_test.py           :: 引擎与 CLI 契约，无副作用
-python smoke_test.py --all     :: 加上 Release 编译和状态栏 GUI 冒烟
+python smoke_test.py --setup   :: 编译安装向导 + 开一次窗口读控件 + 静默装到 %TEMP% 再卸载
+python smoke_test.py --package :: 校验 dist/ 分发产物（随附解释器跑真引擎、两个 exe 版本对齐）
+python smoke_test.py --all     :: 上面全部 + Release 编译 + 状态栏 GUI 冒烟
 ```
 
 `--gui` 会真的往任务栏里挂一次状态栏，结束时强杀掉，不会留下实例。
+
+## 装到任何电脑
+
+前提：**Win10 1607+ / Win11，x64**。不需要预装 .NET，不需要预装 Python，不需要管理员权限；
+装到目标机的全过程不碰网络。注意区分：**打包**那台机器要联网（首次拉 NuGet 的运行时包、
+下 12MB 的 CPython embeddable），目标机什么都不用下。支持面到此为止 —— .NET 10 的 WPF
+不支持 Win7/8。
+
+```bat
+package.cmd                       :: 产出 dist\Vigil-<版本>-win-x64\ 与同名 zip（约 83MB）
+package.cmd --verify-only         :: 只校验已有产物（冒烟走这条，不重新 publish）
+```
+
+把 zip 拷到目标机 → **整个文件夹解压出来**（别在压缩包里双击）→ 双击 `Vigil-Setup.exe`。
+没代码签名，SmartScreen 会拦一次，点「更多信息 → 仍要运行」。装到
+`%LOCALAPPDATA%\Programs\Vigil`，只写 `HKCU`，装完在「设置 → 应用」里能看到、也能从那里卸载。
+
+命令行 / 无人值守：
+
+```bat
+Vigil-Setup.exe /S /D=D:\Vigil                :: 静默安装
+Vigil-Setup.exe /UNINSTALL /S                 :: 静默卸载（默认保留设置与余额 Key）
+Vigil-Setup.exe /S /NO-AUTOSTART /NO-START    :: 不写开机自启、装完不启动
+```
+
+里面装了什么：自包含的 .NET 10 运行时（161MB / 255 个文件）+ CPython 3.14.7 embeddable
+（24MB，状态引擎靠它解会话文件的 zstd 帧）+ `dsh_state.py` + 安装向导。
+第三方许可证原文随附在 `licenses\`，见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 第 4 节。
+
+想单独用引擎，不必装任何东西：
+
+```bat
+%LOCALAPPDATA%\Programs\Vigil\runtime\python\python.exe %LOCALAPPDATA%\Programs\Vigil\dsh_state.py --pretty
+```
 
 ## 怎么嵌进任务栏的
 
@@ -147,7 +187,10 @@ Key 存在 `%LOCALAPPDATA%\Vigil\balance.protected`，用当前 Windows 账户�
 | `bar/Panel/` | 控制面板（控制台）：左侧导航 + 概览/通知/外观/运行/余额/关于六页，余额 Key 在「余额」页录入 |
 | `test_dsh_state.py` | 16 个状态用例 + 端到端临时会话目录断言，`--live` 加真实数据冒烟 |
 | `smoke_test.py` | 冒烟工具：CLI 契约 + `--demo` 全状态 + 余额 Key 存取，`--build`/`--gui` 加编译与停靠校验 |
-| `build.cmd` `start-bar.bat` | 编译 / 启动 |
+| `build.cmd` `start-bar.bat` | 开发期编译 / 启动 |
+| `setup/` | 安装向导（net48 纯代码 WPF，26KB；`Installer.cs` 干活、`Ui.cs` 画界面、`Program.cs` 分参数） |
+| `package.cmd` | 出零前置分发物：自包含 publish + 随附 CPython + 收许可证原文 + 校验 + 压 zip |
+| `tools/` | 打包配套的常设脚本：`verify_package.py`（产物校验）、`collect_licenses.py`（收第三方许可证原文）、`read_version.py`、`write_readme_install.py` |
 | `LICENSE` | 本项目自身的 MIT 许可证全文 |
 | `THIRD-PARTY-NOTICES.md` | 第三方组件与素材的归属声明（含 WPF-UI 及其传递依赖的许可证原文） |
 
@@ -182,7 +225,12 @@ DeepSeek Harness 把每个会话的完整事件流写在
 - **托盘显示「未运行」但 Harness 开着**：按进程名 `DeepSeek Harness.exe` 判断，改了安装名就改 `APP_EXES`。
 - **状态一直「待命」**：`python dsh_state.py --pretty` 会显示最后事件与静默秒数，确认 `~/.dsh/sessions/` 在动。
 - **余额报 401**：Key 无余额查询权限或已失效，到平台控制台 API Keys 页确认。
-- **`No module named 'compression'`**：Python 低于 3.14，升级或用 `py -3.14`。
+- **`No module named 'compression'`**：那是 Python 低于 3.14。用 `package.cmd` 出的安装包
+  不会遇到 —— 随附的 `runtime\python\` 里带了 `_zstd.pyd`。只有你**手动**拿系统 Python
+  跑引擎时才需要 3.14；不确定它认的是哪个解释器就 `Vigil.exe --engine-probe`，
+  正常应输出安装目录里那份 `runtime\python\python.exe`。
+- **换电脑后余额不显示**：Key 用当前 Windows 账户的 DPAPI 加密，换机器/换账户必然读不出来，
+  重新录一次即可（这是 DPAPI 的设计，不是 bug）。
 - **开机自启**：菜单勾选即可（写 `HKCU\...\Run` 的 `Vigil` 值指向 `Vigil.exe`），取消勾选删除。
 - **停掉状态栏**：托盘菜单「退出」；命令行用 `taskkill /f /im Vigil.exe`（引擎子进程靠 stdout 管道
   断裂随后自行退出，不会留孤儿）。不带 `/f` 的优雅关闭**无效**：窗口已经是 `Shell_TrayWnd` 的子窗口，
@@ -191,8 +239,10 @@ DeepSeek Harness 把每个会话的完整事件流写在
 ## 开源协议
 
 本项目以 **MIT 许可证**开源（见 [`LICENSE`](LICENSE)）；所有第三方组件、字体与设计参照的归属声明见
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)——随产物分发的每一条都附了许可证原文，
-运行时依赖（.NET、Python 标准库）不随附其代码，只写用途与版本下限。
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)——随产物分发的每一条都附了许可证原文。
+零前置安装包会把 .NET 运行时二进制与 CPython embeddable 解释器一起带走，因此这两者的
+许可证原文也随包分发在 `licenses\`（`.NET` 是 MIT、`Python` 是 PSF License），
+由 `tools/collect_licenses.py` 自动收集、`tools/verify_package.py` 断言齐全。
 
 ## 致谢
 
