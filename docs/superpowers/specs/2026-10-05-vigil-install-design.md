@@ -289,3 +289,28 @@ package.cmd [win-x64|win-arm64]
 | `python314._pth` 的 isolated 模式 | 引擎拆多文件即失效 | 设计约束记进本文，未来拆文件要同时改 `._pth` |
 | 卸载删不掉自身 | 留下垃圾目录 | §5.5 的 temp 副本重启法 + 端到端演练断言 |
 | net48 向导在极端精简的 Windows 上无 .NET Framework | 向导起不来 | Win10 1607+ 一律自带 4.8+；真遇到就退回静默脚本（不在本次范围） |
+
+---
+
+## 12. 实现期间对设计的修正（2026-10-05，全部实测得出）
+
+设计里写对了的部分不再重复；这一节只记**设计没料到、实现时改掉**的事。
+
+| # | 设计原样 | 实现改成 | 由头 |
+| --- | --- | --- | --- |
+| 1 | §5.6 只有 `/D=` 一个目录参数 | 卸载时若没给 `/D=`，**认向导自己所在目录**为安装目录 | 注册表里的 `UninstallString` 是 `"<目录>\Vigil-Setup.exe" /UNINSTALL`，不带 `/D=`；照原设计会拿默认路径去删一个不存在的地方，表现是「卸载成功但文件全在」 |
+| 2 | §5.5 用字符串前缀判断"我是不是在被删的目录里" | 两边先 `GetLongPathNameW` 还原本地长路径再比 | `AppDomain.BaseDirectory` 给 8.3 短形式（`C:\Users\WILDCR~1\...`），`MainModule.FileName` 给长形式，`StartsWith` 永远不等 → 走"直接删"分支，撞在正在运行的 exe 上抛 `UnauthorizedAccessException` |
+| 3 | §5.5 父进程 `SelfDelete` 临时副本 | 改成**副本自己**排延后自删 | 副本还在运行时，父进程替它 `del` 必然失败（镜像被锁） |
+| 4 | §8 的 `package.cmd` 内含中文注释与中文文件名 | 批处理**纯 ASCII**；中文文件名由 `tools/write_readme_install.py` 自己拼 | zh-CN 代码页下，`rem` 行里的 UTF-8 中文会吞掉行尾，注释尾巴被当成命令执行，前面几步被整段跳过（实测：直接跳到 `[5/6]`） |
+| 5 | §8 第 8 步 `tar -a -cf` | 一律写 `%SystemRoot%\System32\tar.exe` | 开发机 PATH 上 Git Bash 的 GNU tar 排在前头，它读不了 zip：`This does not look like a tar archive` |
+| 6 | §4 分发物只有 `LICENSE.txt` + `THIRD-PARTY-NOTICES.md` | 新增 `licenses\`：`.NET` 两份 MIT 原文 + `python-PSF.txt` + 索引，由 `tools/collect_licenses.py` 从 NuGet 缓存与 embeddable 包原样收集 | `--self-contained` 是在**分发 .NET 运行时的二进制**，MIT 要求版权声明随副本保留；只在仓库声明文件里写一句"人家是 MIT"不满足条件 |
+| 7 | §9 的 `--package` 只跑 `verify_package.py` | 再加一条：把 `PATH` 削到只剩 `System32` 后跑产物里的 `Vigil.exe --engine-probe` | 原设计那条在宿主 PATH 下跑，挡不住"其实靠的是宿主 python"——而"零前置"要证的恰恰是这件事 |
+8 | §7 "复制中可取消 = 丢弃 `.new`" | 未实现中止复制，复制期间禁用主按钮，`.new` 由下次安装的 `Sweep()` 清 | 几十秒的复制要真中止就得等句柄释放，收益不值；原子性承诺（不留半个装不开的安装）不受影响 |
+
+### 验收补记
+
+- 真产物（184MB）静默安装耗时 2s；装好后 `PATH` 只剩 `System32` 时 `--engine-probe` 仍指向
+  `runtime\python\python.exe`、`zstd=ok`；启动后 `find_bar_windows()` 找到 1 个状态栏窗口，
+  矩形 `(6,915)-(205,957)`；`/UNINSTALL /S` 退出码 0、目录删净、`%LOCALAPPDATA%\Vigil` 保留。
+- **未做**：真正的第二台干净机器验证（本机已装 .NET/Python，只能靠削 `PATH` 逼近）。
+  无签名产物在别的机器上被 SmartScreen / 杀软拦住的体验仍未验证，spec §11 那条风险仍然挂着。
