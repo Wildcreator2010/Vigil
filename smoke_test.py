@@ -2217,6 +2217,9 @@ switch ($Action) {
     Write-Output ("EXTENT=" + [int]$s.Current.ExtentHeight)
     Write-Output ("VIEWPORT=" + [int]$s.Current.ViewportHeight)
     Write-Output ("PCT=" + [int]$s.Current.VerticalPercent)
+    # 被测那个 ScrollViewer 自己的高度：重排没落定时它会一直变，等它稳定下来比睡固定秒数可靠
+    # （EXTENT/VIEWPORT 在本机恒为 0，用不了，所以单独报几何）。
+    Write-Output ("SVH=" + [int]$scrolls[0].Current.BoundingRectangle.Height)
     if ($Value -eq 'down') {
       $s.SetScrollPercent(-1, 100)
       Start-Sleep -Milliseconds 800
@@ -2811,13 +2814,25 @@ def check_panel_settings_live() -> None:
         u = _user32()
         l, t, r, b = rect_of(hwnd)
         u.SetWindowPos(hwnd, 0, l, t, 760, 500, 0x0004 | 0x0010)  # NOZORDER|NOACTIVATE
-        time.sleep(2.5)  # 等布局落定：不然「画面变了」会把重排算成滚动
-        sc = uia(hwnd, "scroll")
+        # 等**几何稳定**而不是睡固定秒数：重排没落定就取基线的话，"画面变了"会被算成"滚动了"。
+        # 这里是这一整段最后一条固定 sleep（其余三处 Task 7 已改成等条件），而它恰好是
+        # 2026-10-05 那次「可滚=False / 滚回顶部差 800 行」最说得通的落点：机器忙时
+        # 2.5 秒不够，量到的是重排中间态。条件用 SVH（被测 ScrollViewer 的高度）连读两次不变。
+        sc: dict = {}
+        prev_h = -1
+        settle_deadline = time.time() + 20
+        while time.time() < settle_deadline:
+            sc = uia(hwnd, "scroll")
+            cur_h = int((sc.get("SVH") or ["-1"])[0])
+            if uia_ok(sc) and cur_h > 0 and cur_h == prev_h:
+                break
+            prev_h = cur_h
+            time.sleep(0.8)
         can = (sc.get("VSCROLLABLE") or ["False"])[0] == "True"
         check("窗口收到最小尺寸时运行页真的可滚（页内 ScrollViewer 报 VerticallyScrollable=true）",
               uia_ok(sc) and can,
-              f"VerticallyScrollable={can} extent={sc.get('EXTENT')} viewport={sc.get('VIEWPORT')}"
-              f"（WPF 的 ScrollViewerAutomationPeer 在本机把 extent/viewport 都报 0，"
+              f"VerticallyScrollable={can} extent={sc.get('EXTENT')} viewport={sc.get('VIEWPORT')} "
+              f"SVH={sc.get('SVH')}（WPF 的 ScrollViewerAutomationPeer 在本机把 extent/viewport 都报 0，"
               f"所以这两值只作现场、不进判据；可滚性看 VerticallyScrollable）；{sc.get('ERR')}")
         scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
         shot = os.path.join(ds.state_dir(), "t6-scroll.png")
@@ -3747,7 +3762,12 @@ def check_panel_direct_page() -> None:
         for page in PANEL_PAGES:
             if os.path.isfile(req):
                 os.remove(req)
-            subprocess.run([BAR_EXE, "--panel", page], cwd=os.path.dirname(BAR_EXE), timeout=30)
+            # 用 Popen 而不是 run(timeout=30)：这句的本意是"二次实例把请求递进去就退"，
+            # 可一旦常驻实例不在了（前面的门禁把它收了、或前台被抢导致它没起来），
+            # 这一句就变成**冷启动一个不退出 Vigil 主进程**，run() 必然等满 30 秒抛
+            # TimeoutExpired，把整轮冒烟带崩（2026-10-05 实测：崩在 --panel about）。
+            # 请求到底递没递进去，下面那个"请求文件是否被消费"的轮询才是判据。
+            subprocess.Popen([BAR_EXE, "--panel", page], cwd=os.path.dirname(BAR_EXE))
             t1 = time.time()
             while time.time() - t1 < 12 and os.path.isfile(req):
                 time.sleep(0.3)
