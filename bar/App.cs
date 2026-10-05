@@ -716,7 +716,7 @@ namespace Vigil
         ///     模块的 3.12（本机 uv 那份就是），于是状态栏启动即弹「引擎不可用」；
         ///   ③ py 启动器报的 3.14 实路径，再兜底 C:\Python314。
         /// </summary>
-        private static string ResolvePython()
+        internal static string ResolvePython()
         {
             if (_pythonCache != null) return _pythonCache.Length == 0 ? null : _pythonCache;
             foreach (var cand in PythonCandidates())
@@ -819,6 +819,9 @@ namespace Vigil
             }
             catch { return false; }
         }
+
+        /// <summary>关于页用：当前解析到的解释器路径。复用 ResolvePython，别再抄一份查找逻辑。</summary>
+        internal static string EnginePathForDisplay() => ResolvePython() ?? "未找到能解 zstd 的 Python 3.14";
 
         /// <summary>`Vigil.exe --engine-probe`：只报解析结果就退，不开窗口、不抢单实例。</summary>
         private static int EngineProbe()
@@ -1239,6 +1242,10 @@ namespace Vigil
             _miAuto = Add(menu, "开机自动启动", (s, e) => ToggleAutostart(!_miAuto.Checked));
             _miAuto.CheckOnClick = false;
             Add(menu, "打开日志", (s, e) => OpenLog());
+            // 卸载交给安装目录里那份向导（它知道怎么删正在运行的自己）。开发目录里没有
+            // 那个文件，所以按存在与否置灰 —— 别让它点了以后抛异常。
+            string setupExe = Path.Combine(AppContext.BaseDirectory, "Vigil-Setup.exe");
+            Add(menu, "卸载…", (s, e) => UninstallViaSetup(setupExe), File.Exists(setupExe));
             menu.Items.Add(new ToolStripSeparator());
             Add(menu, "退出", (s, e) => System.Windows.Application.Current?.Shutdown());
 
@@ -1481,6 +1488,24 @@ namespace Vigil
             _client?.Dispose();
             _client = null;
             StartClient();
+        }
+
+        /// <summary>
+        /// 卸载交给安装目录里那份向导。它第一步就是 taskkill /f 我们自己（状态栏窗口是
+        /// Shell_TrayWnd 的子窗口，不带 /f 关不掉），所以这里先主动退场，让它删得干净。
+        /// </summary>
+        private static void UninstallViaSetup(string setupExe)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(setupExe, "/UNINSTALL") { UseShellExecute = true });
+                Log("已请求卸载");
+                System.Windows.Application.Current?.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Balloon("启动卸载程序失败", ex.Message, ToolTipIcon.Error);
+            }
         }
 
         private static bool AutostartEnabled()

@@ -380,6 +380,38 @@ def setup_window_dump(*extra_args: str) -> dict[str, str] | None:
         subprocess.run(["taskkill", "/f", "/im", "Vigil-Setup.exe"], capture_output=True)
 
 
+def check_about_page() -> None:
+    """关于页要能回答"这台机器上它到底认了哪个解释器"——换电脑排障的第一个问题。"""
+    print("\n== 关于页 ==")
+    src = os.path.join(HERE, "bar", "Panel", "Pages", "AboutPage.cs")
+    if not os.path.isfile(src):
+        check("AboutPage.cs 存在（占位类还留在 Pages.cs 里）", False, src)
+    else:
+        text = open(src, encoding="utf-8").read()
+        for label in ("安装位置", "版本", "检测引擎"):
+            check(f"关于页有「{label}」这一行", label in text, "缺该文案")
+        check("关于页的颜色走主题键（不写死刷子）",
+              "Ui.Ref(" in text and "Brushes.Black" not in text,
+              "写死颜色切到深色主题就是黑底黑字")
+        check("关于页不自己拼版本数字，取 App.VersionText", "App.VersionText" in text,
+              "自己拼就会和 csproj 的 <Version> 漂移")
+
+    if not os.path.isfile(BAR_EXE):
+        check("Vigil.exe 存在", False, "先跑 --build")
+        return
+    # 走离屏出图而不是真窗口：`--panel about` 那条冷启动通路目前被一个**既有故障**挡着
+    # （PanelWindow 的 WPF-UI backdrop 抛 "Cannot apply backdrop effect if
+    # ExtendsContentIntoTitleBar is false"，在 7dd8610 基线 worktree 上同样红，与安装功能无关）。
+    # 判据沿用 check_pages_filled 的口径：占位页实测 7 色 / 0 不透明像素。
+    if bar_processes():
+        check("离屏出图前无残留实例", False, "已有 Vigil 在跑")
+        return
+    _fp, colors, opaque = shot_fp("about", "about")
+    check("关于页已画出真实内容（离屏色数 > 20，占位页实测 7）", colors > 20,
+          f"色数 {colors}、不透明 {opaque}")
+    check("关于页不再是透明占位（不透明像素 > 0）", opaque > 0, f"不透明像素 {opaque}")
+
+
 def check_setup() -> None:
     print("\n== 安装向导 ==")
     if not shutil.which("dotnet"):
@@ -459,6 +491,26 @@ def check_package() -> None:
         size = os.path.getsize(zips[0])
         check("zip 体积在合理区间（自包含载荷压缩后 40–200MB）", 40_000_000 < size < 200_000_000,
               f"{size} 字节")
+
+    # 这条才是「零前置」的直接证据：把 PATH 削到只剩 System32（本机 python、py、uv 全都看不见），
+    # 产物里的 Vigil 仍然必须认随附解释器。上面 verify_package.py 那条是在本机 PATH 下跑的，
+    # 挡不住"其实靠的是宿主 python"这种情况。
+    app = os.path.join(target, "app")
+    exe = os.path.join(app, "Vigil.exe")
+    if os.path.isfile(exe):
+        sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        r = subprocess.run([exe, "--engine-probe"], capture_output=True, text=True,
+                           errors="replace", timeout=180, cwd=app,
+                           env={"PATH": sys32, "SystemRoot": os.environ.get("SystemRoot", ""),
+                                "TEMP": os.environ.get("TEMP", ""), "TMP": os.environ.get("TMP", ""),
+                                "USERPROFILE": os.environ.get("USERPROFILE", ""),
+                                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
+                                "APPDATA": os.environ.get("APPDATA", "")})
+        kv = dict(l.split("=", 1) for l in (r.stdout or "").splitlines() if "=" in l)
+        check("PATH 被削到只剩 System32（模拟没装 Python 的机器），仍认随附解释器",
+              os.path.normcase(kv.get("python", ""))
+              == os.path.normcase(os.path.join(app, "runtime", "python", "python.exe")),
+              f"rc={r.returncode} 实得 {kv.get('python')}")
 
 
 def check_installer_e2e() -> None:
@@ -4763,6 +4815,9 @@ def main() -> int:
         check_panel_cold_open()
         check_panel_request_containment()
         check_panel_request_race()
+        # 这段会 taskkill /f /im Vigil.exe 全量收进程，放在最后，别打乱前面那些
+        # 对"当前注入的是哪一帧"敏感的比样门禁。
+        check_about_page()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")
 
