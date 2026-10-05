@@ -236,6 +236,72 @@ def check_key_storage() -> None:
             open(token, "wb").write(token_backup)
 
 
+def find_zstdless_python() -> str | None:
+    """找一个**确实没有** `compression.zstd` 的解释器，用来毒化 PATH。
+
+    本机 uv 装的 cpython-3.12 就是现成的靶子（`py -0p` 列出来的第二项）。这条门禁的意义
+    全在这个靶子上：没有它，「PATH 第一个 python 抢跑」这个真 bug（旧 `ResolvePython`
+    会选中 3.12，`import compression` 即失败）就没人看着。找不到靶子就记 ✗，别默默放过。
+    """
+    root = os.path.expandvars(r"%APPDATA%\uv\python")
+    for exe in sorted(glob.glob(os.path.join(root, "*", "python.exe"))):
+        r = subprocess.run([exe, "-c", "import compression.zstd"], capture_output=True, timeout=30)
+        if r.returncode != 0:
+            return exe
+    return None
+
+
+def probe_python(env: dict | None = None) -> dict[str, str]:
+    """跑 `Vigil.exe --engine-probe`，把 stdout 那几行 `k=v` 收成 dict（含 `_rc`）。
+
+    用 Popen + 超时后 kill，而不是 `subprocess.run(timeout=)`：`--engine-probe` 没被实现
+    认出来之前，Vigil 会把它当普通参数、直接起状态栏并且**永不退出**，`run()` 抛
+    `TimeoutExpired` 会把整轮冒烟带崩（本文件一贯的口径是不让 traceback 收场）。
+    """
+    p = subprocess.Popen([BAR_EXE, "--engine-probe"], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, errors="replace",
+                         cwd=HERE, env=env)
+    try:
+        out, _ = p.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, _ = p.communicate()
+        return {"_rc": "timeout",
+                "_note": "--engine-probe 不被识别，Vigil 当成常规启动把状态栏拉起来了（60 秒没退）"}
+    kv = dict(l.split("=", 1) for l in (out or "").splitlines() if "=" in l)
+    kv["_rc"] = str(p.returncode)
+    return kv
+
+
+def check_python_resolution() -> None:
+    print("\n== 解释器解析 ==")
+    if not os.path.isfile(BAR_EXE):
+        check("Vigil.exe 存在", False, "先跑 --build 或 build.cmd")
+        return
+    kv = probe_python()
+    check("--engine-probe 解析成功并吐出三行",
+          kv.get("_rc") == "0" and kv.get("zstd") == "ok"
+          and os.path.isabs(kv.get("python", "")) and os.path.isfile(kv.get("engine", "")),
+          f"实得 {kv}")
+    if kv.get("python") and kv.get("python") != "none":
+        q = subprocess.run([kv["python"], "-c", "import compression.zstd"],
+                           capture_output=True, timeout=30)
+        check("报告的解释器真能 import compression.zstd", q.returncode == 0,
+              q.stderr.decode("utf-8", "replace")[:200])
+
+    poison = find_zstdless_python()
+    check("找到无 zstd 的解释器作为毒化靶子（找不到这条就失效）", poison is not None,
+          f"扫 {os.path.expandvars('%APPDATA%\\uv\\python')} 没找到 3.13 及以下的解释器")
+    if poison:
+        pdir = os.path.dirname(poison)
+        env = dict(os.environ, PATH=pdir + os.pathsep + os.environ.get("PATH", ""))
+        kv2 = probe_python(env)
+        got = os.path.normcase(os.path.dirname(kv2.get("python", "")))
+        check("把无 zstd 的解释器插到 PATH 最前面，解析结果不被它带走",
+              kv2.get("_rc") == "0" and got != os.path.normcase(pdir),
+              f"毒化目录 {pdir}，实选 {kv2.get('python')}")
+
+
 def check_engine_copy() -> None:
     print("\n== 产物一致性 ==")
     if not os.path.isfile(BAR_EXE):
@@ -4356,6 +4422,7 @@ def main() -> int:
     check_key_storage()
     if full or "--build" in args:
         check_build()
+        check_python_resolution()
     check_engine_copy()
     check_licenses()
     # 纯读源码、无副作用，所以不放 --gui：默认那轮也要钉住「开窗委托体自带 try」

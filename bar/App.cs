@@ -162,6 +162,7 @@ namespace Vigil
                     shotPage = args[++i];
                     shotOut = args[++i];
                 }
+                else if (args[i] == "--engine-probe") return EngineProbe();
             }
 
             // shot 模式不开窗口、不抢单实例，状态栏正在跑时也能出图，所以在互斥体之前就返回。
@@ -661,7 +662,9 @@ namespace Vigil
             if (python == null || !File.Exists(engine))
             {
                 Log($"找不到引擎或 python engine={engine} python={python ?? "null"}");
-                Balloon("状态检测引擎不可用", "请确认 dsh_state.py 与 python 3.14 就位", ToolTipIcon.Error);
+                Balloon("状态检测引擎不可用",
+                        "随附解释器 runtime\\python\\python.exe 缺失，且系统里找不到能解 zstd 的 Python 3.14",
+                        ToolTipIcon.Error);
                 return;
             }
             _client = new StateClient(python, engine, _settings.Interval);
@@ -701,25 +704,133 @@ namespace Vigil
             }
         }
 
+        // 解释器解析结果进程内缓存：能力探测要开子进程，别挂在每次轮询/重启引擎上反复跑。
+        // "" 是"全部候选都试过都不行"的哨兵值，跟 null（还没探）区分开。
+        private static string _pythonCache;
+
+        /// <summary>
+        /// 找一个能 `import compression.zstd` 的 Python。三级顺序，每一级都要过探测：
+        ///   ① 随附的 runtime\python\python.exe —— 安装目录里必然在，排第一是因为它
+        ///     **不受宿主 PATH 影响**，这是"零前置"的落点；
+        ///   ② PATH 上的 python/python3 —— 旧实现取第一个就返回，会选中没有 compression
+        ///     模块的 3.12（本机 uv 那份就是），于是状态栏启动即弹「引擎不可用」；
+        ///   ③ py 启动器报的 3.14 实路径，再兜底 C:\Python314。
+        /// </summary>
         private static string ResolvePython()
         {
+            if (_pythonCache != null) return _pythonCache.Length == 0 ? null : _pythonCache;
+            foreach (var cand in PythonCandidates())
+            {
+                if (HasZstd(cand)) { _pythonCache = cand; return cand; }
+            }
+            _pythonCache = "";
+            return null;
+        }
+
+        private static IEnumerable<string> PythonCandidates()
+        {
+            var bundled = Path.Combine(AppContext.BaseDirectory, "runtime", "python", "python.exe");
+            if (File.Exists(bundled)) yield return bundled;
+
             foreach (var name in new[] { "python", "python3" })
             {
                 foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
                 {
                     if (dir.Length == 0) continue;
-                    try
+                    string candidate;
+                    try { candidate = Path.Combine(dir.Trim(), name + ".exe"); }
+                    catch { continue; }
+                    if (File.Exists(candidate)) yield return candidate;
+                }
+            }
+
+            foreach (var fromLauncher in FromPyLauncher()) yield return fromLauncher;
+
+            var last = Path.Combine(@"C:\Python314", "python.exe");
+            if (File.Exists(last)) yield return last;
+        }
+
+        /// <summary>用 `py -0p` 列出的实路径找 3.14（开发机上 python.exe 可能不在 PATH 里）。</summary>
+        private static List<string> FromPyLauncher()
+        {
+            // 返回 List 而不是迭代器：C# 不允许在带 catch 的 try 块里 yield（CS1626），
+            // 而这里整个探测过程都得裹在 catch 里——py 不存在/输出一手抖都不能把状态栏带崩。
+            var hits = new List<string>();
+            var py = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe");
+            if (!File.Exists(py)) return hits;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = py,
+                    Arguments = "-0p",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    if (p == null) return hits;
+                    string text = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(5000)) { try { p.Kill(true); } catch { } }
+                    foreach (var line in text.Split('\n'))
                     {
-                        string candidate = Path.Combine(dir.Trim(), name + ".exe");
-                        if (File.Exists(candidate)) return candidate;
-                    }
-                    catch
-                    {
+                        // `-V:3.14 *  C:\Python314\python.exe` 这种行，取实路径且要是 3.14 那行。
+                        if (!line.Contains("3.14")) continue;
+                        int idx = line.IndexOf("C:\\", StringComparison.OrdinalIgnoreCase);
+                        if (idx < 0) continue;
+                        string path = line.Substring(idx).Trim();
+                        int sp = path.IndexOf(' ');
+                        if (sp > 0) path = path.Substring(0, sp);
+                        if (path.EndsWith("python.exe", StringComparison.OrdinalIgnoreCase) && File.Exists(path))
+                            hits.Add(path);
                     }
                 }
             }
-            var fallback = Path.Combine(@"C:\Python314", "python.exe");
-            return File.Exists(fallback) ? fallback : null;
+            catch { }
+            return hits;
+        }
+
+        /// <summary>能力探测：跑得起来且 `import compression.zstd` 不报错才算数。</summary>
+        private static bool HasZstd(string exe)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = exe,
+                    Arguments = "-c \"import compression.zstd\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var p = System.Diagnostics.Process.Start(psi);
+                if (p == null) return false;
+                // 两个流必须读完（值本身没用）：不读的话子进程输出填满管道就卡住，
+                // WaitForExit 的超时也就成了唯一的出口，慢机器上会误判成"这解释器不行"。
+                p.StandardOutput.ReadToEnd();
+                p.StandardError.ReadToEnd();
+                // 超时兜底：PATH 上的 python.exe 若是 WindowsApps 的商店存根，它会去开
+                // 「获取应用」那页并且永不退出（App.cs:522 的注释说的是同一类挂死）。
+                if (!p.WaitForExit(8000)) { try { p.Kill(true); } catch { } return false; }
+                return p.ExitCode == 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>`Vigil.exe --engine-probe`：只报解析结果就退，不开窗口、不抢单实例。</summary>
+        private static int EngineProbe()
+        {
+            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
+            if (!File.Exists(engine))
+                engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
+            string python = ResolvePython();
+            Console.WriteLine("python=" + (python ?? "none"));
+            Console.WriteLine("engine=" + engine);
+            Console.WriteLine("zstd=" + (python == null || !File.Exists(engine) ? "fail" : "ok"));
+            return python == null || !File.Exists(engine) ? 3 : 0;
         }
 
         private static void DockNow(IntPtr hwnd)
@@ -1202,7 +1313,9 @@ namespace Vigil
             string python = ResolvePython();
             if (python == null || !File.Exists(engine))
             {
-                Balloon("状态检测引擎不可用", "请确认 dsh_state.py 与 python 3.14 就位", ToolTipIcon.Error);
+                Balloon("状态检测引擎不可用",
+                        "随附解释器 runtime\\python\\python.exe 缺失，且系统里找不到能解 zstd 的 Python 3.14",
+                        ToolTipIcon.Error);
                 done?.Invoke(false, "状态检测引擎不可用");
                 return;
             }
