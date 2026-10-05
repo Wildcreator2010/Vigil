@@ -3,8 +3,10 @@
 Vigil（Wildcreator）本身以 **MIT 许可证** 发布，全文见仓库根目录的 [`LICENSE`](LICENSE)。
 
 本文件列出项目中用到的第三方组件、素材与参考项目，每条给出**用途 + 上游地址 + 许可证 + 版权行**；
-**凡随产物分发的条目**（第 1、2、3 节）都按上游要求附上许可证原文（不是只给链接），
-第 4 节的运行时依赖不随附其代码，因此只写用途与版本下限、不附全文。
+**凡随产物分发的条目**（第 1、2、3 节，以及第 4 节里自包含载荷带走的 .NET 运行时与
+CPython 解释器）都按上游要求附上许可证原文（不是只给链接）。分发物里的原文落在
+`licenses/` 目录，由 `tools/collect_licenses.py` 从 NuGet 缓存与 embeddable 包自动收集，
+`tools/verify_package.py` 会断言它们存在 —— 少一份就不出包。
 
 核实依据（2026-10-03 实测核对，未凭记忆改写）：本机 NuGet 包缓存
 `%USERPROFILE%\.nuget\packages\wpf-ui\4.2.0\` 内的 `LICENSE.md`、`ThirdPartyNotices.txt`、
@@ -248,25 +250,63 @@ SOFTWARE.
 
 ---
 
-## 4. 运行时依赖（不随附其代码）
+## 4. 运行时（自包含分发，随产物走）
 
-这两项是**运行环境要求**，本项目不复制、不打包、不分发它们的任何代码，因此不附其许可证全文，
-只写明用途与版本下限。
+`package.cmd` 出的是**零前置**产物：`dotnet publish --self-contained` 会把 .NET 10 运行时的
+二进制一起打进 `app\`，随附的 `app\runtime\python\` 则是 Python 官方的 Windows embeddable 包。
+**这两件事都构成分发他人的作品**，所以本节不再是"只写版本下限"——MIT 与 PSF 都要求
+版权声明随副本保留，原文已收进分发物的 `licenses\`（见文件开头的口径说明）。
 
-### 4.1 .NET 10 Windows Desktop Runtime
+### 4.1 .NET 10 运行时（自包含载荷内）
 
-- **用途**：`Vigil.exe`（WPF + WinForms）的运行环境。
-- **上游**：https://dotnet.microsoft.com/download/dotnet （MIT / 微软社区许可证）
-- **版本下限**：**.NET 10 Windows Desktop Runtime**。目标框架 `net10.0-windows`，
-  低于该版本无法启动；本项目发布产物不自带运行时（framework-dependent）。
+- **用途**：`Vigil.exe`（WPF + WinForms）的运行环境；`--self-contained` 后不再要求目标机预装。
+- **上游**：https://github.com/dotnet/dotnet
+- **许可证**：**MIT**，版权行 `Copyright (c) .NET Foundation and Contributors`。
+- **原文随附**：`licenses\dotnet-runtime-MIT.txt`（取自
+  `microsoft.netcore.app.runtime.win-x64`）、`licenses\dotnet-windowsdesktop-MIT.txt`
+  （取自 `microsoft.windowsdesktop.app.runtime.win-x64`）。两者都由 `tools/collect_licenses.py`
+  从本机 NuGet 缓存原样复制，不手抄、不改写。
+- 注意 §2.3 那份 `dotnet/wpf 8.0` 的 MIT 是 **WPF-UI 的传递依赖声明**，与这里的运行时分发
+  是两回事，两者都要保留，别合并。
 
-### 4.2 Python 3.14 标准库
+### 4.2 Python 3.14 标准库（引擎侧）
 
 - **用途**：`dsh_state.py` 状态引擎只使用标准库，没有任何第三方 Python 包。
-- **上游**：https://www.python.org/ （PSF License，开源）
 - **版本下限**：**Python 3.14**。低于 3.14 时标准库里没有 `compression.zstd`，
-  引擎读不了 `session.v4.jsonl.zstd`，会直接不可用并报 `No module named 'compression'`；
-  请用 `py -3.14` 或升级后再跑。
+  引擎读不了 `session.v4.jsonl.zstd`。分发物自带 3.14.7 的 embeddable 解释器所以正常安装
+  不会遇到；只有你手动拿系统 Python 跑引擎时才需要关心版本（`Vigil.exe --engine-probe`
+  会报它认的是哪个解释器）。
+
+### 4.3 CPython 3.14.7 embeddable 版 — Python Software Foundation License
+
+分发物 `app\runtime\python\` 随附 Python 官方的 Windows embeddable 包
+（`python-3.14.7-embed-amd64.zip`，SHA-256
+`d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15`），含 `python.exe`、
+`python314.dll`、`python314.zip`（标准库）以及 `_zstd.pyd`、`_ssl.pyd` 等扩展模块。
+
+- **许可证**：**Python Software Foundation License**（BSD 风格，另含若干历史条款）。
+- **原文随附两处**：`app\runtime\python\LICENSE.txt`（embeddable 包内自带，未改动）与
+  `licenses\python-PSF.txt`（同一份的副本，方便只拿 `licenses\` 目录做审计）。
+  全文有 35KB、含大量与本项目无关的历史条款，这里只引当前版本的授权与条件两条：
+
+> **PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2**
+>
+> 1. This LICENSE AGREEMENT is between the Python Software Foundation
+> ("PSF"), and the Individual or Organization ("Licensee") accessing and
+> otherwise using this software ("Python") in source or binary form and
+> its associated documentation.
+>
+> 2. Subject to the terms and conditions of this License Agreement, PSF hereby
+> grants Licensee a nonexclusive, royalty-free, world-wide license to reproduce,
+> analyze, test, perform and/or display publicly, prepare derivative works,
+> distribute, and otherwise use Python alone or in any derivative version,
+> provided, however, that PSF's License Agreement and PSF's notice of copyright,
+> i.e., "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
+> are retained in Python alone or in any derivative version prepared by Licensee.
+
+- 上面两条逐字取自随附的 `LICENSE.txt` 第 73–87 行（不是凭记忆写的）；该文件里那句
+  `Copyright (c) 2001 Python Software Foundation` 就是它自己的原文，年份看着少了一位也照原样保留。
+- **上游**：https://www.python.org/download/releases/ （官方 FTP 构建）
 
 ---
 
@@ -282,7 +322,8 @@ SOFTWARE.
 | microsoft/microsoft-ui-xaml 3.0 | MIT | WPF-UI 的传递依赖 | 是（经 WPF-UI） |
 | microsoft/segoe-fluent-icons-font 3.0 | **微软专有字体许可（非 MIT）** | 图标字形 | **否**，只引用系统已装字体 |
 | AF-Media-Bar | MIT | 停靠方式与面板布局的**设计参照** | 否，未复制其源码 |
-| .NET 10 Windows Desktop Runtime | MIT / 微软社区许可证 | 运行时 | 否，要求本机已装 |
-| Python 3.14 标准库 | PSF License | 状态引擎运行时 | 否，要求本机已装 |
+| .NET 10 运行时（coreclr / WindowsDesktop） | MIT | 自包含载荷的运行环境 | **是**，`app\` 内二进制 + `licenses\dotnet-*.txt` 原文 |
+| CPython 3.14.7 embeddable | PSF License | 状态引擎 `dsh_state.py` 的解释器 | **是**，`app\runtime\python\` + `licenses\python-PSF.txt` |
+| Python 3.14 标准库 | PSF License | 引擎只用标准库，无第三方包 | 是（含在上一行的 embeddable 包内） |
 
 如对以上声明有疑问，请开 issue 联系 Wildcreator。

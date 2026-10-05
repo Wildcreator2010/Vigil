@@ -2,7 +2,9 @@
 """Vigil（原 dsh-status）冒烟测试：把 README 承诺的每条命令和状态栏契约跑成断言。
 
   python smoke_test.py           引擎 + CLI 契约（无副作用，可随时复跑）
-  python smoke_test.py --build   额外做 Release 编译，断言 0 警告 0 错误
+  python smoke_test.py --build   额外做 Release 编译，断言 0 警告 0 错误 + 解释器解析
+  python smoke_test.py --setup   编译安装向导 + 开一次 GUI 读控件 + 静默装到 %TEMP% 再卸载
+  python smoke_test.py --package 校验 dist/ 分发产物（随附解释器跑真引擎 + 版本对齐）
   python smoke_test.py --gui     额外启动 Vigil.exe，在 Win32 层校验任务栏停靠
 
 --gui 会真的往任务栏里挂一个状态栏，结束时用 taskkill /f 收掉（优雅关闭当前不可用，
@@ -429,6 +431,36 @@ def check_setup() -> None:
     shutil.rmtree(E2E_ROOT, ignore_errors=True)
 
 
+def check_package() -> None:
+    """校验 dist/ 分发产物。跑的是 `package.cmd --verify-only`，不重新 publish。
+
+    每次冒烟都重编 161MB 的自包含载荷不现实，所以校验逻辑落在 tools/verify_package.py，
+    打包脚本和这里共用同一份 —— 两处各写一份就会有一处悄悄不生效。
+    """
+    print("\n== 分发产物 ==")
+    dist = sorted(glob.glob(os.path.join(HERE, "dist", "Vigil-*-win-x64")))
+    if not dist:
+        check("dist/ 有产物（先跑 package.cmd）", False, "没有 dist\\Vigil-*-win-x64")
+        return
+    target = dist[-1]
+    log = os.path.join(HERE, "verify-package.log")
+    with open(log, "w", encoding="utf-8") as f:      # 别接管道：管道会吞掉退出码
+        p = subprocess.run(["cmd", "/c", "package.cmd", "--verify-only"],
+                           stdout=f, stderr=subprocess.STDOUT, timeout=1800, cwd=HERE)
+    out = open(log, encoding="utf-8", errors="replace").read()
+    check("package.cmd --verify-only 通过", p.returncode == 0, out[-600:])
+    for line in out.splitlines():
+        if line.strip().startswith("OK ") or line.startswith("  ·"):
+            print("   " + line.strip())
+
+    zips = glob.glob(os.path.join(HERE, "dist", "*.zip"))
+    check("有可分发的 zip", bool(zips), "跑一次完整的 package.cmd")
+    if zips:
+        size = os.path.getsize(zips[0])
+        check("zip 体积在合理区间（自包含载荷压缩后 40–200MB）", 40_000_000 < size < 200_000_000,
+              f"{size} 字节")
+
+
 def check_installer_e2e() -> None:
     """静默装到 %TEMP% 再卸掉：装/卸两条路径的唯一真证据。
 
@@ -571,6 +603,8 @@ LICENSE_MUST_CONTAIN = (
     "Bäumlisberger",                           # VirtualizingWrapPanel（WPF-UI 传递依赖）
     "fluentui-system-icons", "microsoft-ui-xaml", "dotnet/wpf",
     "Segoe Fluent Icons",
+    # 随附分发的 embeddable 解释器：PSF 许可要求保留其版权声明，声明里必须有一节
+    "Python 3.14.7", "Python Software Foundation",
 )
 
 # 标准 SPDX MIT 正文——去掉标题行与版权行之后剩下的那部分。权威参照逐字取自本机
@@ -4678,6 +4712,8 @@ def main() -> int:
     if full or "--setup" in args:
         check_setup()
         check_installer_e2e()
+    if full or "--package" in args:
+        check_package()
     # 纯读源码、无副作用，所以不放 --gui：默认那轮也要钉住「开窗委托体自带 try」
     # 和「请求文件在开窗之后才删」这两条（外部没法让 PanelWindow 构造必然抛，
     # 见 check_panel_request_guard 的注释）。

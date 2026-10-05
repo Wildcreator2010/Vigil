@@ -16,3 +16,8 @@ probe.png
 p.png
 p1.png
 p2.png
+
+# 分发产物与随附运行时的下载缓存（185MB 产物 + 12MB zip，不进版本库）
+dist/
+vendor/
+setup-build.log
