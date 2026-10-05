@@ -1403,7 +1403,14 @@ def fmt_rgba(px: bytes) -> str:
 #      所以每通道右移 2 位（4 级一档）再统计 —— #FDFDFD/#FEFEFE/#FFFFFF 落到相邻档但
 #      白色与 #FAFAFA 仍分得开（255→63、250→62），概览与外观不会因此混为一谈。
 
-PAGE_BOX_DIP = (216, 26, 930, 614)
+TITLEBAR_DIP = 48
+"""面板标题栏（ui:TitleBar）占的高度。UIA 实测：页面区原点从 (212, 20) 变成 (212, 68)。
+外壳几何只有这一个自变量 —— 下面三处全部由它推导，改标题栏就改这一行。"""
+
+PAGE_ORIGIN_DIP = (212, 20 + TITLEBAR_DIP)
+"""页面在窗口里的原点：nav 188 + Host 左边距 24 = 212；上边 = 标题栏 + Host 上边距 20。"""
+
+PAGE_BOX_DIP = (PAGE_ORIGIN_DIP[0] + 4, PAGE_ORIGIN_DIP[1] + 6, 930, 614)
 """真窗口里**页面**的取样框（逻辑像素）：外壳是 nav 188 + Host 左边距 24 → 页面左沿 212，
 右沿 960-24=936，上沿 Host 上边距 20、下沿 640-20=620（FluentWindow 的内容区从客户区
 (0,0) 起算，标题栏是覆盖式的，本机实测表格顶沿 y=20.8）。往里各缩 4 像素避开 1px 描边。
@@ -1413,7 +1420,7 @@ PAGE_W_DIP = PAGE_BOX_DIP[2] - PAGE_BOX_DIP[0]
 PAGE_H_DIP = PAGE_BOX_DIP[3] - PAGE_BOX_DIP[1]
 """真窗口里页面取样框的尺寸（DIP）：714 × 588。离屏参照必须按同一块几何裁过再比，见 shot_profile。"""
 
-SHOT_PAGE_DIP = (724, 600)
+SHOT_PAGE_DIP = (724, 600 - TITLEBAR_DIP)
 """`--panel-shot` 的画布（App.cs RenderShot 里那两个数）＝ 真窗口里页面实际拿到的那块：
 960 - nav 188 - Host 左右 24×2 = 724，640 - Host 上下 20×2 = 600。
 两边必须是**同一个排版**才能比配色分布：宽度差着 176 DIP 时长描述换行数不同、
@@ -1465,7 +1472,7 @@ def shot_profile(path: str, bg: bytes, stride: int = 2) -> dict[bytes, float] | 
     # 页面原点：nav 188 + Host 左边距 24 = 212；Host 上边距 20。它和 PAGE_BOX_DIP 是
     # 同一个外壳的两处读数，所以这里当场校验裁切块落在画布里 —— 外壳改了而这里没跟上时，
     # 宁可红在「参照读不出来」，也不要切片悄悄短一截、拿错区域比样。
-    x0, y0 = PAGE_BOX_DIP[0] - 212, PAGE_BOX_DIP[1] - 20
+    x0, y0 = PAGE_BOX_DIP[0] - PAGE_ORIGIN_DIP[0], PAGE_BOX_DIP[1] - PAGE_ORIGIN_DIP[1]
     x1, y1 = x0 + PAGE_W_DIP, y0 + PAGE_H_DIP
     if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
         return None

@@ -22,9 +22,12 @@ namespace Vigil
         {
             var cfg = App.Config;
 
-            var light = Radio("浅色", "light", cfg.Theme);
-            var dark = Radio("深色", "dark", cfg.Theme);
-            var sys = Radio("跟随系统", "system", cfg.Theme);
+            // 主题与材质必须是**两个** GroupName：原先六颗共用 "theme"，WPF 把它们当成同一组
+            // 单选 —— 点「云母」会把「浅色」那颗取消掉，选完主题再去点材质界面上就"没反应"，
+            // 落盘的却是另一套值。这是"设了深浅色就调不了材质"的根因。
+            var light = Radio("浅色", "light", cfg.Theme, "theme");
+            var dark = Radio("深色", "dark", cfg.Theme, "theme");
+            var sys = Radio("跟随系统", "system", cfg.Theme, "theme");
             // Checked 在 IsChecked 初值赋完之后再挂：否则构造时点亮默认项会当场
             // SaveSettings()/ApplyTheme()，离屏出图顺带把用户的 settings.json 规范化重写一遍。
             foreach (var rb in new[] { light, dark, sys })
@@ -45,9 +48,9 @@ namespace Vigil
             showBar.Unchecked += (s, e) => SetBar(false);
 
             // 三档界面材质：云母 / 毛玻璃 / 自绘液态玻璃。点了当场生效，不用重开面板。
-            var mica = Radio("云母 Mica", "mica", cfg.Backdrop);
-            var acrylic = Radio("毛玻璃 Acrylic", "acrylic", cfg.Backdrop);
-            var glass = Radio("液态玻璃", "glass", cfg.Backdrop);
+            var mica = Radio("云母 Mica", "mica", cfg.Backdrop, "backdrop");
+            var acrylic = Radio("毛玻璃 Acrylic", "acrylic", cfg.Backdrop, "backdrop");
+            var glass = Radio("液态玻璃", "glass", cfg.Backdrop, "backdrop");
             foreach (var rb in new[] { mica, acrylic, glass })
                 rb.Checked += (s, e) =>
                 {
@@ -85,16 +88,16 @@ namespace Vigil
             Content = backdrop;
         }
 
-        static WpfControls.RadioButton Radio(string text, string value, string current)
+        static WpfControls.RadioButton Radio(string text, string value, string current, string group)
         {
-            // 必须用 WPF-UI 的 Fluent RadioButton：原生那个的选中点直接取**系统主题色**，
-            // 不读 WPF-UI 的强调色资源，所以覆盖 AccentFillColor* 对它无效
-            // （第一版就是踩在这上面，选中圈一直是系统紫）。
+            // 用原生 RadioButton + App.ApplyFluentControls 注入的隐式样式接管模板：
+            // WPF-UI 4.2 没有 RadioButton 控件，而原生那个的选中点默认取系统高亮色
+            // （本机是紫），所以必须靠那份自定义模板把颜色接回品牌强调色资源。
             var rb = new WpfControls.RadioButton
             {
                 Content = text,
                 Tag = value,
-                GroupName = "theme",
+                GroupName = group,
                 Margin = new Thickness(0, 0, 14, 0),
                 IsChecked = current == value,
             };

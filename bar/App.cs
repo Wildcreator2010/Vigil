@@ -281,6 +281,7 @@ namespace Vigil
                     SetAccent("TextOnAccentFillColorPrimary", 0xFF, 0xFF, 0xFF);
                     SetAccent("TextOnAccentFillColorSecondary", 0xFF, 0xFF, 0xFF);
                     SetAccent("TextOnAccentFillColorSelectedText", 0xFF, 0xFF, 0xFF);
+                    SetBrandAccents();
                 }
                 var merged = app.Resources.MergedDictionaries;
                 int at = merged.IndexOf(_accentDict);
@@ -292,6 +293,14 @@ namespace Vigil
 
         static System.Windows.ResourceDictionary _accentDict;
 
+        /// <summary>
+        /// 那份强调色覆盖字典。除了挂在应用级，面板还要把它挂进**自己**的 Resources：
+        /// WPF-UI 的 ToggleSwitch / 滑块这类控件在窗口内解析 DynamicResource 时，
+        /// 元素级字典优先于应用级，而应用级那一份抢不过 WPF-UI 主题字典里
+        /// 从系统强调色派生的同名键（实测开关的开启态仍是系统紫）。
+        /// </summary>
+        internal static System.Windows.ResourceDictionary AccentDictionary => _accentDict;
+
         /// <summary>一个键同时给两份：不带后缀的是 Color，带 Brush 的是冻结画刷。</summary>
         static void SetAccent(string key, byte r, byte g, byte b)
         {
@@ -300,6 +309,28 @@ namespace Vigil
             var br = new System.Windows.Media.SolidColorBrush(c);
             br.Freeze();
             _accentDict[key + "Brush"] = br;
+        }
+
+        /// <summary>
+        /// 品牌强调色必须挂**我们自己的键**。覆盖 WPF-UI 那套 `AccentFillColor*` 是无效的：
+        /// 实测侧栏选中块画出来是 #8E3AA7（从系统强调色 #680081 派生的），而不是品牌橙
+        /// #D87D44 —— 那些键由 WPF-UI 的主题字典在 Apply 时重新合进来，我们的字典抢不到优先级。
+        /// 自有键没有竞争对手，模板里直接吃它。
+        /// </summary>
+        const string AccentBrushKey = "VigilAccentBrush";
+        const string AccentInkKey = "VigilAccentInkBrush";
+
+        static void SetBrandAccents()
+        {
+            _accentDict[AccentBrushKey] = FrozenRgb(0xD8, 0x7D, 0x44);
+            _accentDict[AccentInkKey] = FrozenRgb(0xFF, 0xFF, 0xFF);
+        }
+
+        static System.Windows.Media.SolidColorBrush FrozenRgb(byte r, byte g, byte b)
+        {
+            var br = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
+            br.Freeze();
+            return br;
         }
 
         /// <summary>
@@ -326,7 +357,7 @@ namespace Vigil
             "Fill='{DynamicResource ControlFillColorDefaultBrush}' " +
             "Stroke='{DynamicResource ControlStrokeColorDefaultBrush}'/>" +
             "<Ellipse x:Name='dot' Margin='5' Visibility='Collapsed' " +
-            "Fill='{DynamicResource AccentFillColorPrimaryBrush}'/>" +
+            "Fill='{DynamicResource VigilAccentBrush}'/>" +
             "</Grid>" +
             "<ContentPresenter Margin='8,0,0,0' VerticalAlignment='Center'/>" +
             "</StackPanel>" +
@@ -387,7 +418,7 @@ namespace Vigil
         /// （程序集里连 "Liquid" 字样都搜不到），所以用 Mica 打底、再由
         /// PanelWindow.ApplyMaterial 叠自绘的半透明层与内高光去近似它。
         /// </summary>
-        static Wpf.Ui.Controls.WindowBackdropType SystemBackdrop()
+        internal static Wpf.Ui.Controls.WindowBackdropType SystemBackdrop()
         {
             string b = Settings.SafeBackdrop(_settings?.Backdrop);
             return b == "mica" || b == "glass"
@@ -493,7 +524,12 @@ namespace Vigil
             }
             catch (Exception ex)
             {
-                Log($"打开面板失败: {ex.GetType().Name} {ex.Message}");
+                // 内层异常必须一起记：XAML 解析失败时外层只给一句
+                // "在 TypeConverterMarkupExtension 提供值时引发异常"，看不出是哪个属性，等于没报。
+                var inner = ex.InnerException;
+                while (inner?.InnerException != null) inner = inner.InnerException;
+                Log($"打开面板失败: {ex.GetType().Name} {ex.Message}"
+                    + (inner == null ? "" : $" ｜最内层 {inner.GetType().Name} {inner.Message}"));
                 return false;
             }
         }
@@ -607,12 +643,15 @@ namespace Vigil
                     return 2;
                 }
                 // 画布 = 真窗口里页面实际拿到的那块：960 宽 - nav 188 - Host 左右边距 24×2 = 724，
-                // 640 高 - Host 上下边距 20×2 = 600。以前这里是随手写的 900×620，于是
+                // 640 高 - 标题栏 48 - Host 上下边距 20×2 = 552。
+                // 标题栏是 2026-10-06 补外壳时加的（ui:TitleBar，实测 48 DIP）：这里少算 48
+                // 就等于离屏参照和真窗口量的不是同一块排版，比样当场红（overview 重合度 0.20）。
+                // 以前这里是随手写的 900×620，于是
                 // `--panel-shot` 出的图和面板上那一页**不是同一个排版**：宽 176 DIP 的差让长描述
                 // 少换一两行，卡片高度随之变，白底与页面底的占比整体漂移。冒烟拿离屏图当真窗口
                 // 比样的参照（smoke_test.py 的 PAGE_BOX_DIP / SHOT_PAGE_DIP），Task 7 的余额页
                 // 就撞在这条上：画的确实是余额页，重合度却只有 0.77。
-                double w = 724, h = 600;
+                double w = 724, h = 552;
                 // 页面是在 Refresh 里读快照填内容的（Task 8 的会话表就照这个契约写）。
                 // 排版之前不把快照交进去，占位页也许看不出来，但填实以后 --panel-shot
                 // 渲染的永远是空表，spec §9「概览页色数显著高于关于页」那条门禁无从判定。

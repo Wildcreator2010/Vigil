@@ -14,16 +14,17 @@ namespace Vigil
             new Dictionary<string, Win.FrameworkElement>();
         bool _navigating;
         bool _reallyClosing;
-        // 想要哪一档系统背衬（Native.DWMSBT_*）。构造期还没有 HWND，所以先记着，
-        // SourceInitialized 时再补上去 —— 见 ApplyBackdrop()。
-        int _backdrop = Native.DWMSBT_MAINWINDOW;
-        bool _backdropHooked;
 
         public static PanelWindow Instance { get; private set; }
 
         public PanelWindow()
         {
             InitializeComponent();
+            // 强调色覆盖必须也挂在**本窗口**的资源上：应用级那一份抢不过 WPF-UI 主题字典
+            // 里从系统强调色派生的同名键，实测 ToggleSwitch 的开启态仍是系统紫。
+            // 元素级资源查找优先，挂在这里窗口内所有 DynamicResource 才吃得到品牌橙。
+            if (App.AccentDictionary != null && !Resources.MergedDictionaries.Contains(App.AccentDictionary))
+                Resources.MergedDictionaries.Add(App.AccentDictionary);
             for (int i = 0; i < PanelPages.Keys.Length; i++)
                 Nav.Items.Add(new WpfControls.ListBoxItem { Content = PanelPages.Labels[i], Tag = PanelPages.Keys[i] });
             Nav.SelectedIndex = 0;
@@ -59,11 +60,14 @@ namespace Vigil
         /// <summary>
         /// 按当前材质重画外壳：窗口背衬、侧栏通透度、以及每一张卡。
         ///
-        /// 背衬走 <see cref="Native.SetSystemBackdrop"/>，**不碰** FluentWindow.WindowBackdropType：
-        /// 那个属性要求先 ExtendsContentIntoTitleBar=true，否则赋值当场就抛
-        /// InvalidOperationException —— 而它在构造函数里就被调过一次，于是整个控制台在任何
-        /// 机器上都开不出来（SafeBackdrop 的默认值是 "acrylic"，连"设置里没这一项"都躲不过）。
-        /// 实测细节与理由见 Native.cs 里那段注释。
+        /// 背衬走 WPF-UI 自己的 WindowBackdropType —— 前提 ExtendsContentIntoTitleBar
+        /// 已在 XAML 里打开（照 AF-Media-Bar 的外壳抄）。这里绝不能再退回 None：
+        /// ApplicationThemeManager.Apply(theme, backdrop, false) 那个全局调用**不会**把
+        /// 材质传到具体窗口上（实测窗口读回仍是 None），材质必须落在窗口自己身上。
+        ///
+        /// 历史坑：Extends 没打开时给这个属性赋值会**当场抛** InvalidOperationException，
+        /// 而它在构造函数里就被调了一次，于是整个控制台在任何机器上都开不出来
+        /// （SafeBackdrop 的默认值是 "acrylic"，连"设置里没这一项"都躲不过）。
         ///
         /// glass 档的系统材质仍是 Mica：WPF-UI 4.2 没有 Liquid Glass，
         /// 「液态」是靠侧栏与卡片那两层半透明 + 大圆角 + 内高光近似出来的。
@@ -71,10 +75,7 @@ namespace Vigil
         internal void ApplyMaterial()
         {
             string b = Settings.SafeBackdrop(App.Config?.Backdrop);
-            _backdrop = b == "mica" || b == "glass"
-                ? Native.DWMSBT_MAINWINDOW
-                : Native.DWMSBT_TRANSIENTWINDOW;
-            ApplyBackdrop();
+            WindowBackdropType = App.SystemBackdrop();
             Ui.Glass = b == "glass";
             if (Ui.Glass)
             {
@@ -94,26 +95,14 @@ namespace Vigil
         }
 
         /// <summary>
-        /// 把 <see cref="_backdrop"/> 落到真实窗口上。背衬是 DWM 的属性，必须有 HWND，
-        /// 而 ApplyMaterial() 在构造期就会被调一次（那时还没有），所以这里挂一次
-        /// SourceInitialized 补上；之后再改材质就是当场生效。
-        /// 不支持的系统（Win10 / 早于 22H2 的 Win11）返回失败 HRESULT：只记一行日志，
-        /// 窗口照常可用 —— 材质是观感，不是功能。
+        /// 标题栏上的「收到托盘」：只是把面板藏起来，状态栏和引擎子进程都继续跑。
+        /// 和点 ✕ 走的是同一件事（Closing 里本来就拦下来 Hide），区别只是这颗按钮把意图
+        /// 写在脸上 —— 用户看到 ✕ 会以为整个程序要退出。
         /// </summary>
-        void ApplyBackdrop()
+        void OnTrayClick(object sender, Win.RoutedEventArgs e)
         {
-            var h = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-            if (h == IntPtr.Zero)
-            {
-                if (!_backdropHooked)
-                {
-                    _backdropHooked = true;
-                    SourceInitialized += (s, e) => ApplyBackdrop();
-                }
-                return;
-            }
-            int hr = Native.SetSystemBackdrop(h, _backdrop);
-            if (hr != 0) App.Log($"系统背衬未生效（HRESULT 0x{hr:X8}），窗口照常可用");
+            Hide();
+            App.Log("面板已收回到托盘（状态栏继续在任务栏上）");
         }
 
         public void ShowOn(string key)

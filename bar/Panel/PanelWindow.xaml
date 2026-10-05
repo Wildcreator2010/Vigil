@@ -7,47 +7,109 @@
         MinWidth="760" MinHeight="500"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="True"
+        ExtendsContentIntoTitleBar="True"
+        WindowCornerPreference="Round"
         Background="{DynamicResource ApplicationBackgroundBrush}">
+  <!-- 外壳照 AF-Media-Bar 的 SettingsWindow 抄：ExtendsContentIntoTitleBar="True"
+       + ui:TitleBar + WindowCornerPreference="Round"。
+       原来这里既没设 Extends 也没放 TitleBar：FluentWindow 把内容区从客户区 (0,0) 铺满，
+       于是最小化 / 关闭 / 拖动**一颗都没有**，窗口还是方的。而 WPF-UI 又要求 Extends=true
+       才允许上 Mica/Acrylic 背衬 —— 所以这一处同时解决"没有按钮"和"背衬抛异常"。 -->
   <Grid>
-    <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="188" />
-      <ColumnDefinition Width="*" />
-    </Grid.ColumnDefinitions>
-    <!-- 颜色一律走主题刷 + DynamicResource：写死 #F3F3F3/White/#1A1D23 的话，
-         切到 dark 就成了「深色 Fluent 外壳 + 纯白内容区」，spec §6/§7 不允许这种拼缝。
-         DynamicResource 还让 Task 5 的主题开关当场生效，不用重建窗口。 -->
-    <Border x:Name="Rail" Grid.Column="0" Background="{DynamicResource LayerFillColorDefaultBrush}"
-            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
-      <!-- 侧栏三行：Logo + 标题（Auto）/ 导航（*，吃掉剩余高度）/ 版本代号（Auto，钉在底部）。
-           原来是单个 StackPanel，版本那行放不进去——StackPanel 没有"贴底"这一说。 -->
-      <Grid Margin="10,14,10,10">
-        <Grid.RowDefinitions>
-          <RowDefinition Height="Auto" />
-          <RowDefinition Height="*" />
-          <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="4,0,0,12">
-          <Image Source="assets/logo.png" Width="26" Height="26" Margin="0,0,8,0"
-                 VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality" />
-          <TextBlock Text="Vigil 控制台" FontSize="17" FontWeight="SemiBold"
-                     Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                     VerticalAlignment="Center" />
-        </StackPanel>
-        <ListBox x:Name="Nav" Grid.Row="1" BorderThickness="0" Background="Transparent"
-                 SelectionChanged="OnNavChanged" />
-        <TextBlock x:Name="VersionLine" Grid.Row="2" FontSize="11" Margin="4,8,0,0"
-                   TextWrapping="Wrap"
-                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-      </Grid>
-    </Border>
-    <!-- 内容列必须是**有限高度**。这里原来把 Host 包在 ScrollViewer(VerticalScrollBarVisibility=Auto)
-         里，而 ScrollViewer 给内容的竖向约束是无限高：概览页那个 `*` 行于是拿不到「视口高」，
-         DataGrid 按行数长到 ~1150px 再由整页滚动兜着 —— 滚轮是滚得动的，但滚的是整页，
-         表头跟着一起滚出视野（真窗口实测：滚轮后第一条变化的行在 y=19，正是表头那一带），
-         排版成本也随行数线性上升。现在 Host 直接占 `*` 列的有限高度：
-         表头固定、只有表体滚（实测变化从 y=85 才开始，表头那一条带一个像素没动）。
-         页面契约随之明确 —— 需要整页滚动的页自己在页内放 ScrollViewer，外壳不再代劳；
-         这条契约由 smoke_test.py 的 check_panel_real_scroll() 在真窗口上钉住。 -->
-    <ContentControl x:Name="Host" Grid.Column="1" Margin="24,20,24,20" />
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <ui:TitleBar x:Name="Caption" Grid.Row="0" Title="Vigil 控制台"
+                 CloseWindowByDoubleClickOnIcon="True">
+      <ui:TitleBar.Icon>
+        <!-- 必须写应用根绝对路径：ImageIcon 的相对 URI 是按 XAML 所在目录解析的，
+             "assets/logo.png" 会变成 "panel/assets/logo.png" 并在构造期抛 IOException
+             （内层才是这句，外层只说"类型转换异常"）。侧栏那个 Image 不受此限。 -->
+        <ui:ImageIcon Source="/assets/logo.png" />
+      </ui:TitleBar.Icon>
+      <ui:TitleBar.TrailingContent>
+        <!-- 「收回到托盘」：关窗本来就只是 Hide（见 xaml.cs 的 Closing 拦截），这颗按钮把
+             这件事摆到明面上，也给用户一个不弄丢状态栏的退出入口。放在 TrailingContent
+             里，它落在系统那三颗的左边，不会去抢 caption 的命中区。 -->
+        <ui:Button x:Name="TrayButton" Appearance="Transparent" Click="OnTrayClick"
+                   Content="收到托盘" FontSize="12" Padding="10,0,10,0"
+                   VerticalAlignment="Stretch"
+                   ToolTip="收回到系统托盘，状态栏继续盯着" />
+      </ui:TitleBar.TrailingContent>
+    </ui:TitleBar>
+
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="188" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+
+      <!-- 颜色一律走主题刷 + DynamicResource：写死 #F3F3F3/White/#1A1D23 的话，
+           切到 dark 就成了「深色 Fluent 外壳 + 纯白内容区」，spec §6/§7 不允许这种拼缝。
+           DynamicResource 还让主题开关当场生效，不用重建窗口。 -->
+      <Border x:Name="Rail" Grid.Column="0" Background="{DynamicResource LayerFillColorDefaultBrush}"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+        <!-- 侧栏两行：导航（*，吃掉剩余高度）/ 版本代号（Auto，钉在底部）。
+             顶上原来还有一行 Logo +「Vigil 控制台」，标题栏已经有了，紧挨着再写一遍
+             就是两处重复，所以去掉。 -->
+        <Grid Margin="10,6,10,10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <ListBox x:Name="Nav" Grid.Row="0" BorderThickness="0" Background="Transparent"
+                   SelectionChanged="OnNavChanged"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <!-- 样式必须放 ListBox.Resources 里当**隐式**样式，不能挂 ItemContainerStyle：
+                 导航项是 xaml.cs 里手工 new 出来的 ListBoxItem（项本身就是容器），
+                 ItemContainerStyle 对这种项不生效，实测选中底仍是原生那个方条系统紫。 -->
+            <ListBox.Resources>
+              <Style TargetType="ListBoxItem">
+                <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+                <Setter Property="Padding" Value="10,7,10,7" />
+                <Setter Property="Margin" Value="0,1,8,1" />
+                <Setter Property="HorizontalContentAlignment" Value="Left" />
+                <Setter Property="Template">
+                  <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                      <Border x:Name="Bd" CornerRadius="6" Padding="{TemplateBinding Padding}"
+                              Background="Transparent">
+                        <ContentPresenter VerticalAlignment="Center" />
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                          <Setter TargetName="Bd" Property="Background"
+                                  Value="{DynamicResource CardBackgroundFillColorSecondaryBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                          <Setter TargetName="Bd" Property="Background"
+                                  Value="{DynamicResource VigilAccentBrush}" />
+                          <Setter Property="Foreground"
+                                  Value="{DynamicResource VigilAccentInkBrush}" />
+                        </Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </Setter.Value>
+                </Setter>
+              </Style>
+            </ListBox.Resources>
+          </ListBox>
+          <TextBlock x:Name="VersionLine" Grid.Row="1" FontSize="11" Margin="4,8,0,0"
+                     TextWrapping="Wrap"
+                     Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+        </Grid>
+      </Border>
+
+      <!-- 内容列必须是**有限高度**。这里原来把 Host 包在 ScrollViewer(Auto) 里，而
+           ScrollViewer 给内容的竖向约束是无限高：概览页那个 `*` 行于是拿不到「视口高」，
+           DataGrid 按行数长到 ~1150px 再由整页滚动兜着 —— 滚轮滚的是整页，表头跟着滚出
+           视野（真窗口实测第一条变化在 y=19）。现在 Host 直接占 `*` 列的有限高度：
+           表头固定、只有表体滚（实测变化从 y=85 才开始）。页面契约随之明确 ——
+           需要整页滚动的页自己在页内放 ScrollViewer，外壳不再代劳；
+           这条由 smoke_test.py 的 check_panel_real_scroll() 在真窗口上钉住。 -->
+      <ContentControl x:Name="Host" Grid.Column="1" Margin="24,20,24,20" />
+    </Grid>
   </Grid>
 </ui:FluentWindow>
