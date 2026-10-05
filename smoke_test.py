@@ -380,6 +380,56 @@ def setup_window_dump(*extra_args: str) -> dict[str, str] | None:
         subprocess.run(["taskkill", "/f", "/im", "Vigil-Setup.exe"], capture_output=True)
 
 
+def check_panel_backdrop() -> None:
+    """三档材质下控制台都必须开得出窗口。
+
+    回归的来路（2026-10-05 实测定位）：`PanelWindow.ApplyMaterial()` 给 FluentWindow 赋
+    `WindowBackdropType`（只会是 Acrylic 或 Mica），而 WPF-UI 4.2 要求先
+    `ExtendsContentIntoTitleBar=true` 才允许非 None 的背衬，否则在**构造函数里**抛
+    `InvalidOperationException`。`SafeBackdrop` 的默认值又是 "acrylic"，所以只要设置里
+    没这一项、或者选了 mica/acrylic 任一档，控制台在任何机器上都开不出来。
+    离屏的 `--panel-shot` 不建窗口，所以这条一直没人撞到 —— 必须走真窗口。
+    """
+    print("\n== 三档材质都能开窗 ==")
+    if not os.path.isfile(BAR_EXE):
+        check("Vigil.exe 存在", False, "先跑 --build")
+        return
+    if bar_processes():
+        check("启动前无残留实例", False, "已有 Vigil 在跑")
+        return
+    f = os.path.join(ds.state_dir(), "settings.json")
+    backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
+    log = os.path.join(ds.state_dir(), "bar.log")
+    before = open(log, encoding="utf-8", errors="replace").read() if os.path.isfile(log) else ""
+    try:
+        for bd in ("acrylic", "mica", "glass"):
+            write_settings(interval=2, notify=True, repeatSec=0, theme="light",
+                           showBar=True, backdrop=bd)
+            subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+            time.sleep(1)
+            proc = subprocess.Popen([BAR_EXE, "--panel", "overview"], cwd=HERE)
+            try:
+                deadline = time.time() + 25
+                hwnd = 0
+                while time.time() < deadline and not hwnd:
+                    hwnd = top_window("Vigil 控制台")
+                    time.sleep(0.5)
+                check(f"backdrop={bd}：控制台窗口开得出", bool(hwnd),
+                      "25 秒内没等到「Vigil 控制台」（多半是 ApplyMaterial 在构造里抛了）")
+            finally:
+                proc.kill()
+                subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+                time.sleep(1)
+        tail = open(log, encoding="utf-8", errors="replace").read()[len(before):]
+        check("三档材质都没往日志里写「打开面板失败」",
+              "打开面板失败" not in tail, tail.strip().splitlines()[-1][:160] if "打开面板失败" in tail else "")
+    finally:
+        if backup is not None:
+            open(f, "w", encoding="utf-8").write(backup)
+        elif os.path.isfile(f):
+            os.remove(f)
+
+
 def check_about_page() -> None:
     """关于页要能回答"这台机器上它到底认了哪个解释器"——换电脑排障的第一个问题。"""
     print("\n== 关于页 ==")
@@ -4817,6 +4867,7 @@ def main() -> int:
         check_panel_request_race()
         # 这段会 taskkill /f /im Vigil.exe 全量收进程，放在最后，别打乱前面那些
         # 对"当前注入的是哪一帧"敏感的比样门禁。
+        check_panel_backdrop()
         check_about_page()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")

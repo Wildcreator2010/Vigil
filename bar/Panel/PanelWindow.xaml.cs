@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Win = System.Windows;
 using WpfControls = System.Windows.Controls;
@@ -13,6 +14,10 @@ namespace Vigil
             new Dictionary<string, Win.FrameworkElement>();
         bool _navigating;
         bool _reallyClosing;
+        // 想要哪一档系统背衬（Native.DWMSBT_*）。构造期还没有 HWND，所以先记着，
+        // SourceInitialized 时再补上去 —— 见 ApplyBackdrop()。
+        int _backdrop = Native.DWMSBT_MAINWINDOW;
+        bool _backdropHooked;
 
         public static PanelWindow Instance { get; private set; }
 
@@ -52,20 +57,24 @@ namespace Vigil
         });
 
         /// <summary>
-        /// 按当前材质重画外壳：窗口 backdrop、侧栏通透度、以及每一张卡。
+        /// 按当前材质重画外壳：窗口背衬、侧栏通透度、以及每一张卡。
         ///
-        /// backdrop 走 FluentWindow 自己的依赖属性（DLL 里有 OnWindowBackdropTypeChanged
-        /// 这个处理器），不是 ApplicationThemeManager 那个全局 Apply —— 后者管的是主题字典，
-        /// 材质要落在具体窗口上。
-        /// glass 档的窗口材质仍是 Mica：WPF-UI 4.2 没有 Liquid Glass，
+        /// 背衬走 <see cref="Native.SetSystemBackdrop"/>，**不碰** FluentWindow.WindowBackdropType：
+        /// 那个属性要求先 ExtendsContentIntoTitleBar=true，否则赋值当场就抛
+        /// InvalidOperationException —— 而它在构造函数里就被调过一次，于是整个控制台在任何
+        /// 机器上都开不出来（SafeBackdrop 的默认值是 "acrylic"，连"设置里没这一项"都躲不过）。
+        /// 实测细节与理由见 Native.cs 里那段注释。
+        ///
+        /// glass 档的系统材质仍是 Mica：WPF-UI 4.2 没有 Liquid Glass，
         /// 「液态」是靠侧栏与卡片那两层半透明 + 大圆角 + 内高光近似出来的。
         /// </summary>
         internal void ApplyMaterial()
         {
             string b = Settings.SafeBackdrop(App.Config?.Backdrop);
-            WindowBackdropType = b == "acrylic"
-                ? Wpf.Ui.Controls.WindowBackdropType.Acrylic
-                : Wpf.Ui.Controls.WindowBackdropType.Mica;
+            _backdrop = b == "mica" || b == "glass"
+                ? Native.DWMSBT_MAINWINDOW
+                : Native.DWMSBT_TRANSIENTWINDOW;
+            ApplyBackdrop();
             Ui.Glass = b == "glass";
             if (Ui.Glass)
             {
@@ -82,6 +91,29 @@ namespace Vigil
                     WpfControls.Border.BackgroundProperty, "LayerFillColorDefaultBrush");
             }
             Ui.RefreshMaterial();
+        }
+
+        /// <summary>
+        /// 把 <see cref="_backdrop"/> 落到真实窗口上。背衬是 DWM 的属性，必须有 HWND，
+        /// 而 ApplyMaterial() 在构造期就会被调一次（那时还没有），所以这里挂一次
+        /// SourceInitialized 补上；之后再改材质就是当场生效。
+        /// 不支持的系统（Win10 / 早于 22H2 的 Win11）返回失败 HRESULT：只记一行日志，
+        /// 窗口照常可用 —— 材质是观感，不是功能。
+        /// </summary>
+        void ApplyBackdrop()
+        {
+            var h = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (h == IntPtr.Zero)
+            {
+                if (!_backdropHooked)
+                {
+                    _backdropHooked = true;
+                    SourceInitialized += (s, e) => ApplyBackdrop();
+                }
+                return;
+            }
+            int hr = Native.SetSystemBackdrop(h, _backdrop);
+            if (hr != 0) App.Log($"系统背衬未生效（HRESULT 0x{hr:X8}），窗口照常可用");
         }
 
         public void ShowOn(string key)

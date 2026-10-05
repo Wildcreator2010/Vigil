@@ -39,6 +39,31 @@ namespace Vigil
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindow(string className, string windowName);
 
+        // ---- 系统背衬（Mica / Acrylic）----------------------------------------------------
+        //
+        // 为什么绕开 WPF-UI 的 FluentWindow.WindowBackdropType：那个属性硬性要求先
+        // `ExtendsContentIntoTitleBar=true`，否则在**赋值当场**抛 InvalidOperationException
+        // （WPF-UI 4.2 实测：extends=false 时 Mica 和 Acrylic 都抛，只有 None 能过）。
+        // 而控制台用的是标准系统标题栏，改成自绘标题栏会把整页像素口径挪位。
+        // OS 层并没有这个前提：DwmSetWindowAttribute 在保留标准标题栏的窗口上实测返回 S_OK。
+        //
+        // DWMWA_SYSTEMBACKDROP_TYPE 是 Windows 11 22H2 起的；Win10 与更早的 Win11 会返回
+        // 失败 HRESULT，调用方按"没有材质、窗口照常可用"处理（本项目支持面下限是 Win10 1607）。
+        public const int DWMWA_SYSTEMBACKDROP_TYPE = 1025;
+        public const int DWMSBT_NONE = 1;
+        public const int DWMSBT_MAINWINDOW = 2;       // Mica
+        public const int DWMSBT_TRANSIENTWINDOW = 3;  // Acrylic
+
+        [DllImport("dwmapi.dll")]
+        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        /// <summary>返回 HRESULT（0 = 生效）。窗口还没 HWND 时别调。</summary>
+        public static int SetSystemBackdrop(IntPtr hwnd, int value)
+        {
+            int v = value;
+            return DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ref v, 4);
+        }
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
 
