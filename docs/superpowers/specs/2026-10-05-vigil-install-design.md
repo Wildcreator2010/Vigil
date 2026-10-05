@@ -305,7 +305,7 @@ package.cmd [win-x64|win-arm64]
 | 5 | §8 第 8 步 `tar -a -cf` | 一律写 `%SystemRoot%\System32\tar.exe` | 开发机 PATH 上 Git Bash 的 GNU tar 排在前头，它读不了 zip：`This does not look like a tar archive` |
 | 6 | §4 分发物只有 `LICENSE.txt` + `THIRD-PARTY-NOTICES.md` | 新增 `licenses\`：`.NET` 两份 MIT 原文 + `python-PSF.txt` + 索引，由 `tools/collect_licenses.py` 从 NuGet 缓存与 embeddable 包原样收集 | `--self-contained` 是在**分发 .NET 运行时的二进制**，MIT 要求版权声明随副本保留；只在仓库声明文件里写一句"人家是 MIT"不满足条件 |
 | 7 | §9 的 `--package` 只跑 `verify_package.py` | 再加一条：把 `PATH` 削到只剩 `System32` 后跑产物里的 `Vigil.exe --engine-probe` | 原设计那条在宿主 PATH 下跑，挡不住"其实靠的是宿主 python"——而"零前置"要证的恰恰是这件事 |
-8 | §7 "复制中可取消 = 丢弃 `.new`" | 未实现中止复制，复制期间禁用主按钮，`.new` 由下次安装的 `Sweep()` 清 | 几十秒的复制要真中止就得等句柄释放，收益不值；原子性承诺（不留半个装不开的安装）不受影响 |
+| 8 | §7 "复制中可取消 = 丢弃 `.new`" | 未实现中止复制，复制期间禁用主按钮，`.new` 由下次安装的 `Sweep()` 清 | 几十秒的复制要真中止就得等句柄释放，收益不值；原子性承诺（不留半个装不开的安装）不受影响 |
 
 ### 验收补记
 
