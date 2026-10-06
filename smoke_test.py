@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import compression.zstd as zstd  # noqa: F401  # 提前失败：低于 3.14 直接报清晰错误
 import collections
+import colorsys
+import contextlib
 import ctypes
 import ctypes.wintypes as wt
 import glob
@@ -479,7 +481,10 @@ def notices_entries() -> list[dict]:
     cur: dict | None = None
 
     def flush():
-        if cur and cur.get("purpose"):
+        # 「有任一字段行」才算条目，不是「有用途行」：4.3 CPython embeddable 那一节写的
+        # 是版本下限/许可证/原文随附，偏偏没有用途行 —— 按用途判就会把这条**随产物分发**
+        # 的项整个漏掉。判据侧与 Credits.cs 必须同规则，但各写各的代码。
+        if cur and (cur.get("purpose") or cur.get("license") or cur.get("url")):
             entries.append(cur)
 
     for line in text.splitlines():
@@ -534,8 +539,11 @@ def check_about_v5() -> None:
     text = open(src, encoding="utf-8").read() if os.path.isfile(src) else ""
 
     entries = notices_entries()
-    check("THIRD-PARTY-NOTICES.md 解析出条目（判据侧解析器有东西可判）", len(entries) >= 8,
+    check("THIRD-PARTY-NOTICES.md 解析出条目（判据侧解析器有东西可判）", len(entries) >= 10,
           f"只解析出 {len(entries)} 条")
+    check("随产物分发的 CPython/PSF 那一条在清单里（它没有「用途」行，最容易被规则漏掉）",
+          any("CPython" in e["name"] for e in entries),
+          "V5 §3 要单独标出的非 MIT 项，漏一条就是合规缺口")
 
     # ① 清单必须是解析出来的，不是抄进代码的：任何 .cs 里都不许出现上游版权人名。
     copied = []
@@ -577,66 +585,58 @@ def check_about_v5() -> None:
     if not os.path.isfile(BAR_EXE):
         check("Vigil.exe 存在", False, "先跑 --build")
         return
-    settings = os.path.join(ds.state_dir(), "settings.json")
-    backup = open(settings, encoding="utf-8").read() if os.path.isfile(settings) else None
-    subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
-    time.sleep(1.5)
-    write_settings(theme="light", backdrop="mica", showBar=False, notify=False,
-                   interval=2, repeatSec=0)
-    proc = subprocess.Popen([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE))
-    try:
-        hwnd = 0
-        t0 = time.time()
-        while time.time() - t0 < 25 and not hwnd:
-            time.sleep(0.4)
-            hwnd = top_window("Vigil 控制台")
-        check("关于页真窗口开得出来", bool(hwnd), "等满 25 秒没有「Vigil 控制台」窗口")
-        if not hwnd:
-            return
-        time.sleep(3.0)  # 等清单读完 + 首帧合成
-        body = panel_text(hwnd)
-        check("关于页读出 UIA 文本", bool(body), "UIA 一条文本都没抓到")
-        missing = [e["name"] for e in entries if e["name"].replace(" ", "") not in body.replace(" ", "")]
-        check("关于页的清单逐项等于 THIRD-PARTY-NOTICES.md", not missing,
-              f"{len(missing)} 条没显示：" + "、".join(missing[:4]))
-        check("关于页渲染 MIT 全文", "Permission is hereby granted" in body,
-              "V5 §2 / spec §8 要求关于页在应用内渲染同一份清单与许可")
-        check("关于页显示作者 Wildcreator", "Wildcreator" in body, "身份区缺作者")
-        check("专有许可那一项在页面上被单独标出来", "非 MIT · 专有许可" in body,
-              "Segoe 那一格原文写的是「微软专有字体许可（非 MIT）」，混在 MIT 列表里看不出来")
-        check("仓库链接不是系统紫（V2 明文不得出现紫色）",
-              "VigilAccentBrush" in text,
-              "HyperlinkButton 默认吃系统强调色，本机那一个是紫")
+    with isolated_settings(theme="light", backdrop="mica", showBar=False, notify=False,
+                           interval=2, repeatSec=0):
+        proc = subprocess.Popen([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE))
+        try:
+            hwnd = 0
+            t0 = time.time()
+            while time.time() - t0 < 25 and not hwnd:
+                time.sleep(0.4)
+                hwnd = top_window("Vigil 控制台")
+            check("关于页真窗口开得出来", bool(hwnd), "等满 25 秒没有「Vigil 控制台」窗口")
+            if not hwnd:
+                return
+            time.sleep(3.0)  # 等清单读完 + 首帧合成
+            body = panel_text(hwnd)
+            check("关于页读出 UIA 文本", bool(body), "UIA 一条文本都没抓到")
+            missing = [e["name"] for e in entries if e["name"].replace(" ", "") not in body.replace(" ", "")]
+            check("关于页的清单逐项等于 THIRD-PARTY-NOTICES.md", not missing,
+                  f"{len(missing)} 条没显示：" + "、".join(missing[:4]))
+            check("关于页渲染 MIT 全文", "Permission is hereby granted" in body,
+                  "V5 §2 / spec §8 要求关于页在应用内渲染同一份清单与许可")
+            check("关于页显示作者 Wildcreator", "Wildcreator" in body, "身份区缺作者")
+            check("专有许可那一项在页面上被单独标出来", "非 MIT · 专有许可" in body,
+                  "Segoe 那一格原文写的是「微软专有字体许可（非 MIT）」，混在 MIT 列表里看不出来")
+            check("仓库链接不是系统紫（V2 明文不得出现紫色）",
+                  "VigilAccentBrush" in text,
+                  "HyperlinkButton 默认吃系统强调色，本机那一个是紫")
 
-        # 「页面自己放 ScrollViewer」这条外壳契约，运行页在阈值行改矮之后已经撑不出来了
-        # （见 check_panel_settings_live 里那条两分支判据）。关于页天生就长：
-        # 9 条许可清单 + MIT 全文，最小尺寸下必然超视口，所以契约改钉在这一页。
-        u = _user32()
-        wl, wt_, wr, wb = rect_of(hwnd)
-        u.SetWindowPos(hwnd, 0, wl, wt_, 760, 500, 0x0004 | 0x0010)
-        sc = {}
-        prev_h = -1
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            sc = uia(hwnd, "scroll")
-            cur_h = int((sc.get("SVH") or ["-1"])[0])
-            if uia_ok(sc) and cur_h > 0 and cur_h == prev_h:
-                break
-            prev_h = cur_h
-            time.sleep(0.8)
-        check("关于页收到最小尺寸时可滚（清单 + MIT 全文超出视口，外壳不代劳整页滚动）",
-              uia_ok(sc) and (sc.get("VSCROLLABLE") or ["False"])[0] == "True",
-              f"VerticallyScrollable={sc.get('VSCROLLABLE')} SVH={sc.get('SVH')} {sc.get('ERR')}")
-        u.SetWindowPos(hwnd, 0, wl, wt_, wr - wl, wb - wt_, 0x0004 | 0x0010)
-    finally:
-        # 串行段共用的口径：自己备份、自己还原，别把 showBar=false 留给下一段。
-        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
-        time.sleep(1.0)
-        if backup is not None:
-            with open(settings, "w", encoding="utf-8") as fh:
-                fh.write(backup)
-        elif os.path.isfile(settings):
-            os.remove(settings)
+            # 「页面自己放 ScrollViewer」这条外壳契约，运行页在阈值行改矮之后已经撑不出来了
+            # （见 check_panel_settings_live 里那条两分支判据）。关于页天生就长：
+            # 9 条许可清单 + MIT 全文，最小尺寸下必然超视口，所以契约改钉在这一页。
+            u = _user32()
+            wl, wt_, wr, wb = rect_of(hwnd)
+            u.SetWindowPos(hwnd, 0, wl, wt_, 760, 500, 0x0004 | 0x0010)
+            sc = {}
+            prev_h = -1
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                sc = uia(hwnd, "scroll")
+                cur_h = int((sc.get("SVH") or ["-1"])[0])
+                if uia_ok(sc) and cur_h > 0 and cur_h == prev_h:
+                    break
+                prev_h = cur_h
+                time.sleep(0.8)
+            check("关于页收到最小尺寸时可滚（清单 + MIT 全文超出视口，外壳不代劳整页滚动）",
+                  uia_ok(sc) and (sc.get("VSCROLLABLE") or ["False"])[0] == "True",
+                  f"VerticallyScrollable={sc.get('VSCROLLABLE')} SVH={sc.get('SVH')} {sc.get('ERR')}")
+            u.SetWindowPos(hwnd, 0, wl, wt_, wr - wl, wb - wt_, 0x0004 | 0x0010)
+        finally:
+            # 还原前必须等进程真的没了：被强杀的实例还有一瞬活着，退出时会把内存里那份
+            # showBar=false 落盘，盖在还原之后（isolated_settings 的注释里记着这次）。
+            subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+            wait_no_vigil()
 
 
 def _csproj_ships(fname: str) -> bool:
@@ -646,6 +646,138 @@ def _csproj_ships(fname: str) -> bool:
         return False
     body = open(proj, encoding="utf-8").read()
     return fname in body and "CopyToOutputDirectory" in body
+
+
+def wait_no_vigil(seconds: float = 20.0) -> bool:
+    """等到机器上没有 Vigil 进程。被 taskkill 的实例要一会儿才真的消失。"""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if not bar_processes():
+            return True
+        time.sleep(0.4)
+    return not bar_processes()
+
+
+@contextlib.contextmanager
+def isolated_settings(**fields):
+    """临时把 settings.json 换成测试要的字段，出来时**等静默**再还原。
+
+    为什么不能像老写法那样 taskkill 完立刻写回去：被强杀的实例还有一瞬活着，
+    它退出时会把**内存里那份**（也就是测试刚写进去的 showBar=false）落盘，
+    盖在还原之后 —— 于是 ambient 文件被污染，下一个"不带 --panel 起常驻实例、
+    期待状态栏停靠"的门禁就红成一片，而它读到的"原始值"已经是脏的。
+    2026-10-07 那次 14 条红全是这么来的，红因在取样侧不在产品。
+    """
+    path = os.path.join(ds.state_dir(), "settings.json")
+    subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+    wait_no_vigil()
+    backup = open(path, encoding="utf-8").read() if os.path.isfile(path) else None
+    write_settings(**fields)
+    try:
+        yield
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+        wait_no_vigil()
+        if backup is not None:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(backup)
+        elif os.path.isfile(path):
+            os.remove(path)
+
+
+def _shot_pixels(page: str, tag: str):
+    """离屏出一张页，返回 (w, h, RGB 字节)；PNG 看完就删。读不出来给 None。"""
+    out = os.path.join(ds.state_dir(), f"brand-{tag}.png")
+    if os.path.isfile(out):
+        os.remove(out)
+    p = run_shot(page, out)
+    if p is None:
+        return None
+    got = read_png_rgba(out)
+    if os.path.isfile(out):
+        os.remove(out)
+    if got is None:
+        return None
+    w, h, buf = got
+    return w, h, bytes(buf)
+
+
+def _near(px, r, g, b, tol=10) -> bool:
+    return abs(px[0] - r) <= tol and abs(px[1] - g) <= tol and abs(px[2] - b) <= tol
+
+
+def check_brand_pixels() -> None:
+    """品牌视觉的**像素**门禁：量产品，不量源码字面量。
+
+    为什么非要有这一组：V2/V4 那两条（深浅各一档强调色、整套界面不许出现紫色）
+    此前只有"扫 .cs 里的 hex 字面量"这一种判据 —— 而紫色真正的来路恰恰不是字面量，
+    是控件从**系统强调色**派生的画刷（本机那一个是 #680081）。源码扫得再干净，
+    控件模板一漏就画在屏幕上，2026-10-07 那次 HyperlinkButton 就是这么漏的
+    （改之前那张图里有 1114 个紫色像素，而所有源码门禁全绿）。
+    """
+    print("\n== 品牌像素（深浅两档 × 六页）==")
+    if not os.path.isfile(BAR_EXE):
+        check("Vigil.exe 存在", False, "先跑 --build")
+        return
+    if bar_processes():
+        check("离屏出图前无残留实例", False, "已有 Vigil 在跑")
+        return
+    pages = ("overview", "notify", "appearance", "runtime", "balance", "about")
+    # 强调色两档各自的落点：appearance 页上有开关（轨道就是强调色）。
+    accents = {"light": (0xD8, 0x7D, 0x44), "dark": (0xEA, 0x8C, 0x70)}
+    # showBar 必须是 true：外观页那颗开关关掉时轨道走 ControlFillColorDefault，
+    # 屏幕上就只剩两颗单选点是强调色（实测 184 像素），阈值会假红。
+    # 离屏通路不建状态栏窗口，这里开 true 不会真往任务栏上 dock 东西。
+    with isolated_settings(theme="light", backdrop="mica", showBar=True,
+                           notify=False, interval=2, repeatSec=0):
+        for theme in ("light", "dark"):
+            write_settings(theme=theme, backdrop="mica", showBar=True,
+                           notify=False, interval=2, repeatSec=0)
+            purple_total = 0
+            where = ""
+            accent_px = 0
+            card_px = 0
+            page_px = 0
+            for page in pages:
+                got = _shot_pixels(page, f"{theme}-{page}")
+                if got is None:
+                    check(f"{theme}/{page} 离屏出图可读", False, "读不出来")
+                    continue
+                w, h, buf = got
+                tr, tg, tb = accents[theme]
+                for i in range(0, len(buf), 4):
+                    if buf[i + 3] < 8:
+                        continue
+                    r, g, b = buf[i], buf[i + 1], buf[i + 2]
+                    hh, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    if 245 <= hh * 360 <= 300 and ss > 0.25 and vv > 0.12:
+                        purple_total += 1
+                        if not where:
+                            where = f"{theme}/{page} 首个紫色在 ({i // 4 % w}, {i // 4 // w})"
+                    if page == "appearance" and _near((r, g, b), tr, tg, tb):
+                        accent_px += 1
+                    if page == "notify":
+                        if _near((r, g, b), 0xFB, 0xF8, 0xF3):
+                            card_px += 1
+                        if _near((r, g, b), 0xF2, 0xEB, 0xE0):
+                            page_px += 1
+            check(f"{theme}：整套界面没有紫色相像素（245°~300°，V4 明文废除紫色）",
+                  purple_total == 0, f"{purple_total} 个像素，{where}")
+            if theme == "dark":
+                # 浅档的 #D87D44 在深色底上会"发闷"，所以 V2 给深色另提了一档
+                # #EA8C70（落日暮光）。这一条钉的就是"那一档真的落地了"。
+                check(f"{theme}：强调色落在 V2 深档 #EA8C70（不是浅档那一个数）",
+                      accent_px > 200, f"命中 {accent_px} 像素（判据 >200）")
+            else:
+                check(f"{theme}：强调色落在 V2 浅档 #D87D44",
+                      accent_px > 200, f"命中 {accent_px} 像素（判据 >200）")
+            if theme == "light":
+                # V2 表上「卡片底 浅 = 暖纸白 #FBF8F3」，页面底比它深一档暖调。
+                # 这条钉的是别把两者又倒过来（曾经页面=暖纸白、卡片=纯白）。
+                check("light：卡片底是暖纸白 #FBF8F3（V2 那一格）", card_px > 2000,
+                      f"命中 {card_px} 像素")
+                check("light：页面底比卡片深一档 #F2EBE0", page_px > 2000,
+                      f"命中 {page_px} 像素")
 
 
 def check_balance_detail() -> None:
@@ -2556,6 +2688,10 @@ switch ($Action) {
       if ($n.Length -lt 24) { continue }
       $x = $e.Current.BoundingRectangle.X
       if ((($x - $rx) / $scW) -lt 190) { continue }
+      # 只看**从行首起点铺开**的文本：这条量的是 Ui.Row 左侧 Star 列被右侧字段挤没挤，
+      # 而右列（Auto）里那些长 URL / 许可证值本来就窄 —— 关于页的许可清单每条右列是
+      # 「MIT + 上游地址」，Auto 宽实测 171 DIP，不排掉就会把"值列本来就窄"当成"说明被挤坏"。
+      if ((($x - $rx) / $scW) -gt 320) { continue }
       $wd = [int](($e.Current.BoundingRectangle.Width) / $scW)
       if ($min -lt 0 -or $wd -lt $min) { $min = $wd; $who = $n.Substring(0, 20) }
     }
@@ -3887,7 +4023,10 @@ PrintWindow 会连着几次交出上一页那张位图。像素只配回答「�
 「换没换页」得问控件树。"""
 
 
-TEXT_FLOOR_DIP = {"notify": 180, "appearance": 180, "runtime": 180, "balance": 180}
+TEXT_FLOOR_DIP = {"notify": 180, "appearance": 180, "runtime": 180, "balance": 180,
+                  # 关于页在 2026-10-07 补齐 V5 后有了长说明列（许可清单每条都是
+                  # 「名称 + 用途 + 右侧许可证/上游」），不再是"只有三行短取值"，进射程。
+                  "about": 180}
 """四页里「长说明文字」最窄可以接受到多少 DIP（Ui.Row 的 Star 列）。
 
 这条是给 Task 7 复核 I4 补的：余额页那行右侧摆了输入框 + 两颗按钮，把说明文字挤到
@@ -4064,8 +4203,7 @@ def check_panel_direct_page() -> None:
                    ov, prof, waited, tree, heading, fresh)
             # 说明文字有没有被右侧字段挤坏：像素门禁看不见这件事（参照与现场是同一块
             # 挤压后的排版），所以直接量长 TextBlock 的包围盒宽度。
-            # 概览页不在射程里：那张表里的会话标题也是长 TextBlock，窄列是它的设计；
-            # 关于页也不在：它三段是「安装位置 / 版本 / 检测引擎」，没有长说明列。
+            # 概览页不在射程里：那张表里的会话标题也是长 TextBlock，窄列是它的设计。
             if page in TEXT_FLOOR_DIP:
                 wd = uia(hwnd, "wide")
                 got = int((wd.get("MINWIDE") or ["-1"])[0])
@@ -5137,6 +5275,7 @@ def main() -> int:
     check_balance_key_handling()
     check_shot_pipeline()
     check_brand_palette()
+    check_brand_pixels()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
         # 「空表那张」先用假引擎量好：它是本段所有「有没有数据行」门禁的基线
