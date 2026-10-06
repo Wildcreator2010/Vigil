@@ -25,6 +25,8 @@ namespace Vigil
             // 元素级资源查找优先，挂在这里窗口内所有 DynamicResource 才吃得到品牌橙。
             if (App.AccentDictionary != null && !Resources.MergedDictionaries.Contains(App.AccentDictionary))
                 Resources.MergedDictionaries.Add(App.AccentDictionary);
+            if (App.PaletteDictionary != null && !Resources.MergedDictionaries.Contains(App.PaletteDictionary))
+                Resources.MergedDictionaries.Add(App.PaletteDictionary);
             for (int i = 0; i < PanelPages.Keys.Length; i++)
                 Nav.Items.Add(new WpfControls.ListBoxItem { Content = PanelPages.Labels[i], Tag = PanelPages.Keys[i] });
             Nav.SelectedIndex = 0;
@@ -36,6 +38,10 @@ namespace Vigil
             // 新建的窗口不会自己继承上次 ApplyTheme 时设过的材质，得当场补一次；
             // 否则「关了再开」会退回 XAML 里写死的那一档。
             ApplyMaterial();
+            // 构造期还没有 HWND，下面那一步 UpdateBackground 会空转。等句柄建好再补一次：
+            // 不补的话 DWM 那侧（标题栏深浅色 + 系统背衬染色）一直停在**系统主题**上，
+            // 本机系统深色 + 面板浅色 = 白内容外面糊一圈黑框，正是用户骂的那个"大暗角"。
+            SourceInitialized += (s, e) => ApplyMaterial();
             // 关窗只是藏起来：视觉树留着，下次打开不重建；真正销毁只在退出时
             Closing += (s, e) =>
             {
@@ -92,6 +98,16 @@ namespace Vigil
                     WpfControls.Border.BackgroundProperty, "LayerFillColorDefaultBrush");
             }
             Ui.RefreshMaterial();
+            // 把深浅色推给 DWM：标题栏的明暗和系统背衬的染色由这一步决定，
+            // 而 ApplicationThemeManager.Apply 只换 WPF 资源字典，管不到具体窗口的非客户区。
+            // 构造期还没有 HWND，这一步在没句柄时是空操作 —— 由 SourceInitialized 再补一次。
+            // 整段包起来：这个类在构造函数里抛过一次，控制台就在全世界开不出来了。
+            try
+            {
+                Wpf.Ui.Appearance.WindowBackgroundManager.UpdateBackground(
+                    this, App.FluentTheme(), WindowBackdropType);
+            }
+            catch (Exception ex) { App.Log($"外壳主题推送失败: {ex.Message}"); }
         }
 
         /// <summary>

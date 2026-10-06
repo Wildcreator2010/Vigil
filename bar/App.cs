@@ -307,6 +307,99 @@ namespace Vigil
         static System.Windows.ResourceDictionary _accentDict;
 
         /// <summary>
+        /// 品牌色板覆盖层（spec 增补 V2 的那张表）。
+        ///
+        /// 为什么要单独一层：面板的颜色一律 `SetResourceReference` 吃 WPF-UI 主题字典的键，
+        /// 而 WPF-UI 深色调到的是 Windows 默认的 #202020 底 + #2B2B2B 卡 —— 真窗口实测，
+        /// 「落日猎人 / 完美风暴」整套色板一个像素都没落进去，界面就成了用户否决的那种
+        /// 灰黑玻璃。这里把 V2 的色号按主题写进同一批键，追加在合并字典最后抢优先级
+        /// （和 ApplyBrandAccent 同一手法），页面侧一行都不用改。
+        ///
+        /// 只覆盖 Color 不够：WPF-UI 的 `XxxBrush` 是在它自己字典里由 `XxxColor` 现造的，
+        /// 我们的 Color 抢不过它同字典的引用，所以 Color 与 Brush 两个键一起给。
+        /// </summary>
+        static void ApplyBrandPalette()
+        {
+            try
+            {
+                var app = System.Windows.Application.Current;
+                if (app == null) return;
+                if (_paletteDict == null) _paletteDict = new System.Windows.ResourceDictionary();
+
+                bool dark = FluentTheme() == Wpf.Ui.Appearance.ApplicationTheme.Dark;
+                if (dark)
+                {
+                    // 夜巡蓝底 / 哨站灰描边 / 米白字 —— V2 深主题那一列
+                    SetPalette("ApplicationBackgroundColor", 0xFF, 0x2E, 0x38, 0x44);
+                    SetPalette("LayerFillColorDefaultColor", 0xB3, 0x38, 0x43, 0x4A);
+                    SetPalette("CardBackgroundColor", 0xFF, 0x38, 0x43, 0x4A);
+                    SetPalette("CardBackgroundFillColorDefaultColor", 0xFF, 0x38, 0x43, 0x4A);
+                    SetPalette("CardBackgroundFillColorSecondaryColor", 0xFF, 0x3E, 0x4A, 0x52);
+                    SetPalette("CardStrokeColorDefaultColor", 0x8C, 0x5A, 0x63, 0x63);
+                    SetPalette("TextFillColorPrimaryColor", 0xFF, 0xED, 0xE9, 0xE1);
+                    SetPalette("TextFillColorSecondaryColor", 0xFF, 0xB0, 0xA7, 0x88);
+                    SetPalette("TextFillColorTertiaryColor", 0xB3, 0xB0, 0xA7, 0x88);
+                    SetPalette("ControlFillColorDefaultColor", 0x8C, 0x2E, 0x38, 0x44);
+                    SetPalette("ControlFillColorSecondaryColor", 0xA6, 0x3E, 0x4A, 0x52);
+                    SetPalette("ControlStrokeColorDefaultColor", 0x8C, 0x5A, 0x63, 0x63);
+                    SetPalette("DividerStrokeColorDefaultColor", 0x59, 0xED, 0xE9, 0xE1);
+                    SetPalette("SubtleFillColorSecondaryColor", 0x0F, 0xED, 0xE9, 0xE1);
+                }
+                else
+                {
+                    // 暖纸白底 / 黄昏云描边 / 夜影黑字 —— V2 浅主题那一列
+                    SetPalette("ApplicationBackgroundColor", 0xFF, 0xFB, 0xF8, 0xF3);
+                    SetPalette("LayerFillColorDefaultColor", 0xB3, 0xFF, 0xFF, 0xFF);
+                    SetPalette("CardBackgroundColor", 0xFF, 0xFF, 0xFF, 0xFF);
+                    SetPalette("CardBackgroundFillColorDefaultColor", 0xFF, 0xFF, 0xFF, 0xFF);
+                    SetPalette("CardBackgroundFillColorSecondaryColor", 0xFF, 0xF6, 0xF1, 0xE9);
+                    SetPalette("CardStrokeColorDefaultColor", 0x4D, 0xB0, 0xA7, 0x88);
+                    SetPalette("TextFillColorPrimaryColor", 0xFF, 0x2B, 0x2A, 0x23);
+                    SetPalette("TextFillColorSecondaryColor", 0xFF, 0x5D, 0x4B, 0x3F);
+                    SetPalette("TextFillColorTertiaryColor", 0xB3, 0x5D, 0x4B, 0x3F);
+                    SetPalette("ControlFillColorDefaultColor", 0xFF, 0xFF, 0xFF, 0xFF);
+                    SetPalette("ControlFillColorSecondaryColor", 0xFF, 0xFB, 0xF8, 0xF3);
+                    SetPalette("ControlStrokeColorDefaultColor", 0x40, 0x2B, 0x2A, 0x23);
+                    SetPalette("DividerStrokeColorDefaultColor", 0x33, 0x2B, 0x2A, 0x23);
+                    SetPalette("SubtleFillColorSecondaryColor", 0x0A, 0x2B, 0x2A, 0x23);
+                }
+
+                ReMergeLast(app.Resources.MergedDictionaries, _paletteDict);
+                // 窗口级再挂一份：控件在窗口内解析 DynamicResource 时元素级优先，
+                // 光有应用级那一份抢不过 WPF-UI 主题字典（AccentDictionary 同一教训）。
+                var win = PanelWindow.Instance;
+                if (win != null) ReMergeLast(win.Resources.MergedDictionaries, _paletteDict);
+            }
+            catch (Exception ex) { Log($"品牌色板覆盖失败: {ex.Message}"); }
+        }
+
+        static System.Windows.ResourceDictionary _paletteDict;
+
+        /// <summary>色板覆盖字典，面板要把它和 AccentDictionary 一起挂进自己的 Resources。</summary>
+        internal static System.Windows.ResourceDictionary PaletteDictionary => _paletteDict;
+
+        /// <summary>一个键同时给两份：不带后缀的是 Color，带 Brush 的是冻结画刷（a=0xFF 时）。</summary>
+        static void SetPalette(string key, byte a, byte r, byte g, byte b)
+        {
+            var c = System.Windows.Media.Color.FromArgb(a, r, g, b);
+            _paletteDict[key] = c;
+            var br = new System.Windows.Media.SolidColorBrush(c);
+            br.Freeze();
+            _paletteDict[key.Replace("Color", "Brush")] = br;
+        }
+
+        /// <summary>把字典摘出来再追加到最后 —— WPF 查合并字典是后加入者优先，且重新合并会逼 DynamicResource 重解析。</summary>
+        static void ReMergeLast(
+            System.Collections.ObjectModel.Collection<System.Windows.ResourceDictionary> merged,
+            System.Windows.ResourceDictionary dict)
+        {
+            int at = merged.IndexOf(dict);
+            if (at >= 0) merged.RemoveAt(at);
+            merged.Add(dict);
+        }
+
+
+        /// <summary>
         /// 那份强调色覆盖字典。除了挂在应用级，面板还要把它挂进**自己**的 Resources：
         /// WPF-UI 的 ToggleSwitch / 滑块这类控件在窗口内解析 DynamicResource 时，
         /// 元素级字典优先于应用级，而应用级那一份抢不过 WPF-UI 主题字典里
@@ -401,11 +494,73 @@ namespace Vigil
                     _radioStyle = (System.Windows.Style)System.Windows.Markup.XamlReader.Parse(RadioStyleXaml);
                 // 隐式样式的键就是控件类型本身（等价于 XAML 里不写 x:Key 的 Style）
                 app.Resources[typeof(System.Windows.Controls.RadioButton)] = _radioStyle;
+                if (_toggleStyle == null)
+                    _toggleStyle = (System.Windows.Style)System.Windows.Markup.XamlReader.Parse(ToggleStyleXaml);
+                app.Resources[typeof(Wpf.Ui.Controls.ToggleSwitch)] = _toggleStyle;
             }
-            catch (Exception ex) { Log($"RadioButton 模板注入失败: {ex.Message}"); }
+            catch (Exception ex) { Log($"控件模板注入失败: {ex.Message}"); }
         }
 
         static System.Windows.Style _radioStyle;
+        static System.Windows.Style _toggleStyle;
+
+        /// <summary>
+        /// 自绘 ToggleSwitch。
+        ///
+        /// 必须换模板，不能只改资源：真窗口实测开关的开启态是 #8E3AA7（从系统强调色
+        /// #680081 派生），而 spec 增补 V2 明文「不得再出现紫色」。覆盖 `AccentFillColor*`
+        /// 那套键抢不过 WPF-UI 主题字典 —— RadioButton 就是因为同一件事走的模板注入，
+        /// 这里照抄同一手法，轨道直接吃自有的 VigilAccentBrush（品牌橙）。
+        /// </summary>
+        const string ToggleStyleXaml =
+            "<Style TargetType='ui:ToggleSwitch' " +
+            "xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' " +
+            "xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' " +
+            "xmlns:ui='clr-namespace:Wpf.Ui.Controls;assembly=Wpf.Ui'>" +
+            "<Setter Property='Foreground' Value='{DynamicResource TextFillColorPrimaryBrush}'/>" +
+            "<Setter Property='Template'>" +
+            "<Setter.Value>" +
+            "<ControlTemplate TargetType='ui:ToggleSwitch'>" +
+            "<StackPanel Orientation='Horizontal' Background='Transparent'>" +
+            "<Border x:Name='track' Width='40' Height='20' CornerRadius='10' VerticalAlignment='Center'" +
+            " Background='{DynamicResource ControlFillColorDefaultBrush}'" +
+            " BorderBrush='{DynamicResource ControlStrokeColorDefaultBrush}' BorderThickness='1'>" +
+            "<Ellipse x:Name='knob' Width='12' Height='12' Margin='5,0,0,0' HorizontalAlignment='Left'" +
+            " Fill='{DynamicResource TextFillColorSecondaryBrush}'/>" +
+            "</Border>" +
+            "<Grid Margin='8,0,0,0' VerticalAlignment='Center'>" +
+            "<TextBlock x:Name='onText' Text='{TemplateBinding OnContent}' Visibility='Collapsed'" +
+            " Foreground='{DynamicResource TextFillColorPrimaryBrush}'/>" +
+            "<TextBlock x:Name='offText' Text='{TemplateBinding OffContent}'" +
+            " Foreground='{DynamicResource TextFillColorPrimaryBrush}'/>" +
+            "<ContentPresenter x:Name='body' Content='{TemplateBinding Content}'" +
+            " Visibility='Collapsed'/>" +
+            "</Grid>" +
+            "</StackPanel>" +
+            "<ControlTemplate.Triggers>" +
+            "<Trigger Property='IsChecked' Value='True'>" +
+            "<Setter TargetName='track' Property='Background' Value='{DynamicResource VigilAccentBrush}'/>" +
+            "<Setter TargetName='track' Property='BorderBrush' Value='{DynamicResource VigilAccentBrush}'/>" +
+            "<Setter TargetName='knob' Property='HorizontalAlignment' Value='Right'/>" +
+            "<Setter TargetName='knob' Property='Margin' Value='0,0,5,0'/>" +
+            "<Setter TargetName='knob' Property='Fill' Value='{DynamicResource VigilAccentInkBrush}'/>" +
+            "<Setter TargetName='onText' Property='Visibility' Value='Visible'/>" +
+            "<Setter TargetName='offText' Property='Visibility' Value='Collapsed'/>" +
+            "</Trigger>" +
+            "<Trigger Property='HasContent' Value='True'>" +
+            "<Setter TargetName='onText' Property='Visibility' Value='Collapsed'/>" +
+            "<Setter TargetName='offText' Property='Visibility' Value='Collapsed'/>" +
+            "<Setter TargetName='body' Property='Visibility' Value='Visible'/>" +
+            "</Trigger>" +
+            "<Trigger Property='IsEnabled' Value='False'>" +
+            "<Setter Property='Opacity' Value='0.45'/>" +
+            "</Trigger>" +
+            "</ControlTemplate.Triggers>" +
+            "</ControlTemplate>" +
+            "</Setter.Value>" +
+            "</Setter>" +
+            "</Style>";
+
 
         internal static void ApplyTheme()
         {
@@ -419,6 +574,7 @@ namespace Vigil
                 Ui.Glass = GlassMode;
                 Ui.RefreshMaterial();
                 ApplyBrandAccent();
+                ApplyBrandPalette();
                 ApplyFluentControls();
                 PanelWindow.Instance?.ApplyMaterial();
             }
@@ -622,8 +778,9 @@ namespace Vigil
             ApplyTheme();
         }
 
-        /// <summary>settings.json 的 theme 是 light/dark/system；system 按当前系统主题就地解析。</summary>
-        static Wpf.Ui.Appearance.ApplicationTheme FluentTheme()
+        /// <summary>settings.json 的 theme 是 light/dark/system；system 按当前系统主题就地解析。
+        /// 面板外壳要把同一个值推给 DWM，所以对窗口暴露。</summary>
+        internal static Wpf.Ui.Appearance.ApplicationTheme FluentTheme()
         {
             string t = _settings?.Theme ?? "light";
             if (t == "dark") return Wpf.Ui.Appearance.ApplicationTheme.Dark;
