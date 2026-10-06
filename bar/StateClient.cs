@@ -44,7 +44,17 @@ namespace Vigil
         [JsonPropertyName("available")] public bool Available { get; set; }
         [JsonPropertyName("currency")] public string Currency { get; set; }
         [JsonPropertyName("total")] public string Total { get; set; }
+        /// <summary>赠送额度与充值额度分开：DeepSeek 的余额接口本来就分这两笔
+        /// （dsh_state.py 的 granted_balance / topped_up_balance），合在一起看不出
+        /// 「充的钱还没动、送的可用完了」那种状态。</summary>
+        [JsonPropertyName("granted")] public string Granted { get; set; }
+        [JsonPropertyName("topped_up")] public string ToppedUp { get; set; }
         [JsonPropertyName("error")] public string Error { get; set; }
+        /// <summary>这一帧的取数时间（unix 秒）。0 表示引擎没给。</summary>
+        [JsonPropertyName("fetched_at")] public double FetchedAt { get; set; }
+        /// <summary>是不是 TTL 内的缓存帧。5 分钟内的重复快照都算缓存，
+        /// 不标出来用户点完「立即刷新」看不出到底重查了没有。</summary>
+        [JsonPropertyName("cached")] public bool Cached { get; set; }
         /// <summary>Key 的**来源**，不是 Key 本身：`env:DEEPSEEK_BALANCE_KEY` / `dpapi` /
         /// `file:xxx` / `none`（dsh_state.py 的 balance_key）。面板只显示这一格，
         /// 好让用户看清「环境变量盖住了已保存的 Key」这种情形。缺失时为 null

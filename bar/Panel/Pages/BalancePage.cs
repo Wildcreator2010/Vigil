@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Windows;
 using WpfControls = System.Windows.Controls;
@@ -39,11 +40,15 @@ namespace Vigil
         /// <summary>三颗动作按钮，后台跑引擎时一起禁用（见 Busy）。</summary>
         readonly List<UiControls.Button> _acts = new List<UiControls.Button>();
 
-        /// <summary>余额那一行：跟着最近一帧快照刷新，只有文本、不含任何 Key。</summary>
+        /// <summary>
+        /// 余额明细：跟着最近一帧快照刷新，只有文本、不含任何 Key。
+        /// 两行 —— 第一行三笔钱（总额 / 赠送 / 充值），第二行来源与取数时间。
+        /// 引擎的 balance_infos 本来就分 granted / topped_up 两笔，只报合计就看不出
+        /// 「充的钱没动、送的用完了」这种状态。
+        /// </summary>
         readonly WpfControls.TextBlock _state = new WpfControls.TextBlock
         {
             FontSize = 12,
-            Margin = new Thickness(14, 11, 14, 11),
             TextWrapping = TextWrapping.Wrap,
             Text = "还没有余额信息，等引擎的第一帧。",
         };
@@ -121,8 +126,11 @@ namespace Vigil
                     Ui.Row("生效优先级",
                         "环境变量 DEEPSEEK_BALANCE_KEY > DEEPSEEK_API_KEY > 已保存的加密 Key > 明文文件。" +
                         "环境变量存在时会盖住已保存的 Key。", null),
-                    _state,
                     _op),
+                Ui.Group("余额",
+                    Ui.StackedRow("余额明细",
+                        "总额 = 赠送 + 充值。赠送那笔到期作废，充值那笔按用量扣，所以分开看才有意义。",
+                        _state)),
                 Ui.Group("查询",
                     Ui.Row("刷新", "默认 5 分钟查一次，这里可以立刻重查。", refresh)));
             HorizontalContentAlignment = HorizontalAlignment.Stretch;
@@ -169,9 +177,30 @@ namespace Vigil
             var b = snap?.Balance;
             if (b == null) return;
             string src = string.IsNullOrEmpty(b.Source) ? "未知" : b.Source;
-            _state.Text = b.Available
-                ? $"当前余额 {b.Currency} {b.Total}（来源 {src}）"
-                : $"余额不可用：{b.Error}（来源 {src}）";
+            if (!b.Available)
+            {
+                _state.Text = $"余额不可用：{b.Error}（来源 {src}）";
+                return;
+            }
+            _state.Text =
+                $"总额 {Money(b, b.Total)} · 赠送 {Money(b, b.Granted)} · 充值 {Money(b, b.ToppedUp)}\n" +
+                $"来源 {src} · 更新于 {When(b.FetchedAt)}" + (b.Cached ? " · 缓存帧（未重查）" : " · 刚查过");
+        }
+
+        /// <summary>币种符号与引擎的 format_money 同一套口径；接口没给金额时如实显示 --。</summary>
+        static string Money(Balance b, string amount)
+        {
+            if (string.IsNullOrEmpty(amount)) return "--";
+            string sym = b.Currency == "USD" ? "$" : b.Currency == "CNY" ? "¥" : (b.Currency + " ");
+            return sym + amount;
+        }
+
+        /// <summary>取数时间只到秒：这一格是判断「刚才是不是真重查了」，不是打卡。</summary>
+        static string When(double unixSeconds)
+        {
+            if (unixSeconds <= 0) return "未知";
+            return DateTimeOffset.FromUnixTimeSeconds((long)unixSeconds).LocalDateTime
+                .ToString("MM-dd HH:mm:ss");
         }
     }
 }
