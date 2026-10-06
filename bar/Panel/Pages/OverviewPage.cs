@@ -227,8 +227,24 @@ namespace Vigil
         {
             var items = snap.Waiting;
             if (items == null || items.Count == 0) return "没有待处理的问题";
+            // 选项不在 waiting 条目里，在 sessions[].pending.options —— spec §4 明写
+            // 「pending.options 保留，因为 §5 概览页要求就地显示待处理问题的选项」，
+            // 而这一格此前一直没显示出来，等于那个保留理由落空了。按 key 对回去。
+            var byKey = new Dictionary<string, Pending>();
+            if (snap.Sessions != null)
+                foreach (var s in snap.Sessions)
+                    if (s.Pending != null && !string.IsNullOrEmpty(s.Key)) byKey[s.Key] = s.Pending;
+
             var parts = new List<string>(items.Count);
-            foreach (var w in items) parts.Add($"{w.Project}：{w.Text}");
+            foreach (var w in items)
+            {
+                string line = $"{w.Project}：{w.Text}";
+                Pending p = null;
+                if (!string.IsNullOrEmpty(w.Key)) byKey.TryGetValue(w.Key, out p);
+                if (p != null && p.Options != null && p.Options.Count > 0)
+                    line += "（可选：" + string.Join(" ｜ ", p.Options) + "）";
+                parts.Add(line);
+            }
             return string.Join("\n", parts);
         }
 

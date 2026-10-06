@@ -67,6 +67,10 @@ namespace Vigil
         [JsonPropertyName("project")] public string Project { get; set; }
         [JsonPropertyName("state")] public string State { get; set; }
         [JsonPropertyName("text")] public string Text { get; set; }
+        /// <summary>会话目录名。引擎的 waiting 条目本来就带这一格（dsh_state.py 的
+        /// snapshot()["waiting"]），C# 侧此前没接。概览页要靠它把待处理正文
+        /// 对回 sessions[].pending.options —— spec §4 保留 options 的理由就是 §5 那一格。</summary>
+        [JsonPropertyName("key")] public string Key { get; set; }
     }
 
     public sealed class Usage

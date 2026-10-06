@@ -25,7 +25,8 @@ namespace Vigil
         public string Purpose { get; set; }
 
         /// <summary>
-        /// 许可证的短名：只取括号前的那一小截，并去掉 markdown 的 `**`。
+        /// 许可证的短名：只取括号/分隔符前的那一小截，并去掉 markdown 的 `**`。
+        /// 截断集里必须带全角「，」：「MIT，且随产物分发」这种写法不截就会把整句铺到界面上。
         /// notices 里那一格写的是整句依据（「MIT（nuspec &lt;license .../&gt;，且 require...」），
         /// 直接铺到界面上就是一张全是字的卡，读不出重点。
         /// </summary>
@@ -34,7 +35,7 @@ namespace Vigil
             get
             {
                 string s = (License ?? "").Replace("**", "").Trim();
-                int cut = s.IndexOfAny(new[] { '（', '(', '｜', '|', ',' });
+                int cut = s.IndexOfAny(new[] { '（', '(', '｜', '|', ',', '，' });
                 if (cut > 0) s = s.Substring(0, cut).Trim();
                 return s;
             }
@@ -66,6 +67,19 @@ namespace Vigil
             new Regex(@"^-\s+\*\*(.+?)\*\*\s*[：:]\s*(.*)$", RegexOptions.Compiled);
         static readonly Regex HttpUrl = new Regex(@"https?://\S+", RegexOptions.Compiled);
 
+        /// <summary>
+        /// 是不是一个条目：三个字段行有任意一个就算。
+        ///
+        /// 原来只认「有用途行」，结果 4.3 CPython embeddable 整条从清单里消失了 ——
+        /// 那一节写的是「版本下限 / 许可证 / 原文随附」，偏偏没有 `- **用途**：`。
+        /// 漏掉的恰好是**随产物分发**的那一项，合规页漏这一条比漏十个 MIT 包都严重。
+        /// 容器节（## 2、## 4）只有散文、一个字段行都没有，照样被排除。
+        /// </summary>
+        static bool IsEntry(Credit c) =>
+            c != null && (!string.IsNullOrEmpty(c.Purpose)
+                          || !string.IsNullOrEmpty(c.License)
+                          || !string.IsNullOrEmpty(c.Url));
+
         /// <summary>清单文件与 exe 同目录（csproj 里 CopyToOutputDirectory 带出来的）。</summary>
         public static string NoticesPath =>
             Path.Combine(AppContext.BaseDirectory, "THIRD-PARTY-NOTICES.md");
@@ -93,7 +107,7 @@ namespace Vigil
                 var head = Heading.Match(line);
                 if (head.Success)
                 {
-                    if (cur != null && !string.IsNullOrEmpty(cur.Purpose)) list.Add(cur);
+                    if (IsEntry(cur)) list.Add(cur);
                     string title = head.Groups[2].Value;
                     cur = new Credit
                     {
@@ -119,7 +133,7 @@ namespace Vigil
                     if (m.Success) cur.Url = m.Value.TrimEnd('｜', '|', ',', '，', '。');
                 }
             }
-            if (cur != null && !string.IsNullOrEmpty(cur.Purpose)) list.Add(cur);
+            if (IsEntry(cur)) list.Add(cur);
             return list;
         }
 

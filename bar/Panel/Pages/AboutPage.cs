@@ -81,8 +81,11 @@ namespace Vigil
                 head.Children.Add(new WpfControls.Image
                 {
                     Source = new BitmapImage(new Uri("pack://application:,,,/assets/logo.png")),
-                    Width = 96,
-                    Height = 96,
+                    // V6 说的是「关于页顶部放 256 大图」—— 指的是用那份 256px 的素材，
+                    // 不是把边长写成 256 DIP：本机 125% 缩放下 256 DIP 要放大到 320 物理像素，
+                    // 反而糊。128 DIP（=160 物理像素）是这张图既"大"又不插值的上限。
+                    Width = 128,
+                    Height = 128,
                     Margin = new Thickness(0, 0, 0, 10),
                     Stretch = Stretch.Uniform,
                 });
@@ -194,13 +197,19 @@ namespace Vigil
             return Ui.Group("运行时与素材声明", rows.ToArray());
         }
 
+        /// <summary>
+        /// 「非 MIT」那一格的标记。金色来自 <see cref="Ui.SubAccent"/>（V2 的次强调），
+        /// 不用红色 —— V4 把红保留给状态码「出错了」，拿它做合规提醒等于把状态语义借走。
+        /// </summary>
         static FrameworkElement LicenseTag(string license)
         {
             var tag = new WpfControls.Border
             {
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(8, 2, 8, 2),
-                Background = new SolidColorBrush(Color.FromArgb(0x26, 0xC6, 0x5B, 0x51)),
+                Background = Ui.SubAccentTint,
+                BorderBrush = Ui.SubAccent,
+                BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Right,
                 MaxWidth = 320,
