@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import ctypes
 import ctypes.wintypes as wt
 import glob
@@ -423,12 +424,24 @@ def classify(sess: dict, mtime: float, ts: float) -> dict:
 
 # ---------------------------------------------------------------- 汇总快照
 
-_SESSION_CACHE: dict[str, tuple[tuple[int, float], dict]] = {}
-_CACHE_MAX = 40
+_SESSION_CACHE: "collections.OrderedDict[str, tuple[tuple[int, float], dict]]" = \
+    collections.OrderedDict()
+_CACHE_MAX = 200
+"""缓存里最多留多少个会话（LRU 逐个淘汰，见 `read_session_cached`）。
+
+200 是量出来的：本机 `~/.dsh` 里有 59 个会话文件，旧值 40 加上「一超就 `clear()` 整个
+字典」的写法，等于每轮扫到第 41 个就把前面 40 个全丢掉 —— 缓存对 59 个会话**永远不命中**，
+每 2 秒一帧的常驻扫描都要把全部会话重新解压解析一遍（实测单轮 1567ms，
+`test_dsh_state.py` 那条「缓存未生效」红的就是这个）。200 给普通用户留出几倍余量，
+真超了也只是淘汰最久没碰的那一个，不会一夜回到全量重读。"""
 
 
 def read_session_cached(path: str) -> dict:
-    """按 (大小, mtime) 复用解析结果：常驻 watch 模式下每轮只重新解压真正变化过的会话。"""
+    """按 (大小, mtime) 复用解析结果：常驻 watch 模式下每轮只重新解压真正变化过的会话。
+
+    LRU 而不是「超了就清空」：会话数一旦超过上限，清空式缓存的命中率是 0，
+    而这恰恰是它最需要起作用的时候（`_CACHE_MAX` 那段有本机实测数字）。
+    """
     try:
         st = os.stat(path)
         stamp = (st.st_size, st.st_mtime)
@@ -436,11 +449,13 @@ def read_session_cached(path: str) -> dict:
         return read_session(path)
     hit = _SESSION_CACHE.get(path)
     if hit and hit[0] == stamp:
+        _SESSION_CACHE.move_to_end(path)
         return hit[1]
     sess = read_session(path)
-    if len(_SESSION_CACHE) > _CACHE_MAX:
-        _SESSION_CACHE.clear()
     _SESSION_CACHE[path] = (stamp, sess)
+    _SESSION_CACHE.move_to_end(path)
+    while len(_SESSION_CACHE) > _CACHE_MAX:
+        _SESSION_CACHE.popitem(last=False)
     return sess
 
 
