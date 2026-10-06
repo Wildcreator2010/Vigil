@@ -3799,7 +3799,8 @@ def check_panel_direct_page() -> None:
                 os.remove(req)
             # 「请求之前那一帧」是新鲜度的参照：拿不到它就退化成只比配色。
             wb, hb, bufb = capture_bar(hwnd, shot, scale=scale)
-            before = box_hash(bufb, wb, hb, scale) if wb else ""
+            # 别叫 before：本函数 finally 里那个 `before = python_pids()` 是 PID 集合。
+            pre_hash = box_hash(bufb, wb, hb, scale) if wb else ""
             # 用 Popen 而不是 run(timeout=30)：这句的本意是"二次实例把请求递进去就退"，
             # 可一旦常驻实例不在了（前面的门禁把它收了、或前台被抢导致它没起来），
             # 这一句就变成**冷启动一个不退出 Vigil 主进程**，run() 必然等满 30 秒抛
@@ -3810,7 +3811,7 @@ def check_panel_direct_page() -> None:
             while time.time() - t1 < 12 and os.path.isfile(req):
                 time.sleep(0.3)
             consumed = not os.path.isfile(req)
-            ov, prof, hh, waited, tree, heading, fresh = settle(page, before)
+            ov, prof, hh, waited, tree, heading, fresh = settle(page, pre_hash)
             hashes[page] = hh
             report(page, f"二次实例 --panel {page}"
                    f"{'（请求文件已消费）' if consumed else '（请求文件 12 秒没被消费！）'}",
