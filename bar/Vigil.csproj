@@ -29,6 +29,17 @@
 
   <ItemGroup>
     <None Include="..\dsh_state.py" Link="dsh_state.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 关于页的第三方清单**从这份文件解析**，不在 C# 里手抄（spec 增补 V5 §2：
+         手抄必然漂移）。所以它得跟着 exe 一起分发，开发目录和安装包都要有。 -->
+    <None Include="..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- <Authors> 默认不进程序集，关于页要显示作者就只能硬编码一份 —— 那正是 V5 禁止的
+         复制。挂成 AssemblyMetadata 后页面读的是工程文件里的同一个值。
+         RepositoryUrl 由 SDK 自动emit，不用重复声明。 -->
+    <AssemblyMetadata Include="Authors" Value="$(Authors)" />
   </ItemGroup>
 
   <ItemGroup>

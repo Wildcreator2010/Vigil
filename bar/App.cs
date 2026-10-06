@@ -46,8 +46,26 @@ namespace Vigil
             }
         }
 
-        private static Settings _settings;
-        private static BarWindow _window;
+        /// <summary>
+        /// 作者与仓库地址一律从工程文件读：`&lt;Authors&gt;` 经 AssemblyMetadata 进程序集，
+        /// `&lt;RepositoryUrl&gt;` 由 SDK 自动 emit。关于页不许把这两个值抄成字面量 ——
+        /// 改了工程文件页面还写着旧作者、旧仓库，那一节就成了 AF-Media-Bar 注释里说的"装饰"。
+        /// 读不到就留空，由冒烟那条"关于页显示作者"的门禁负责喊红。
+        /// </summary>
+        internal static string AuthorText => AssemblyMetadata("Authors");
+        internal static string RepoUrl => AssemblyMetadata("RepositoryUrl");
+
+        static string AssemblyMetadata(string key)
+        {
+            foreach (var obj in typeof(App).Assembly
+                         .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false))
+            {
+                if (obj is System.Reflection.AssemblyMetadataAttribute a && a.Key == key) return a.Value;
+            }
+            return "";
+        }
+
+        private static Settings _settings;        private static BarWindow _window;
         private static NotifyIcon _tray;
         private static StateClient _client;
         private static DispatcherTimer _watchdog;
