@@ -221,14 +221,52 @@ namespace Vigil
             return StateMap.TryGetValue(state ?? "", out var v) ? v.Label : "未知";
         }
 
+        /// <summary>状态码对应的色号（引擎报什么色画什么色），未知码落到「未知」那一格。</summary>
+        public static string HexOf(string state)
+        {
+            return StateMap.TryGetValue(state ?? "", out var v) ? v.Hex : StateMap["unknown"].Hex;
+        }
+
+        static readonly Dictionary<string, Brush> Tints = new Dictionary<string, Brush>();
+
+        /// <summary>
+        /// 状态徽章的那层底色：状态色压到 15% 不透明度。
+        /// 徽章上的文字**不**用状态色 —— 「待命 #D2D2C8」「回答完成 #BFD268」这类浅色
+        /// 压在白卡上根本读不了，所以文字吃主题墨色，颜色只由那枚小圆点承担。
+        /// </summary>
+        public static Brush TintOf(string state)
+        {
+            string hex = HexOf(state);
+            lock (Tints)
+            {
+                if (Tints.TryGetValue(hex, out var hit)) return hit;
+                Color c;
+                try { c = (Color)ColorConverter.ConvertFromString(hex); }
+                catch { c = (Color)ColorConverter.ConvertFromString("#8E918A"); }
+                var tint = Frozen(Color.FromArgb(0x26, c.R, c.G, c.B));
+                Tints[hex] = tint;
+                return tint;
+            }
+        }
+
         static readonly Brush Fallback = Frozen(Color.FromRgb(0x5D, 0x4B, 0x3F));
 
+        static readonly Dictionary<string, Brush> Solid = new Dictionary<string, Brush>();
+
         /// <summary>状态色是**数据驱动**的（引擎报什么色画什么色），不是主题色，
-        /// 所以这里返回具体 Brush 而不走 Ui.Ref；解析失败退回次级文字色。</summary>
+        /// 所以这里返回具体 Brush 而不走 Ui.Ref；解析失败退回次级文字色。
+        /// 按色号缓存：概览页每 2 秒把最多 60 行重投影一遍，不缓存就是每轮新建 60 根画刷。</summary>
         public static Brush BrushOf(string hex)
         {
-            try { return Frozen((Color)ColorConverter.ConvertFromString(hex)); }
-            catch { return Fallback; }
+            lock (Solid)
+            {
+                if (Solid.TryGetValue(hex ?? "", out var hit)) return hit;
+                Brush b;
+                try { b = Frozen((Color)ColorConverter.ConvertFromString(hex)); }
+                catch { b = Fallback; }
+                Solid[hex ?? ""] = b;
+                return b;
+            }
         }
 
         static Brush Frozen(Color c)

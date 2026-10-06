@@ -62,7 +62,7 @@ namespace Vigil
             Ui.Ref(_sub, WpfControls.TextBlock.ForegroundProperty, Ui.InkDimKey);
             Ui.Ref(_waiting, WpfControls.TextBlock.ForegroundProperty, Ui.InkKey);
             AddColumn("项目", "Project", 132);
-            AddColumn("状态", "StateLabel", 76);
+            AddStateColumn();
             AddColumn("轮次", "TurnText", 62);
             AddColumn("静默", "AgeText", 60);
             AddColumn("任务", "TodoText", 50);
@@ -159,6 +159,55 @@ namespace Vigil
             });
         }
 
+        /// <summary>
+        /// 状态那一列是徽章，不是纯文本（spec §5 从建页起就写着「状态徽章」，
+        /// 之前一直用 DataGridTextColumn 直出中文标签，等于把这格欠着）。
+        ///
+        /// 徽章 = 状态色 15% 底的圆角药丸 + 一枚同色圆点 + 主题墨色文字。
+        /// 文字**不能**用状态色：待命 #D2D2C8、回答完成 #BFD268 在白卡上读不出来。
+        /// 颜色是数据驱动的，所以底色/圆点绑 SessionView 上算好的画刷，
+        /// 文字前景走 DynamicResource（FrameworkElementFactory 里挂资源只能用这个形式）。
+        /// </summary>
+        void AddStateColumn()
+        {
+            var pill = new FrameworkElementFactory(typeof(WpfControls.Border));
+            pill.SetValue(WpfControls.Border.CornerRadiusProperty, new CornerRadius(9));
+            pill.SetValue(WpfControls.Border.PaddingProperty, new Thickness(7, 2, 9, 2));
+            pill.SetValue(WpfControls.Border.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            pill.SetValue(WpfControls.Border.VerticalAlignmentProperty, VerticalAlignment.Center);
+            pill.SetBinding(WpfControls.Border.BackgroundProperty,
+                new System.Windows.Data.Binding("StateTint"));
+
+            var line = new FrameworkElementFactory(typeof(WpfControls.StackPanel));
+            line.SetValue(WpfControls.StackPanel.OrientationProperty, WpfControls.Orientation.Horizontal);
+            pill.AppendChild(line);
+
+            var dot = new FrameworkElementFactory(typeof(System.Windows.Shapes.Ellipse));
+            dot.SetValue(FrameworkElement.WidthProperty, 6.0);
+            dot.SetValue(FrameworkElement.HeightProperty, 6.0);
+            dot.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            dot.SetBinding(System.Windows.Shapes.Shape.FillProperty,
+                new System.Windows.Data.Binding("StateBrush"));
+            line.AppendChild(dot);
+
+            var text = new FrameworkElementFactory(typeof(WpfControls.TextBlock));
+            text.SetValue(WpfControls.TextBlock.MarginProperty, new Thickness(6, 0, 0, 0));
+            text.SetValue(WpfControls.TextBlock.FontSizeProperty, 12.0);
+            text.SetValue(WpfControls.TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
+            text.SetValue(WpfControls.TextBlock.ForegroundProperty,
+                new DynamicResourceExtension(Ui.InkKey));
+            text.SetBinding(WpfControls.TextBlock.TextProperty,
+                new System.Windows.Data.Binding("StateLabel"));
+            line.AppendChild(text);
+
+            _grid.Columns.Add(new WpfControls.DataGridTemplateColumn
+            {
+                Header = "状态",
+                CellTemplate = new DataTemplate { VisualTree = pill },
+                Width = new WpfControls.DataGridLength(96),
+            });
+        }
+
         public void Refresh(Snapshot snap)
         {
             if (snap == null) return;
@@ -195,6 +244,8 @@ namespace Vigil
     {
         public string Project { get; set; }
         public string StateLabel { get; set; }
+        public System.Windows.Media.Brush StateBrush { get; set; }
+        public System.Windows.Media.Brush StateTint { get; set; }
         public string TurnText { get; set; }
         public string AgeText { get; set; }
         public string TodoText { get; set; }
@@ -212,6 +263,8 @@ namespace Vigil
                 {
                     Project = r.Project,
                     StateLabel = Ui.LabelOf(r.State),
+                    StateBrush = Ui.BrushOf(Ui.HexOf(r.State)),
+                    StateTint = Ui.TintOf(r.State),
                     TurnText = r.Turn.HasValue ? $"T{r.Turn}" + (r.Step.HasValue ? $"/S{r.Step}" : "") : "",
                     AgeText = Age(r.AgeSec),
                     TodoText = r.Todo == null || r.Todo.Total == 0 ? "—" : $"{r.Todo.Done}/{r.Todo.Total}",
