@@ -2132,8 +2132,13 @@ $spins   = @($all | Where-Object { $_.Current.ClassName -eq 'RepeatButton' })
 # 页面自带的那个 ScrollViewer 在内容列里；侧栏 ListBox 模板里若也藏一个，不能算在页面头上。
 $scrolls = @($all | Where-Object { $_.Current.ClassName -eq 'ScrollViewer' -and
                                    ($_.Current.BoundingRectangle.X - $rx) -gt 200 })
+# 按钮只算**页面区**里的：标题栏那颗「收到托盘」也是 Button，而「运行页控件齐」这条
+# 断言的是页面上的动作按钮集合，混进外壳控件就是假红。
+# 按 y 过滤（页面原点在标题栏之下），按 x 挡不住 —— 那颗按钮在标题栏右侧，x 比页面按钮还大。
+$ry0 = $root.Current.BoundingRectangle.Y
 $buttons = @($all | Where-Object { $_.Current.ClassName -eq 'Button' -and $_.Current.Name -ne '' -and
-                                   $null -ne (Pat $_ $PInv) })
+                                   $null -ne (Pat $_ $PInv) -and
+                                   (($_.Current.BoundingRectangle.Y - $ry0) / ($root.Current.BoundingRectangle.Width / 960.0)) -ge 68 })
 # 数字框自己的加减档：中心落在那个编辑框矩形里的那两颗。
 # 整页滚动条也是 RepeatButton（Name 是 CaretUp24/CaretDown24 加一颗翻页键），
 # 窗口收窄时它就贴着数字框右沿，只按「在不在数字框左边」分不开 —— 按中心点算才稳。

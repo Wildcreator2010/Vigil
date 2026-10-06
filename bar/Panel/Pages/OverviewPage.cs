@@ -103,7 +103,15 @@ namespace Vigil
             root.Children.Add(head);
             root.Children.Add(table);
             root.Children.Add(wait);
-            Content = root;
+            // 整页底色必须由页面自己铺一层挂 Ui.PageKey 的 Border —— 和其他五页同一口径。
+            // 少这一层时，卡片底下露出的是窗口自己的背衬：真窗口里 Mica/Acrylic 会把桌面
+            // 透上来（实测 ~#D3D3D3），而离屏 --panel-shot 那块是透明，于是半透明白卡片
+            // 压在两种底上，量出来 #F2F2F2 对 #FEFEFE，比样当场红（概览页是唯一漏铺的页）。
+            HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            VerticalContentAlignment = VerticalAlignment.Stretch;
+            var backdrop = new WpfControls.Border { Child = root };
+            Ui.Ref(backdrop, WpfControls.Border.BackgroundProperty, Ui.PageKey);
+            Content = backdrop;
         }
 
         /// <summary>
