@@ -1076,15 +1076,28 @@ def shot_table_stats(path: str) -> dict | None:
     paper_n = colors[paper] if colors else 0
     # 第二遍：逐行统计（covered 数、纸色数、跨度、成排的线）。
     p = 0
-    paper_per_row, row_covered = [], []
+    paper_per_row, row_covered, line_rows = [], [], []
+    white_run = 0
+    # 逐字节 #FFFFFFFF 的**最长横向连续段**。这是「表底写死成白」的直接度量：
+    # 一块白底是一整条几百像素的横段（写死那版实测 ~700），而深色主题下**正文文字**
+    # 本身就是 #FFFFFFFF（TextFillColorPrimaryBrush 在深底上是不透明白），
+    # 它的抗锯齿芯只能连出十几像素（本机实测 24）。拿像素**总数**当判据会被文字骗过
+    # —— 深色主题概览页实测 6861 个纯白像素、阈值 2000，那条门禁因此从「能红」
+    # 变成「换个主题就红」。
     for y in range(h):
         row = buf[p:p + stride]
         p += stride
         cnt: collections.Counter = collections.Counter()
         first = last = -1
+        run = 0
         for x in range(w):
             c = row[x * 4:x * 4 + 4]
             cnt[c] += 1
+            if c == b"\xff\xff\xff\xff":
+                run += 1
+                white_run = max(white_run, run)
+            else:
+                run = 0
             if c[3] >= COVER_A:
                 if first < 0:
                     first = x
@@ -1100,6 +1113,7 @@ def shot_table_stats(path: str) -> dict | None:
         wide = [(c, n) for c, n in cnt.items() if n >= 600 and c != paper and c[3] >= COVER_A]
         if wide:
             hlines += 1
+            line_rows.append(y)
     # 滚动证据：靠右 24px 条带（x ∈ [w-24, w-3)，绕开最右那 1px 描边）里
     # 「同一个 covered 非纸色竖着连续」的最长像素数。滚动条滑块是一根几像素宽、
     # 几百像素高的竖条；行分隔线只有孤立的 1~2 行高，两者在这一项上差两个数量级。
@@ -1148,9 +1162,15 @@ def shot_table_stats(path: str) -> dict | None:
     # 卡片被顶到底边距外 —— 实测正确形状 below_table=15（就是那张卡），溢出形状 30+。
     table_band = max(bands, key=lambda bl: bl[1] - bl[0]) if bands else (-1, -1)
     below_table = sum(1 for y in range(table_band[1] + 1, h) if row_covered[y])
+    # 「行分隔线」必须**只在表格带里数**。整画布数法在概览页补上整页底色之后就不成立了：
+    # 卡片之间那几段空隙是一整行同一种底色，每行都过「同一非纸色 ≥600 像素」这条，
+    # 空表因此实测 130 条「线」（深浅主题一样，本机实测），而阈值是 6 ——
+    # 门禁从「能红」变成「永远红」，和红得没道理一样糟。
+    band_hlines = sum(1 for y in line_rows if table_band[0] <= y <= table_band[1])
     return {
         "w": w, "h": h, "total": w * h, "cover": cover, "ink": ink,
         "paper": paper, "paper_n": paper_n, "pure_white": pure_white,
+        "white_run": white_run, "band_hlines": band_hlines,
         "x0": x0, "x1": x1, "y0": y0, "y1": y1, "hlines": hlines,
         "vscroll": vscroll, "bands": bands,
         "table_band": table_band,
@@ -1586,14 +1606,17 @@ def row_data_gate(st: dict, base: dict) -> bool:
     """「表里真的有数据行」：与空表那张做**差**，不钉绝对值。
 
     注入实测（同一台机器、同一次运行、固定 96 DPI 离屏，Task 8 换主题刷后的**新纸色口径**）：
-    空表基线 横线 1 / 非纸色 5883，1 行 → +1 / +3536，3 行 → +3 / +6267，29 行 → +9 / +14832。
+    空表基线 带内横线 0 / 非纸色 5883，1 行 → +1 / +3536，3 行 → +3 / +6267，
+    29 行 → +8 / +14832。深浅主题两组数字相同（2026-10-06 各量过一遍）。
+    横线只数**表格带以内**（`band_hlines`）：概览页补上整页底色之后，卡片之间那几段
+    整行同色的底衬会被 `hlines` 数成 130 条线，空表也过不了「< 6」那条阈值。
     判据仍是最松的 1 行情形：横线至少多 1 条、非纸色至少多 600 像素（600 对 3536 留 5.9 倍）。
     旧版钉的是 hlines >= 6 / ink >= 5000：前者在本机实测等价于「至少 4 个会话」
     （hlines ≈ 2 + min(可见行数, 15)），只在零会话时才跳过，1~3 个会话的机器必假红；
     后者真正的邻居是**负样本**基线，不是正样本。做差之后会话数、DPI、列宽三个变量
     一次性抵消 —— 这条口径在换刷前后都成立，因为两边量的是同一个「与纸色不同的像素」。
     """
-    return st["hlines"] - base["hlines"] >= 1 and st["ink"] - base["ink"] >= 600
+    return st["band_hlines"] - base["band_hlines"] >= 1 and st["ink"] - base["ink"] >= 600
 
 
 def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
@@ -1670,10 +1693,13 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
         # 判据方向是安全的：主题卡片键在浅底合成 #FEFEFE、深底更暗，两种主题下都不会给出
         # 成片逐字节纯白；只有「有人把 Brush 写死回白」才可能把它顶上去，所以阈值给 2000
         # （实测 0 的一侧 / 写死白 399904 的一侧），钉的是「豁免没有复发」，不是「必须是某个色值」。
-        check("概览页表底已交回主题键（Task 5 白底豁免收口，逐字节 #FFFFFFFF 归零）",
-              st["pure_white"] <= 2000,
-              f"逐字节 #FFFFFFFF 不透明像素 {st['pure_white']} 个（阈值 2000）；"
-              f"豁免期内同一张图实测 399904 个（占画布 92%），"
+        check("概览页表底已交回主题键（Task 5 白底豁免收口：不许有整片逐字节纯白）",
+              st["white_run"] <= 60,
+              f"逐字节 #FFFFFFFF 的最长横向连续段 {st['white_run']} 像素（阈值 60）；"
+              f"豁免期内同一张图实测 ~700（白底铺满页宽，共 399904 个纯白像素、占画布 92%），"
+              f"而现在纯白只剩文字墨迹（深色主题下正文本身就是 #FFFFFFFF，"
+              f"本机实测总共 6861 个、最长一段 24）—— 数**总像素**会被文字骗过，"
+              f"数**最长横段**骗不过：一块白底必然横着连成一片。"
               f"当前实测纸色是 #{'%02X%02X%02X%02X' % tuple(st['paper'])}（主题卡片键）")
         # 行分隔线成排 = 真的有数据行渲染出来，而不只是一块纸底 + 表头。
         # 与 check_cli() 用同一个跳过口径：没有会话文件就没有样本行，这条不该假红。
@@ -1743,9 +1769,11 @@ def check_panel_empty_sessions(empty: tuple[int, str, dict | None]) -> None:
           f"退出码 {rc} 输出 {head!r}")
     if st:
         check("空表注入：ok:false 异常帧（无 sessions 键） 表壳仍在但没有数据行",
-              st["cover"] / st["total"] >= 0.35 and st["hlines"] < 6,
+              st["cover"] / st["total"] >= 0.35 and st["band_hlines"] < 6,
               f"落笔 {st['cover']}/{st['total']}（纸色 #{'%02X%02X%02X%02X' % tuple(st['paper'])}）"
-              f"横线 {st['hlines']} 条（阈值 6：空表实测 1、29 行注入实测 10）")
+              f"表格带内横线 {st['band_hlines']} 条（阈值 6：空表实测 0、29 行注入实测 8；"
+              f"整画布数是 {st['hlines']} 条 —— 卡片之间那几段整行同色的底衬会被数成线，"
+              f"所以这条只数表格带以内）")
     # 假引擎 ②：什么都不输出 → LoadOneShotSnapshot 直接 return → _last 仍是 null
     rc2, head2, st2 = shot_with_fake_engine('import sys\nsys.stdout.write("")\n',
                                             os.path.join(ds.state_dir(), "panel-overview-null.png"),
@@ -1755,9 +1783,9 @@ def check_panel_empty_sessions(empty: tuple[int, str, dict | None]) -> None:
           rc2 == 0 and colors2 > 20 and st2 is not None, f"退出码 {rc2} 输出 {head2!r}")
     if st2:
         check("空表注入：空 stdout（快照整个是 null） 表壳仍在但没有数据行",
-              st2["cover"] / st2["total"] >= 0.35 and st2["hlines"] < 6,
-              f"落笔 {st2['cover']}/{st2['total']} 横线 {st2['hlines']} 条"
-              f"（阈值 6：空表实测 1、29 行注入实测 10，Refresh(null) 与无 sessions 键同一条路）")
+              st2["cover"] / st2["total"] >= 0.35 and st2["band_hlines"] < 6,
+              f"落笔 {st2['cover']}/{st2['total']} 表格带内横线 {st2['band_hlines']} 条"
+              f"（阈值 6：空表实测 0、29 行注入实测 8，Refresh(null) 与无 sessions 键同一条路）")
 
 
 def check_panel_row_data(empty_base: dict | None) -> None:
@@ -1812,8 +1840,9 @@ def check_panel_row_data(empty_base: dict | None) -> None:
     # 先证明确实多画了行，否则下面「两张一样高」会因为两张都是空表而假绿
     st3, st29 = got[3][2], got[29][2]
     check("注入确实画出了更多行（29 行的横线严格多于 3 行）",
-          bool(st3 and st29) and st29["hlines"] > st3["hlines"],
-          f"3 行 {st3 and st3['hlines']} 条 / 29 行 {st29 and st29['hlines']} 条")
+          bool(st3 and st29) and st29["band_hlines"] > st3["band_hlines"],
+          f"3 行 {st3 and st3['band_hlines']} 条 / 29 行 {st29 and st29['band_hlines']} 条"
+          f"（都只数表格带以内）")
     # ② 视口高度受限。Task 8 填实后这一条不能再写成「绘制区钉在画布下沿」——
     #    概览页现在是「状态卡 + 表格 + 待处理卡」三段，表格带本来就不挨着底边
     #    （实测表格带 y 139..521，画布 600）。改成量**表格带本身**的两件事：
@@ -3266,6 +3295,21 @@ def real_window_stats(rgb: bytes, w: int, h: int) -> dict:
     for c, n in strip.items():
         if max(abs(c[k] - gray_ref[k]) for k in range(3)) > 24:
             gray += n
+    # 光数像素不够：窗口自己那圈描边/圆角抗锯齿就贴着右沿，背衬没合成出来时
+    # （PrintWindow 给一条 #000000 的黑带）描边整列都「离众数色差得远」，本机实测
+    # 一次跑出 3868 个 —— 又是一条把测量的锅记成产品的红。滑块和描边分得开：
+    # **滑块是一根几像素宽、几百像素高的同色竖条**，描边是逐行变化的梯度。
+    # 所以再加一个「同色最长竖段」，和 shot_table_stats 的 vscroll 同一把尺。
+    gray_run = 0
+    for x in range(max(x0, w - 20), w - 2):
+        run, prev = 0, None
+        for y in range(max(0, top), h):
+            base = y * w * 3
+            c = rgb[base + x * 3:base + x * 3 + 3]
+            off = max(abs(c[k] - gray_ref[k]) for k in range(3)) > 24
+            run = run + 1 if (off and c == prev) else (1 if off else 0)
+            prev = c if off else None
+            gray_run = max(gray_run, run)
     if gray:
         for y in range(max(0, top), h):
             base = y * w * 3
@@ -3278,7 +3322,7 @@ def real_window_stats(rgb: bytes, w: int, h: int) -> dict:
             "first_line": groups[0] if groups else -1,
             "paper": paper, "blocks": len(blocks),
             "head0": head0, "head1": head1, "gray": gray, "gray_x0": gray_x0,
-            "gray_ref": gray_ref}
+            "gray_run": gray_run, "gray_ref": gray_ref}
 
 
 def flatten_png(path: str, bg: tuple[int, int, int] = (255, 255, 255)) -> tuple[int, int, bytes] | None:
@@ -3424,12 +3468,11 @@ def check_panel_real_scroll() -> None:
     再由整页滚动兜着 —— 表头跟着一起滚出视野，而离屏门禁全绿。所以这一族必须在真窗口上量。
 
     「滚起来是什么样子」不在这里量（合成输入送不达面板窗口，见
-    `check_panel_scroll_selftest` 的说明），这里量的是三件静态事实：
+    `check_panel_scroll_selftest` 的说明），这里量的是两件静态事实：
       ① 概览页在真窗口里画出了数据行（不画出来，②都是空的）；
       ② 表格被**自己**的视口裁住了 —— 引擎喂 29 行，画面上只数得到几行分隔线那一截，
-         说明溢出发生在表格内部，而不是整页长高；
-      ③ 窗口最右那条窄带里没有整页滚动条的滑块 —— 页面拿到有限高度时它没有存在的理由
-         （未修版实测贴着窗口右沿 x=1189 有 2486 个中灰滑块像素，修后 0）。
+         且表格块底停在 y=677 而不是贴住画布下沿。外壳一旦把页面包回 ScrollViewer，
+         块底就变成 y=799（画布 800）—— 反证走过一遍，当场红。
     外加一条测量自检：静置两帧之间结构量必须一致。带背衬的窗口会因激活/失焦整帧换色，
     逐行像素比不得（本机实测 800 行全变而结构量分毫不动），所以这一族判据比的是结构量。
     """
@@ -3484,7 +3527,8 @@ def check_panel_real_scroll() -> None:
             return
         print(f"  基线：表格顶沿 y={st0['top']}、表头墨迹带 y={st0['head0']}..{st0['head1']}、"
               f"分隔线 {st0['lines']} 条、块底 y={st0['bottom']}、"
-              f"最右条带滑块像素 {st0['gray']}（x0={st0['gray_x0']}）、"
+              f"最右条带滑块像素 {st0['gray']}（最长同色竖段 {st0['gray_run']}，"
+              f"x0={st0['gray_x0']}，带底色 #{st0['gray_ref'].hex()}）、"
               f"PrintWindow 通路 {capture_path(hwnd)}")
         # 测量自检：静置两帧之间结构量一致。这一条红 = 画面根本不稳定（背衬在换、面板在重建），
         # 后面②③的红就先别按产品回归查。
@@ -3507,13 +3551,16 @@ def check_panel_real_scroll() -> None:
               f"（分隔线 {st0['lines']} 条），表格块底在 y={st0['bottom']}、"
               f"窗口高 {h}：整页长高的形状是块底贴到画布下沿、行数一路数到顶")
         # ③ 外壳右沿不许有整页滚动条的滑块。
-        check("真实窗口：外壳没有整页滚动条（页面拿到的是有限高度）",
-              st0["gray"] <= 60,
-              f"最右侧 20 物理像素条带里有 {st0['gray']} 个像素离本带众数色"
-              f"（#{st0['gray_ref'].hex()}，也就是窗口自己的背衬）差 24 以上"
-              f"（最早出现在 x={st0['gray_x0']}，窗口宽 {w}）："
-              f"外壳把页面包进 ScrollViewer 时整页滚动条就贴着窗口右沿；"
-              f"有限高度下页面不需要它，那一条带只剩主题底色")
+        # 原来这里还有第三条「外壳右沿没有整页滚动条的滑块」（按颜色数滑块像素）。
+        # 2026-10-06 撤成只出现场、不进判据，因为它量的那条带子画的是**窗口自己的背衬**，
+        # 而背衬在不在图里由 PrintWindow 走哪条通路决定：flag=2 时 light 主题整带实测
+        # #D3D3D3（离旧口径 0x55..0xD0 的上限只差 3 档，同一次运行能从 0 跳到 9738 ——
+        # 那条假红的来源），flag=0 时整带根本没合成、是 #000000，于是窗口自己那圈描边
+        # 成了「离众数色差得远的一根 539 像素同色竖段」（同一份构建、同一个布局）。
+        # 颜色在这里量不到产品。缺陷形状已经被②抓住：包进 ScrollViewer 时表格块底
+        # y=799 贴住画布下沿（反证实测），有限高度下块底停在 y=677 —— 差 123 像素。
+        print(f"  右沿现场（不进判据）：滑块状像素 {st0['gray']} 个、"
+              f"最长同色竖段 {st0['gray_run']}、带底色 #{st0['gray_ref'].hex()}")
     finally:
         subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         with open(eng, "wb") as fh:
@@ -3577,7 +3624,21 @@ DIRECT_AGREE_MIN = 0.80
 离阈值还有 0.10 缓冲（用户鼠标正好停在某一行上会多带走 3~4 个百分点的悬停底色）。
 把 Navigate 还原成 Task 3 的坏版本后实测：请求外观页却停在概览，
 与外观参照的重合度 0.175、与四个占位参照的 0.0002 —— 走错页那一侧离阈值也差四倍多。
-两侧都不靠「概览页是白底」这个写死事实，Task 8 换主题刷后照样成立（同一轮实测过）。"""
+两侧都不靠「概览页是白底」这个写死事实，Task 8 换主题刷后照样成立（同一轮实测过）。
+
+**这条阈值单独用会被陈帧蹭过去**：2026-10-06 实测「请求外观、画面还是通知那一屏」的
+陈帧对自己的参照给到 0.8110 —— 两页都是深底白字，配色分布本来就近。所以 settle()
+在比样之前还要求「这一帧和请求之前那一帧逐字节不同」（见下面 settle 的②），
+新鲜度归新鲜度、像不像归像不像，不靠把阈值顶到 0.9 去赌。"""
+
+
+PAGE_HEADINGS = {"overview": "概览", "notify": "通知", "appearance": "外观",
+                 "runtime": "运行", "balance": "余额", "about": "Vigil"}
+"""每页 `Ui.Heading(...)` 那一个标题，六页各不相同。
+
+用来拿**活树**的证据判断「Host 里换没换页」：窗口被别家盖住时 DWM 不重新合成，
+PrintWindow 会连着几次交出上一页那张位图。像素只配回答「画得像不像这页」，
+「换没换页」得问控件树。"""
 
 
 TEXT_FLOOR_DIP = {"notify": 180, "appearance": 180, "runtime": 180, "balance": 180}
@@ -3672,44 +3733,73 @@ def check_panel_direct_page() -> None:
                      "才和真窗口取样框同几何；App.cs RenderShot 改尺寸就要同步这两个常量）"):
             return
 
-        def settle(page: str, limit: float = 12.0) -> tuple[float, str, str, float]:
-            """等这一页真的画上再判：快照是一帧一帧推进来的，抢在空屏上比必然假红。
+        def settle(page: str, before: str = "", limit: float = 12.0):
+            """等这一页真的装上、再画上，然后交出现场。
 
-            重合度够到阈值就收手；不够就等到超时，把最后一次实测交给 check ——
-            走错页那种红等多久都不会变绿，等出来的红才是红。
+            三道关，顺序不能反：
+              ① 先等**活树**（UIA）里出现这一页的标题 —— 像素回答不了「换没换页」；
+              ② 再要求这一帧**新**：与请求之前抓的那帧逐字节不同。窗口被别家盖住时
+                 DWM 不重新合成，PrintWindow 能连着几次交出上一页那张位图
+                 （本机实测：陈帧对自己那页的参照还能给到 0.811，蹭得过 0.80 的比样阈值）；
+              ③ 最后才比配色分布。快照是一帧一帧推进来的，抢在空屏上比必然假红。
+            不够就等到超时，把最后一次实测交给 check —— 走错页那种红等多久都不会变绿，
+            等出来的红才是红；而「帧压根没换过」这种红，红因在取样不在产品（现场里写明）。
             """
+            heading, tree = PAGE_HEADINGS[page], False
+            t_h = time.time()
+            while time.time() - t_h < limit:
+                names = uia(hwnd, "text", name=heading).get("TEXT") or []
+                if heading in names:
+                    tree = True
+                    break
+                time.sleep(0.4)
             t_start, last = time.time(), (0.0, "", "", 0.0)
             while True:
                 cw, ch, buf = capture_bar(hwnd, shot, scale=scale)
                 if cw:
                     prof = box_profile(buf, cw, ch, scale)
                     ov = profile_overlap(prof, expect[page])
-                    last = (ov, fmt_profile(prof), box_hash(buf, cw, ch, scale),
-                            time.time() - t_start)
-                    if ov >= DIRECT_AGREE_MIN:
+                    hh = box_hash(buf, cw, ch, scale)
+                    last = (ov, fmt_profile(prof), hh, time.time() - t_start)
+                    if ov >= DIRECT_AGREE_MIN and (not before or hh != before):
                         break
                 if time.time() - t_start >= limit:
                     break
                 time.sleep(1.0)
-            return last
+            return last + (tree, heading, not (before and last[2] == before))
 
-        def report(page: str, via: str, ov: float, prof: str, t_wait: float) -> bool:
+        def report(page: str, via: str, ov: float, prof: str, t_wait: float,
+                   tree: bool, heading: str, fresh: bool) -> bool:
             print(f"  {via} → {page}：重合度 {ov:.4f}（阈值 {DIRECT_AGREE_MIN}，"
-                  f"等了 {t_wait:.1f}s）｜真窗口 {prof}｜参照 {fmt_profile(expect[page] or {})}")
+                  f"等了 {t_wait:.1f}s）｜活树标题「{heading}」{'在' if tree else '不在'}"
+                  f"｜{'帧已换新' if fresh else '帧与请求前逐字节相同（陈帧）'}"
+                  f"｜真窗口 {prof}｜参照 {fmt_profile(expect[page] or {})}")
+            check(f"{via}：这一页真的装进了 Host（UIA 活树里有标题「{heading}」）",
+                  tree, f"等满 12 秒，控件树里没有出现「{heading}」—— Host 还躺在上一页上。"
+                        f"（像素那条判据单独看它：陈帧的配色分布对错误参照也能给到 "
+                        f"{DIRECT_AGREE_MIN} 上下，所以「换没换页」只能问活树）")
             return check(f"{via}：面板显示的就是 {page} 页（配色分布 = 该页离屏参照）",
-                         ov >= DIRECT_AGREE_MIN,
+                         ov >= DIRECT_AGREE_MIN and fresh,
                          f"重合度 {ov:.4f}（阈值 {DIRECT_AGREE_MIN}，等了 {t_wait:.1f}s）；"
-                         f"真窗口取样框现场 {prof} vs {page} 页离屏参照 "
-                         f"{fmt_profile(expect[page] or {})}；"
-                         f"参照图 {refs[page]}（同一 theme、同一份假引擎、同一个页面工厂）")
+                         + ("" if fresh else
+                            "等满 12 秒 PrintWindow 交回来的还是请求之前那一帧（逐字节相同）—— "
+                            "窗口被别家盖住、DWM 没重新合成，红因在取样不在产品；"
+                            "上面那条活树判据绿着，说明页确实换了。")
+                         + f"真窗口取样框现场 {prof} vs {page} 页离屏参照 "
+                           f"{fmt_profile(expect[page] or {})}；"
+                           f"参照图 {refs[page]}（同一 theme、同一份假引擎、同一个页面工厂）")
 
-        ov, prof, _hh, waited = settle("appearance")
-        report("appearance", "冷启动直达：--panel appearance", ov, prof, waited)
+        ov, prof, _hh, waited, tree, heading, fresh = settle("appearance")
+        report("appearance", "冷启动直达：--panel appearance", ov, prof, waited,
+               tree, heading, fresh)
 
         hashes: dict[str, str] = {}
         for page in PANEL_PAGES:
             if os.path.isfile(req):
                 os.remove(req)
+            # 「请求之前那一帧」是新鲜度的参照：拿不到它就退化成只比配色。
+            wb, hb, bufb = capture_bar(hwnd, shot, scale=scale)
+            before = box_hash(bufb, wb, hb, scale) if wb else ""
             # 用 Popen 而不是 run(timeout=30)：这句的本意是"二次实例把请求递进去就退"，
             # 可一旦常驻实例不在了（前面的门禁把它收了、或前台被抢导致它没起来），
             # 这一句就变成**冷启动一个不退出 Vigil 主进程**，run() 必然等满 30 秒抛
@@ -3720,15 +3810,15 @@ def check_panel_direct_page() -> None:
             while time.time() - t1 < 12 and os.path.isfile(req):
                 time.sleep(0.3)
             consumed = not os.path.isfile(req)
-            ov, prof, hh, waited = settle(page)
+            ov, prof, hh, waited, tree, heading, fresh = settle(page, before)
             hashes[page] = hh
             report(page, f"二次实例 --panel {page}"
                    f"{'（请求文件已消费）' if consumed else '（请求文件 12 秒没被消费！）'}",
-                   ov, prof, waited)
+                   ov, prof, waited, tree, heading, fresh)
             # 说明文字有没有被右侧字段挤坏：像素门禁看不见这件事（参照与现场是同一块
             # 挤压后的排版），所以直接量长 TextBlock 的包围盒宽度。
             # 概览页不在射程里：那张表里的会话标题也是长 TextBlock，窄列是它的设计；
-            # 关于页现在是占位（Task 9 填实时把它连同预期一起加进来）。
+            # 关于页也不在：它三段是「安装位置 / 版本 / 检测引擎」，没有长说明列。
             if page in TEXT_FLOOR_DIP:
                 wd = uia(hwnd, "wide")
                 got = int((wd.get("MINWIDE") or ["-1"])[0])
