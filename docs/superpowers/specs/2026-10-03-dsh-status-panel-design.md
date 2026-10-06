@@ -145,6 +145,16 @@ Vigil.exe
 必要性见 §12——实测 `PrintWindow` 对 `FluentWindow` 会返回内容全白、标题栏错位的废图，
 不能用来验面板；而 `RenderTargetBitmap` 不经过屏幕合成，不受遮挡影响，也不需要窗口真的可见。
 
+**再加 `--panel-scroll <page> <滚前.png> <滚后.png>`**（2026-10-06 补）：把该页按真窗口给它的
+有限高度（同 `--panel-shot` 的 724×552）排一遍，量它内部 `ScrollViewer` 的
+`extent / viewport / offset / ScrollableWidth`，`ScrollToEnd` 前后各出一张定帧，然后打印一行
+`SCROLL <page> <w> <h> <extent> <viewport> <off0> <off1> <scrollableWidth>`。
+为什么滚动这件事要应用自己滚给冒烟看：本机实测三条合成输入通路全都送不达面板窗口
+（定向 `PostMessage WM_MOUSEWHEEL`、抬到最上层后的 `SendInput` 真滚轮、连侧栏导航项的左键点击
+都不换页），而窗口激活/失焦会让 Mica 背衬整帧换色——1200×800 的 800 行里 800 行逐行对不上，
+可表格顶沿、表头墨迹带、分隔线条数一个都没变。于是「画面变了多少行」在真窗口里不再是
+「滚没滚」的证据；改由应用交出滚动前后的两张定帧，冒烟逐行比「表头冻住、表体换内容」。
+
 ## 6. 设置模型与生效矩阵
 
 `Settings.cs` 现有 `interval` / `notify` / `repeatSec`，新增 `theme`（默认 `"light"`）与

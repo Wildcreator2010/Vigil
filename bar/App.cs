@@ -146,6 +146,7 @@ namespace Vigil
             MigrateLegacyData();
 
             string demo = null, panel = null, shotPage = null, shotOut = null;
+            string scrollPage = null, scrollA = null, scrollB = null;
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--demo" && i + 1 < args.Length) demo = args[++i];
@@ -162,11 +163,23 @@ namespace Vigil
                     shotPage = args[++i];
                     shotOut = args[++i];
                 }
+                else if (args[i] == "--panel-scroll")
+                {
+                    if (i + 3 >= args.Length)
+                    {
+                        Console.Error.WriteLine("用法: --panel-scroll <page> <滚前.png> <滚后.png>");
+                        return 2;
+                    }
+                    scrollPage = args[++i];
+                    scrollA = args[++i];
+                    scrollB = args[++i];
+                }
                 else if (args[i] == "--engine-probe") return EngineProbe();
             }
 
             // shot 模式不开窗口、不抢单实例，状态栏正在跑时也能出图，所以在互斥体之前就返回。
             if (shotPage != null) return RenderShot(shotPage, shotOut);
+            if (scrollPage != null) return RenderScrollProof(scrollPage, scrollA, scrollB);
 
             _mutex = new Mutex(false, @"Local\Vigil-bar-mutex");
             bool owned = false;
@@ -688,6 +701,100 @@ namespace Vigil
                 Console.Error.WriteLine($"SHOT-FAIL {ex.GetType().Name}: {ex.Message}");
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// 离屏滚动自证：把某一页按真窗口给它的**有限高度**（同 RenderShot 的 724×552）排出来，
+        /// 量它内部那个 ScrollViewer 的 extent/viewport/offset，滚到底再出一张图。
+        /// 打印一行
+        /// `SCROLL &lt;page&gt; &lt;w&gt; &lt;h&gt; &lt;extent&gt; &lt;viewport&gt; &lt;off0&gt; &lt;off1&gt; &lt;scrollableWidth&gt;`
+        /// —— 最后一项是横向溢出量，>0 就是表格里那根横向滚动条活着。
+        ///
+        /// 为什么要应用自己滚，而不是在真窗口上发滚轮：本机实测三条输入通路**全都送不达**
+        /// 面板窗口（定向 PostMessage WM_MOUSEWHEEL 3/3、抬到最上层后 SendInput 真滚轮 3/3、
+        /// 连侧栏导航项的左键点击都不换页 —— 抓帧逐行零变化），而窗口激活/失焦会让 Mica 背衬
+        /// 整帧换色（1200×800 的 800 行里 800 行对不上，可表格顶沿/表头墨迹带/分隔线条数一个
+        /// 没变）。拿这种画面差当「滚没滚」的证据，只会把环境的锅记成产品的账。
+        /// 滚动位置本身是 DataGrid 模板给的 ScrollViewer 的事，我们要钉的是两件事：
+        /// 页面拿到的是有限高度（extent &gt; viewport 才说明内容真的溢出）、
+        /// 滚的时候表头不动（两张定帧交给冒烟逐行比）。
+        /// </summary>
+        static int RenderScrollProof(string pageKey, string outA, string outB)
+        {
+            try
+            {
+                _settings = Settings.Load(SettingsFile);
+                LoadOneShotSnapshot();
+                var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                ApplyFluentTheme();
+                if (!PanelPages.TryCreate(pageKey, out FrameworkElement root))
+                {
+                    Console.Error.WriteLine(
+                        $"SCROLL-FAIL 未知页面 \"{pageKey}\"，可用页：{string.Join(", ", PanelPages.Keys)}");
+                    return 2;
+                }
+                if (root is IPanelPage pp) pp.Refresh(_last);
+                double w = 724, h = 552;
+                root.Measure(new System.Windows.Size(w, h));
+                root.Arrange(new System.Windows.Rect(0, 0, w, h));
+                root.UpdateLayout();
+                var sv = WidestScrollable(root);
+                if (sv == null)
+                {
+                    // 页面里一个能滚的 ScrollViewer 都没有 = 内容没被有限高度裁住（要么压根没溢出，
+                    // 要么它把自己撑成了无限高）。这正是这条判据要抓的形状，给非零退出。
+                    Console.Error.WriteLine("SCROLL-FAIL 页面里没有可滚的 ScrollViewer");
+                    return 1;
+                }
+                double o0 = sv.VerticalOffset;
+                SaveShot(root, w, h, outA);
+                sv.ScrollToEnd();
+                root.UpdateLayout();
+                double o1 = sv.VerticalOffset;
+                SaveShot(root, w, h, outB);
+                // 横向溢出量：>0 就是表格里那根横向滚动条活着，末列被推出视口。
+                // 八列写死合计 950 DIP 而页面只给 ~722 宽时，真窗口截图实测「标题」整列看不见。
+                double sw = sv.ScrollableWidth;
+                // DataGrid 默认 CanContentScroll=true，所以 extent/viewport/offset 的单位是**行**
+                // 不是像素：29 行塞进 9 行的视口就是 extent=29 viewport=9。
+                Console.Out.WriteLine(
+                    $"SCROLL {pageKey} {(int)w} {(int)h} {(int)sv.ExtentHeight} {(int)sv.ViewportHeight} " +
+                    $"{(int)Math.Round(o0)} {(int)Math.Round(o1)} {(int)Math.Round(sw)}");
+                Console.Out.Flush();
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"SCROLL-FAIL {ex.GetType().Name}: {ex.Message}");
+                return 1;
+            }
+        }
+
+        /// <summary>视觉树里可滚动幅度最大的那个 ScrollViewer（表格自己那个）。</summary>
+        static System.Windows.Controls.ScrollViewer WidestScrollable(DependencyObject root)
+        {
+            System.Windows.Controls.ScrollViewer best = null;
+            void Walk(DependencyObject d)
+            {
+                if (d is System.Windows.Controls.ScrollViewer s
+                    && (best == null || s.ScrollableHeight > best.ScrollableHeight)) best = s;
+                int n = VisualTreeHelper.GetChildrenCount(d);
+                for (int i = 0; i < n; i++) Walk(VisualTreeHelper.GetChild(d, i));
+            }
+            Walk(root);
+            return best;
+        }
+
+        /// <summary>把已经排版好的元素画成 PNG（RenderShot 那套统计留在原处，这里只出图）。</summary>
+        static void SaveShot(FrameworkElement root, double w, double h, string outPath)
+        {
+            if (string.IsNullOrEmpty(outPath) || outPath == "-") return;
+            var rtb = new RenderTargetBitmap((int)w, (int)h, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(root);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(rtb));
+            using var fs = File.Create(outPath);
+            enc.Save(fs);
         }
 
         private static void StartClient()

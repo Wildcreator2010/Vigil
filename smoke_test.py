@@ -1172,6 +1172,24 @@ COVER_A = 128
 
 
 
+PRINTWINDOW_FLAGS = (2, 0)
+"""PrintWindow 的两条通路：2=PW_RENDERFULLCONTENT（分层/合成内容），0=普通 DC。
+带系统背衬的面板**两条画出来的像素整体不同**：同刻各抓一帧，800 行里 800 行都对不上，
+而结构量（表格顶沿 259、表头墨迹带 271..288、分隔线 8 条、纸色 #FEFEFE）一模一样
+（本机实测，见 probe 记录）。所以跨通路的两帧**逐行不可比**。"""
+
+_capture_flag: dict[int, int] = {}
+"""每个窗口第一次成功抓帧走了哪条通路，之后就一直先走那条 —— 让同一段里的连续抓帧可比。"""
+
+capture_flips: collections.Counter = collections.Counter()
+"""通路被迫切换过几次的计数（切了 = 那两帧逐行对不上是取样的锅，不是画面的锅）。"""
+
+
+def capture_path(hwnd: int) -> int:
+    """这个窗口当前钉住的 PrintWindow 通路（还没抓过给 -1）。红因写在现场里用。"""
+    return _capture_flag.get(hwnd, -1)
+
+
 def capture_bar(hwnd: int, out_path: str, scale: float = 1.0) -> tuple[int, int, bytes]:
     """PrintWindow 抓窗口自身像素：任务栏被全屏应用盖住时也能验，且直接证明
     分层窗口真的合成了内容（README 记过「命中看得到、画面看不到」这一类坑）。
@@ -1197,8 +1215,13 @@ def capture_bar(hwnd: int, out_path: str, scale: float = 1.0) -> tuple[int, int,
     bmp = g.CreateCompatibleBitmap(wdc, w, h)
     g.SelectObject(mdc, bmp)
     bgra = b""
+    # 通路按窗口钉住：一个面板实例从头到尾走同一条，连续抓帧才逐行可比（见 PRINTWINDOW_FLAGS）。
+    order = PRINTWINDOW_FLAGS
+    if hwnd in _capture_flag:
+        keep = _capture_flag[hwnd]
+        order = (keep,) + tuple(f for f in PRINTWINDOW_FLAGS if f != keep)
     try:
-        for flag in (2, 0):  # 分层窗口要 PW_RENDERFULLCONTENT，普通窗口反而要用 0
+        for flag in order:  # 分层窗口要 PW_RENDERFULLCONTENT，普通窗口反而要用 0
             if not u.PrintWindow(hwnd, mdc, flag):
                 continue
             info = BI(s=ctypes.sizeof(BI), w=w, h=-h, pl=1, bc=32, comp=0, size=w * h * 4)
@@ -1208,6 +1231,9 @@ def capture_bar(hwnd: int, out_path: str, scale: float = 1.0) -> tuple[int, int,
             raw = buf.raw
             hues = len({raw[i:i + 4] for i in range(0, len(raw), 4)})
             if hues > 1:
+                if _capture_flag.get(hwnd) not in (None, flag):
+                    capture_flips[hwnd] += 1
+                _capture_flag[hwnd] = flag
                 bgra = raw
                 break
         if not bgra:
@@ -2846,87 +2872,20 @@ def check_panel_settings_live() -> None:
               f"VerticallyScrollable={can} extent={sc.get('EXTENT')} viewport={sc.get('VIEWPORT')} "
               f"SVH={sc.get('SVH')}（WPF 的 ScrollViewerAutomationPeer 在本机把 extent/viewport 都报 0，"
               f"所以这两值只作现场、不进判据；可滚性看 VerticallyScrollable）；{sc.get('ERR')}")
-        scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
-        shot = os.path.join(ds.state_dir(), "t6-scroll.png")
-        # 三处时间量全部改成「等到条件成立」，不再钉固定 sleep。Task 7 实测同一份代码
-        # 两次跑出 moved=0 与 moved=548：前者是基线那一帧还没排完（于是重排被算成「没滚」，
-        # 下一次抓取才把重排显出来 = 548），后者是滚回顶部的那 0.8 秒不够。
-        # 判据本身一个字没改：滚到底必须变一大片、滚回顶部必须回到原样。
-        LIVE_ROWS = 12   # 阈值那一行是活的（静默秒数每帧在涨），12 行以内都算「画面没动」
-        SCROLL_MIN = 30  # 判据①的门槛：滚到底必须变这么多行
-
-        def grab() -> tuple[int, int, list[int]]:
-            ww, hh, buf = capture_bar(hwnd, shot, scale=scale)
-            return ww, hh, (row_hashes(buf, ww, hh) if ww else [])
-
-        def diff_of(base: tuple[int, int, list[int]], cur: tuple[int, int, list[int]]) -> int:
-            """与参照那一帧差几行；没抓到或尺寸对不上给 -1。
-
-            -1 不豁免判据：抓不到帧本身就值得红，静默跳过会把「面板根本没画出来」读成绿的。
-            红的时候看现场里的抓帧尺寸 —— 尺寸对不上是环境问题，抓帧为 0 才是产品问题。
-
-            尺寸必须逐维比：只比签名长度的话，「滚动条出现导致宽度变了」这一帧也能比，
-            于是整屏重排会被算成「滚了 500 行」。基线那一帧的宽高就带在 base 里。
-            """
-            if not base[2] or not cur[2] or (cur[0], cur[1]) != (base[0], base[1]):
-                return -1
-            if len(cur[2]) != len(base[2]):
-                return -1
-            return sum(1 for a, c in zip(base[2], cur[2]) if a != c)
-
-        base = grab()
-        t_s = time.time()
-        while time.time() - t_s < 12.0:
-            time.sleep(0.6)
-            cur = grab()
-            d = diff_of(base, cur)   # 先比再挪基线：反过来就是拿那一帧和自己比，恒 0
-            base = cur
-            if 0 <= d <= LIVE_ROWS:
-                break
-        w0, h0, sig0 = base
-        moved, back_diff = -1, -1
-        sd: dict = {}
-        if w0:
-            sd = uia(hwnd, "scroll", value="down")
-            t_s = time.time()
-            while time.time() - t_s < 8.0:
-                # 等到的是**判据自己那条线**（≥30 行），不是「有一行变了」：
-                # 只等「动过」的话，快照推进带来的两三行就能提前收手，而判据要 30 行 ——
-                # 于是活字那一行被当成滚过了，健康的产品也会红（Task 7 复核指出）。
-                moved = diff_of(base, grab())
-                if moved >= SCROLL_MIN:
-                    break
-                time.sleep(0.5)
-            # 「滚回顶部」也要重试：每次 uia() 都是新起一个 powershell 重新枚举控件树，
-            # 命中的未必是同一个 ScrollViewer（Task 8 三轮里有一次就是滚下去了却「回不来」，
-            # 下一轮又正常）。重试是给通路机会，不是给产品放水 —— 真滚不回来的话三次都不回来。
-            up_tries = 0
-            while up_tries < 3:
-                up_tries += 1
-                uia(hwnd, "scroll", value="up")
-                t_s = time.time()
-                while time.time() - t_s < 8.0:
-                    back_diff = diff_of(base, grab())
-                    if 0 <= back_diff <= LIVE_ROWS:
-                        break
-                    time.sleep(0.5)
-                if 0 <= back_diff <= LIVE_ROWS:
-                    break
-            pct2 = (sd.get("PCT2") or ["-1"])[0]
-        else:
-            pct2 = "-1"
-        # 滚回顶部后**不要求逐行相同**：阈值那一行是活的（静默秒数每帧在涨），
-        # 十几行以内的差异就是它；真没滚回去的话差的是整屏布局，量级差几十倍。
-        check("滚到底之后画面真的动了、滚回顶部又回到原位置（内容在滚，不是被裁在视口外）",
-              moved >= SCROLL_MIN and 0 <= back_diff <= LIVE_ROWS,
-              f"滚到底变化 {moved} 行（阈值 {SCROLL_MIN}：活的那行文字每帧只动 2~3 行，够不着它）、"
-              f"滚回顶部后与基线差 {back_diff} 行（容 {LIVE_ROWS} 行 = 阈值行那点活字）；"
-              f"抓帧 {w0}x{h0}，两个数都是各等满 8 秒之后的最后一次实测；"
-              f"「滚回顶部」共试了 {up_tries} 次（每次重新枚举控件树）"
-              f"（VerticalPercent 本机恒报 {pct2}，不进判据）")
-        print(f"  整页滚动现场：视口 {w0}x{h0}，滚到底变化 {moved} 行，滚回顶部与基线差 {back_diff} 行")
-        if os.path.isfile(shot):
-            os.remove(shot)
+        # 原来这里还跟着一条像素判据（「滚到底变化 ≥30 行、滚回顶部与基线差 ≤N 行」），
+        # 2026-10-06 拆掉，两条理由：
+        #   ① 这一段没有能滚的通路 —— 面板的合成输入在本环境送不达窗口（定向 PostMessage
+        #      WM_MOUSEWHEEL 3/3、抬到最上层后 SendInput 真滚轮 3/3、连侧栏左键点击都不换页，
+        #      抓帧逐行零变化），只剩 UIA ScrollPattern 可滚，而 WPF 的
+        #      ScrollViewerAutomationPeer 本机把 extent/viewport/percent 全报 0，
+        #      滚没滚就只能看像素；
+        #   ② 像素在这里也不是「滚没滚」的证据：带背衬的窗口一激活就整帧换色，实测
+        #      1200×800 的 800 行里 800 行对不上，而表格顶沿/表头带/分隔线一个没变。
+        #      这条族红了半年的「表头被整页滚动推走了」就是这么来的，产品没这个毛病。
+        # 「内容在滚、不是被裁在视口外」这件事实改由 check_panel_scroll_selftest 钉：
+        # 应用自己 ScrollToEnd，前后两张定帧逐行比。这一段只留「最小尺寸下这页可滚」这条 UIA 判据。
+        print(f"  整页滚动现场：VerticallyScrollable={can}，SVH={sc.get('SVH')}，"
+              f"extent/viewport 本机报 {sc.get('EXTENT')}/{sc.get('VIEWPORT')}（不进判据）")
         # 实验做完把窗口还给外壳默认尺寸：这一段后面还有通知页的四条判据，
         # 让它们跑在「被上一节顺手收窄到 760×500」的几何上，等于给以后留一个
         # 「改上一节的尺寸就红」的隐式依赖。
@@ -3151,60 +3110,6 @@ def check_bar_null_records() -> None:
         check("records:null 场景：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 
 
-class _MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
-                ("dwFlags", wt.DWORD), ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
-
-
-class _INPUTUNION(ctypes.Union):
-    _fields_ = [("mi", _MOUSEINPUT)]
-
-
-class _SENDINPUT(ctypes.Structure):
-    _fields_ = [("type", wt.DWORD), ("u", _INPUTUNION)]
-
-
-def send_wheel(delta: int, clicks: int) -> int:
-    """SendInput 发几次竖向滚轮（MOUSEEVENTF_WHEEL=0x0800），返回成功次数。
-
-    只发滚轮、不动光标 —— 光标由调用处 SetCursorPos 放到目标上，WPF 按光标命中路由滚轮。
-    delta 是 DWORD 字段，负数必须按无符号塞进去（本机踩过：直接传 -360 ctypes 会拒）。
-
-    注意这条通路**要求面板是前台窗口**（滚轮发给前台），而本探测环境里前台锁归 IDE，
-    抢前台要靠 check_panel_real_scroll 里那层兜底 —— 全局输入副作用见那里的说明。
-    能用 post_wheel_to 就别用它。
-    """
-    u = _user32()
-    ok = 0
-    for _ in range(clicks):
-        ev = _SENDINPUT(0, _INPUTUNION(_MOUSEINPUT(0, 0, ctypes.c_uint(delta).value, 0x0800, 0, None)))
-        if u.SendInput(1, ctypes.byref(ev), ctypes.sizeof(ev)):
-            ok += 1
-        time.sleep(0.18)
-    return ok
-
-
-def post_wheel_to(hwnd: int, x: int, y: int, delta: int, clicks: int) -> int:
-    """只往这一个 HWND 投 WM_MOUSEWHEEL（0x020A），返回投出去几条。
-
-    定向投递不进系统输入队列：**不抢前台、不给别的窗口（IDE）打键**，
-    所以本环境那条「SetForegroundWindow 返回 0 → 只能 ALT 抖动」的兜底在这儿没有存在的理由。
-    它自己也不动光标（调用处仍然把光标放到表体上，那是为了 hover 态与 Task 4 签认那张一致）。
-    wParam 高 16 位是有符号滚轮增量（-360 取 16 位无符号 0xFE98），
-    lParam 是命中点坐标 (x | y<<16) —— WPF 按 lParam 命中路由，本机实测点谁滚谁
-    （真窗口三条判据与 SendInput 那条通路同形：变化 334 行、第一条在 y=73 > 表头下沿 55）。
-    """
-    u = _user32()
-    ok = 0
-    for _ in range(clicks):
-        wp = ((delta & 0xFFFF) << 16)  # 低位是按住的鼠标键虚位，滚轮自己不算，给 0（本机实测口径）
-        lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
-        if u.PostMessageW(hwnd, 0x020A, wp, lp):
-            ok += 1
-        time.sleep(0.2)
-    return ok
-
-
 def row_hashes(rgb: bytes, w: int, h: int) -> list[str]:
     """逐行指纹：判断「滚动之后画面哪些行变了」，两帧一比就知道从哪一行开始动。"""
     return [hashlib.md5(rgb[y * w * 3:(y + 1) * w * 3]).hexdigest() for y in range(h)]
@@ -3343,38 +3248,192 @@ def real_window_stats(rgb: bytes, w: int, h: int) -> dict:
         elif is_line(y) or gap >= 3:
             break
         gap += 1
-    gray, gray_x0 = 0, -1
+    # 最右 20 物理像素条带里「整页滚动条的滑块」有多少像素。
+    # 【口径 2026-10-06 改：绝对灰阶 → 相对本带众数色】旧口径钉的是
+    # `0x55 <= r <= 0xD0` 且三通道相近，可这条带子里画的是**窗口自己的背衬**：
+    # light 主题本机实测整带 9738 个像素全是 #D3D3D3 —— 离 0xD0 只差 3 档。
+    # Mica 采的是桌面，激活/失焦或壁纸一变就整体漂几档，于是同一份构建同一个布局，
+    # 这一项能从 0 跳到 9738（那条「外壳有整页滚动条」的假红就是这么来的，
+    # 而它下游的结构量分毫未动）。现在拿本带自己的众数色当参照：
+    # 背衬再怎么漂都跟着漂、差值为 0，滑块（实测 #8A8A8A 对 #D3D3D3）照样看得见。
+    strip: collections.Counter = collections.Counter()
     for y in range(max(0, top), h):
         base = y * w * 3
         for x in range(max(x0, w - 20), w - 2):
-            r0, g0, b0 = rgb[base + x * 3], rgb[base + x * 3 + 1], rgb[base + x * 3 + 2]
-            if abs(r0 - g0) <= 8 and abs(g0 - b0) <= 8 and 0x55 <= r0 <= 0xD0:
-                gray += 1
-                gray_x0 = x if gray_x0 < 0 else gray_x0
-    return {"top": top, "lines": len(groups), "first_line": groups[0] if groups else -1,
+            strip[rgb[base + x * 3:base + x * 3 + 3]] += 1
+    gray_ref = strip.most_common(1)[0][0] if strip else b"\x00\x00\x00"
+    gray, gray_x0 = 0, -1
+    for c, n in strip.items():
+        if max(abs(c[k] - gray_ref[k]) for k in range(3)) > 24:
+            gray += n
+    if gray:
+        for y in range(max(0, top), h):
+            base = y * w * 3
+            hit = [x for x in range(max(x0, w - 20), w - 2)
+                   if max(abs(rgb[base + x * 3 + k] - gray_ref[k]) for k in range(3)) > 24]
+            if hit:
+                gray_x0 = hit[0]
+                break
+    return {"top": top, "bottom": bottom, "lines": len(groups),
+            "first_line": groups[0] if groups else -1,
             "paper": paper, "blocks": len(blocks),
-            "head0": head0, "head1": head1, "gray": gray, "gray_x0": gray_x0}
+            "head0": head0, "head1": head1, "gray": gray, "gray_x0": gray_x0,
+            "gray_ref": gray_ref}
+
+
+def flatten_png(path: str, bg: tuple[int, int, int] = (255, 255, 255)) -> tuple[int, int, bytes] | None:
+    """离屏 PNG（RGBA，页面底是透明的）合成成 RGB，好把真窗口那一套结构量
+    （`real_window_stats`：表格顶沿 / 表头墨迹带 / 行分隔线 / 块底）原样用在定帧上。
+
+    合成用什么底色没有意义 —— 两张定帧走同一个 bg，比的是它们彼此差在哪几行。
+    """
+    got = read_png_rgba(path)
+    if got is None:
+        return None
+    w, h, buf = got
+    rgb = bytearray(w * h * 3)
+    for i in range(w * h):
+        a = buf[i * 4 + 3]
+        o = i * 3
+        if a >= 255:
+            rgb[o], rgb[o + 1], rgb[o + 2] = buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2]
+            continue
+        for k in range(3):
+            rgb[o + k] = (buf[i * 4 + k] * a + bg[k] * (255 - a) + 127) // 255
+    return w, h, bytes(rgb)
+
+
+SCROLL_ROWS = 29
+"""滚动那两族判据喂的假引擎行数。29 行 > 概览页视口装得下的行数（实测 8~9 行），
+内容溢出是「表格自己有一个会滚的视口」这件事的前提。"""
+
+
+def check_panel_scroll_selftest() -> None:
+    """滚动证据由应用自己交出来：`--panel-scroll` 把概览页按真窗口给它的**有限高度**排一遍，
+    量内部那个 ScrollViewer 的 extent/viewport/offset，滚到底前后各出一张定帧，冒烟比这两张。
+
+    为什么不在真窗口上发滚轮（这一族判据原先正是那么写的，而且红了半年）：本机实测
+    三条合成输入通路**全都送不达**面板窗口 —— 定向 PostMessage WM_MOUSEWHEEL 3/3、
+    抬到最上层（SWP_NOACTIVATE）之后 SendInput 真滚轮 3/3、连侧栏导航项的左键点击
+    都不换页，抓帧逐行零变化；而窗口激活/失焦会让 Mica 背衬整帧换色，实测 1200×800 的
+    800 行里 800 行对不上，可表格顶沿 y=259、表头墨迹带 271..288、分隔线 8 条一个没变。
+    两件事叠在一起，「画面变了多少行」就不再是「滚没滚」的证据 ——
+    旧判据报出来的那条「表头被整页滚动推走了 259 行」就是这么来的，产品没有这个毛病。
+    """
+    print("\n== 离屏滚动自证：表头固定、只有表体滚动 ==")
+    eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
+    if not check("滚动自证注入点就位", os.path.isfile(BAR_EXE) and os.path.isfile(eng), eng):
+        return
+    with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
+        real = fh.read()
+    a = os.path.join(ds.state_dir(), "scroll-a.png")
+    b = os.path.join(ds.state_dir(), "scroll-b.png")
+    try:
+        with open(eng, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(fake_engine_source(SCROLL_ROWS))
+        for f in (a, b):
+            if os.path.isfile(f):
+                os.remove(f)
+        try:
+            p = subprocess.run([BAR_EXE, "--panel-scroll", "overview", a, b],
+                               capture_output=True, text=True, errors="replace",
+                               timeout=180, cwd=os.path.dirname(BAR_EXE))
+        except subprocess.TimeoutExpired:
+            p = None
+        head = (((p.stdout or "").strip().splitlines() or [""])[0] if p else "")
+        parts = head.split()
+        parsed: list[int] = []
+        if len(parts) == 9 and parts[0] == "SCROLL" and parts[1] == "overview":
+            try:
+                parsed = [int(x) for x in parts[2:]]
+            except ValueError:
+                parsed = []
+        if not check("应用自证：--panel-scroll 出了两张定帧并报了数字",
+                     bool(p) and p.returncode == 0 and len(parsed) == 7
+                     and os.path.isfile(a) and os.path.isfile(b),
+                     f"退出码 {p.returncode if p else '180 秒没返回'}，首行 {head!r}，"
+                     f"stderr {(((p.stderr or '').strip()[:200]) if p else 'timeout')!r}"):
+            return
+        cw, ch, extent, viewport, off0, off1, swidth = parsed
+        # ① 前提：内容真的溢出视口 —— 不溢出就没有「滚」这回事，后面全是空转
+        check("应用自证：表格内容溢出自己的视口（有限高度真的交到了表格里）",
+              extent > viewport >= 2 and viewport < SCROLL_ROWS,
+              f"extent={extent} 行 / viewport={viewport} 行 / 引擎喂了 {SCROLL_ROWS} 行"
+              f"（DataGrid 默认 CanContentScroll=true，这三个数的单位是**行**不是像素）："
+              f"视口装得下全部行时滚动条没有存在的理由，这条判据也就无从谈起")
+        # ② 滚到底：偏移必须走到 extent-viewport，一步不多一步不少
+        check("应用自证：ScrollToEnd 真的滚到了底",
+              off1 > off0 and off1 == extent - viewport,
+              f"竖向偏移 {off0} → {off1} 行，理论底 {extent - viewport} 行")
+        # 横向溢出：八列写死合计 950 DIP 时，概览页只给表格 ~722 宽 —— 真窗口截图实测
+        # 表格里横着一根滚动条、「标题」整列看不见。末列改星宽 + 固定列收窄之后必须是 0。
+        check("应用自证：默认宽度下表格不横向溢出（标题列没被推出视口）",
+              swidth == 0,
+              f"ScrollableWidth={swidth} DIP（>0 就是那根横向滚动条活着，末列在视口外）；"
+              f"画布 {cw}×{ch}，页面给表格的那一块约 {cw - 2} 宽")
+        fa, fb = flatten_png(a), flatten_png(b)
+        if not check("应用自证：两张定帧同尺寸可解码",
+                     fa is not None and fb is not None and fa[:2] == fb[:2] == (cw, ch),
+                     f"A {fa and fa[:2]} / B {fb and fb[:2]}，应用报的是 {cw}x{ch}"):
+            return
+        w, h = fa[0], fa[1]
+        sa, sb = real_window_stats(fa[2], w, h), real_window_stats(fb[2], w, h)
+        if not check("应用自证：定帧里认得出表头与成排的分隔线（比样的基准线）",
+                     sa["top"] >= 0 and sa["head0"] > sa["top"] and sa["lines"] >= 4,
+                     f"表格顶沿 y={sa['top']}、表头墨迹带 y={sa['head0']}..{sa['head1']}、"
+                     f"分隔线 {sa['lines']} 条（画布 {w}x{h}）：认不出来就没有「表头不许动」的基准"):
+            return
+        ra, rb = row_hashes(fa[2], w, h), row_hashes(fb[2], w, h)
+        above = [y for y in range(0, sa["head1"] + 1) if ra[y] != rb[y]]
+        body = [y for y in range(sa["head1"] + 1, sa["bottom"] + 1) if ra[y] != rb[y]]
+        tail = [y for y in range(sa["bottom"] + 1, h) if ra[y] != rb[y]]
+        # ③ 这条才是「表头固定」的正面证据：表头带连同它上面的一切（概览标题、状态卡、
+        #    「会话」标题）逐行一模一样，表格块下面的「等你处理」卡也一动不动 ——
+        #    整页滚动会把这两段一起推走，DataGrid 那个冻住的表头不会。
+        check("应用自证：表头连同它上面的一切、表格下面的那张卡，逐行没动",
+              not above and not tail,
+              f"表头带 y0..{sa['head1']} 里变了 {len(above)} 行、表格块（y{sa['top']}..{sa['bottom']}）"
+              f"下面变了 {len(tail)} 行；变了的那几行起点 "
+              f"{(above + tail)[0] if (above or tail) else -1}")
+        # ④ 防空转：③只说「上面没动」，这一条说「下面真的换了一整屏」
+        check("应用自证：表体换了一整屏内容（不是什么都没滚）",
+              len(body) >= (sa["bottom"] - sa["head1"]) * 0.5,
+              f"表体 y{sa['head1'] + 1}..{sa['bottom']} 里变了 {len(body)} 行"
+              f"（那一段 {sa['bottom'] - sa['head1']} 行，阈值取一半）")
+        check("应用自证：滚前滚后的表格结构同形（视口没被滚大滚小）",
+              (sa["top"], sa["bottom"], sa["lines"]) == (sb["top"], sb["bottom"], sb["lines"]),
+              f"顶沿 {sa['top']}->{sb['top']}、块底 {sa['bottom']}->{sb['bottom']}、"
+              f"分隔线 {sa['lines']}->{sb['lines']} 条、表头带 {sa['head0']}..{sa['head1']}"
+              f"->{sb['head0']}..{sb['head1']}")
+    finally:
+        with open(eng, "wb") as fh:
+            fh.write(real)
+        check("滚动自证：注入后引擎拷贝已按仓库根还原",
+              open(eng, "rb").read() == real, eng)
+        for f in (a, b):
+            if os.path.isfile(f):
+                os.remove(f)
 
 
 def check_panel_real_scroll() -> None:
-    """真实窗口这一侧：外壳必须给页面**有限高度**，让表头固定、只有表体滚动。
+    """真实窗口这一侧只留**静态**判据：外壳有没有把有限高度交给页面。
 
     为什么离屏那两条（check_panel_row_data）守不住这件事：`--panel-shot` 是直接把页面
-    Measure/Arrange 到 724×600 上出图的，**压根不经过 PanelWindow 的外壳**。外壳一旦把
-    Host 包在 ScrollViewer 里，页面拿到的竖向约束就是无限高，表格按行数长到 ~1150px
-    再由整页滚动兜着 —— 表头跟着一起滚出视野、排版成本随行数线性上升，而离屏门禁全绿。
-    所以这一段起的是真窗口（`--panel`）、看的是真窗口里滚轮滚过之后的画面。
+    Measure/Arrange 到 724×552 上出图的，**压根不经过 PanelWindow 的外壳**。外壳一旦把
+    Host 包回 ScrollViewer，页面拿到的竖向约束就是无限高，表格按行数长到 ~1150px
+    再由整页滚动兜着 —— 表头跟着一起滚出视野，而离屏门禁全绿。所以这一族必须在真窗口上量。
 
-    三条判据（本机实测数字见 task-4-report.md 轮 3）：
-      ① 往表体里发滚轮，画面必须真的动起来 —— 它是②的防空转：只看②的话
-         「什么都没滚」也满足「表头没变」，那正是假绿；
-      ② 动的那一段必须**从表头下方才开始**：表格顶沿到「表头文字墨迹带的下沿」
-         这一整条带一个像素都不许变。未修版实测第一条变化在 y=19（表头那一带），
-         修后是 y=85（第一行数据里）—— 整页滚动一动表头就花，这正是复核说的那半条；
-      ③ 外壳最右侧条带里不许有整页滚动条滑块 —— 页面拿到有限高度时它没有存在的理由。
-         未修版实测 2486 个中灰滑块像素（贴着窗口右沿 x=1189），修后 0。
+    「滚起来是什么样子」不在这里量（合成输入送不达面板窗口，见
+    `check_panel_scroll_selftest` 的说明），这里量的是三件静态事实：
+      ① 概览页在真窗口里画出了数据行（不画出来，②都是空的）；
+      ② 表格被**自己**的视口裁住了 —— 引擎喂 29 行，画面上只数得到几行分隔线那一截，
+         说明溢出发生在表格内部，而不是整页长高；
+      ③ 窗口最右那条窄带里没有整页滚动条的滑块 —— 页面拿到有限高度时它没有存在的理由
+         （未修版实测贴着窗口右沿 x=1189 有 2486 个中灰滑块像素，修后 0）。
+    外加一条测量自检：静置两帧之间结构量必须一致。带背衬的窗口会因激活/失焦整帧换色，
+    逐行像素比不得（本机实测 800 行全变而结构量分毫不动），所以这一族判据比的是结构量。
     """
-    print("\n== 真实窗口：表头固定、只有表体滚动 ==")
+    print("\n== 真实窗口：外壳给页面的是有限高度 ==")
     if not os.path.isfile(BAR_EXE):
         print("  （跳过：没有编译产物）")
         return
@@ -3389,11 +3448,9 @@ def check_panel_real_scroll() -> None:
     before = python_pids()
     shot = os.path.join(ds.state_dir(), "smoke-panel-real.png")
     u = _user32()
-    home = wt.POINT()
-    u.GetCursorPos(ctypes.byref(home))
     try:
         with open(eng, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(fake_engine_source(29, watch=True))
+            fh.write(fake_engine_source(SCROLL_ROWS, watch=True))
         subprocess.Popen([BAR_EXE, "--panel"], cwd=os.path.dirname(BAR_EXE))
         hwnd, t0 = 0, time.time()
         while time.time() - t0 < 25:
@@ -3404,13 +3461,6 @@ def check_panel_real_scroll() -> None:
         if not check("真实窗口：面板已打开（--panel 起真窗口）", bool(hwnd),
                      "找不到标题为 Vigil 控制台 的顶层窗口"):
             return
-        # 送达通路：只往面板自己的 HWND 投 WM_MOUSEWHEEL（post_wheel_to）。
-        # 定向投递不进系统输入队列，所以**不需要面板在前台**，也就不需要当年那层
-        # 「keybd_event 抖一下 ALT」的兜底 —— 那一下打在当时的前台窗口（本机是 IDE）上，
-        # 是一次无谓的全局输入副作用（Task 5 轮 2 复核事 2 的附带项）。
-        # 前台归属这个信号仍然保留：兜底通路（SendInput 真滚轮）需要它，且它一出现
-        # 就写进现场，「送达失败」与「表头被滚走」两种红因此形状不同（见下面三条判据的 detail）。
-        l, t, r, b = rect_of(hwnd)
         scale = (u.GetDpiForWindow(hwnd) or 96) / 96.0
         st0: dict | None = None
         w = h = 0
@@ -3423,160 +3473,48 @@ def check_panel_real_scroll() -> None:
                 if st0["top"] >= 0 and st0["head0"] > st0["top"] and st0["lines"] >= 4:
                     break
             time.sleep(1.0)
-        # 先证明「表格真的画上了数据行 + 表头那条墨迹带找得到」，
-        # 否则后面「滚不动」说不清是谁的锅，判据②也没有基准线。
-        if not check("真实窗口：概览页画出了数据行（滚动实验的前提）",
+        # ① 先证明「表格真的画上了数据行」，否则②说不清是谁的锅。
+        if not check("真实窗口：概览页画出了数据行",
                      bool(st0) and st0["top"] >= 0 and st0["head0"] > st0["top"]
                      and st0["lines"] >= 4,
                      f"抓取 {w}x{h}（缩放 {scale}），表格顶沿 y={st0 and st0['top']}、"
                      f"表头墨迹带 y={st0 and st0['head0']}..{st0 and st0['head1']}、"
                      f"横向分隔线 {st0 and st0['lines']} 条：等满 20 秒也没成排，"
-                     f"说明假引擎那 29 行没喂进面板"):
+                     f"说明假引擎那 {SCROLL_ROWS} 行没喂进面板"):
             return
-        sig0 = row_hashes(rgb, w, h)
-        px, py = l + int((r - l) * 0.6), t + int((b - t) * 0.6)
-        u.SetCursorPos(px, py)  # 光标放表体上：hover 态与 Task 4 签认那张一致，finally 里归还
-        time.sleep(0.5)
-
-        def diff_of(buf: bytes, ww: int, hh: int) -> list[int] | None:
-            """两帧逐行一比；尺寸对不上返回 None（None 由调用处记红，不静默跳过）。"""
-            if (ww, hh) != (w, h) or not buf:
-                return None
-            return [y for y, (a, c) in enumerate(zip(sig0, row_hashes(buf, ww, hh))) if a != c]
-
-        # 投递侧改成「投 → 等到画面动为止 → 没动就重新瞄准再投」，最多 3 轮。
-        # 为什么：Task 7 的三轮全量里这一段 1 红 2 绿，红因都是同一句话 ——
-        # 「定向通路 3/3 投出却没滚」。滚轮消息落到哪个元素由**光标当下命中什么**和 WPF
-        # 输入队列的时序决定，那是环境的时序，不是产品的行为；钉一次投递等于把
-        # 「这一次没中」记成产品缺陷（Task 6 刚因为一条依赖环境时序的判据被打回过一次）。
-        # 判据①②本身一个字没改，改的只是「给它机会把滚轮滚出来」。
-        # 等的那条线必须就是判据那条线（WHEEL_MIN）：只等「有一行变了」的话，快照推进带来的
-        # 两三行会提前收手，三轮定向投递连同整条兜底通路都被跳过，判据①拿着两三行去比
-        # WHEEL_MIN 行 —— 健康的产品照样红（Task 7 复核指出，这正是「把 flake 挪了个位置」）。
-        WHEEL_MIN = 100
-
-        def wait_moved(limit: float = 5.0) -> tuple[int, int, bytes, list[int] | None]:
-            t_s = time.time()
-            cw = ch = 0
-            buf = b""
-            out: list[int] | None = None
-            while time.time() - t_s < limit:
-                time.sleep(0.7)
-                cw, ch, buf = capture_bar(hwnd, shot, scale=scale)
-                out = diff_of(buf, cw, ch)
-                if out and len(out) >= WHEEL_MIN:
-                    break
-            return cw, ch, buf, out
-
-        fg_note, fg_blocked = "", False
-        changed: list[int] | None = None
-        w2 = h2 = 0
-        rgb2 = b""
-        posted = rounds = 0
-        while rounds < 3 and (not changed or len(changed) < WHEEL_MIN):
-            rounds += 1
-            u.SetCursorPos(px, py)  # 重新瞄准：光标挪走了滚的就是别的容器，不是表体
-            posted = post_wheel_to(hwnd, px, py, -120 * 3, 3)
-            w2, h2, rgb2, changed = wait_moved()
-        sent = posted
-        way = f"定向 PostMessage → HWND {hwnd}（不经前台），投到第 {rounds} 轮（每轮各等 5 秒）"
-        if posted == 3 and changed is not None and len(changed) < WHEEL_MIN:
-            # 定向通路三帧都投出去了却一行都没动 —— 才轮到那条要前台的真滚轮。
-            # 抢前台的结果**当场记下来**：本探测环境（agent 后台终端）前台锁归 IDE，
-            # 裸 SetForegroundWindow 返回 0，ALT 抖动兜底也不保证抢得回（本机实测两者都返回 0）。
-            # 兜底也失败时「送达自检」单独红并写明送达失败，不再伪装成「表头被滚走」那种产品缺陷。
-            # 兜底通路也要前台，而前台归属在这个探测环境里是**会被抢回去的**（IDE 一有动静
-            # 面板就不是前台窗口了），所以同样重试三轮：每轮重新抢一次前台、重新瞄准、
-            # 投 3 格、等到画面动为止。三轮都零变化才让「送达自检」红，并且写明
-            # 红因在送达不在产品。
-            for attempt in range(3):
-                got = bool(u.SetForegroundWindow(hwnd))
-                how = "裸 SetForegroundWindow"
-                if not got or u.GetForegroundWindow() != hwnd:
-                    k = ctypes.windll.user32.keybd_event
-                    k(0x12, 0, 0, 0)      # ALT 按下
-                    k(0x12, 0, 2, 0)      # 抬起：Windows 放行「刚收到输入事件的进程」改前台
-                    got = bool(u.SetForegroundWindow(hwnd))
-                    how = "ALT 抖动后 SetForegroundWindow"
-                fg_note = ("前台归属："
-                           + ("面板已是前台窗口" if u.GetForegroundWindow() == hwnd
-                              else f"面板**不是**前台窗口（GetForegroundWindow={u.GetForegroundWindow()} ≠ {hwnd}）"
-                                   "→ 真滚轮送不达，红因在送达不在产品"))
-                fg_blocked = u.GetForegroundWindow() != hwnd
-                u.SetCursorPos(px, py)
-                sent = send_wheel(-120 * 3, 3)
-                way = (f"兜底 SendInput 真滚轮（第 {attempt + 1} 次抢前台，{how} 返回 {int(got)}，"
-                       f"投出 {sent}/3）；定向通路 {rounds} 轮 ×3 格都没滚 → 两条通路都记在这里")
-                w2, h2, rgb2, changed = wait_moved()
-                if changed and len(changed) >= WHEEL_MIN:
-                    break
-        same_size = check("真实窗口：滚动前后画面同尺寸可比",
-                          sent == 3 and (w2, h2) == (w, h) and bool(rgb2),
-                          f"滚轮发出 {sent}/3 次（{way}），抓帧 {w2}x{h2}（基线 {w}x{h}）")
-        # 送达自检：只回答一件事——「滚轮有没有投给面板、当下走的这条通路可用不可用」。
-        # 它不看画面动了多少行（那是判据①②③的活），所以它绿而判据红 = 通道没问题、产品有问题；
-        # 它红 = 通道自己就没把消息送出去（投出数不足，或走了兜底通路却没抢到前台），
-        # 判据①②此时的「0 行变化 / first_diff=-1」全是它的下游，别按产品回归查
-        # ——Task 5 轮 1 的假红正是那个形状，复核事 2 点名的就是这里（选「加记录」不选「跳过」）。
-        n_changed = -1 if changed is None else len(changed)
-        check("真实窗口：滚轮送达通道自检（投给面板自己的 HWND、窗口仍在、走兜底时确实抢到前台；"
-              "这条红=送达失败不是产品回归）",
-              sent == 3 and bool(u.IsWindowVisible(hwnd)) and not fg_blocked,
-              f"通路={way}，面板可见={bool(u.IsWindowVisible(hwnd))}，抓帧变化 {n_changed} 行；"
-              f"{fg_note or '走的是定向通路，不需要抢前台（本环境那条前台锁因此不参与送达）'}。"
-              f"这条红而判据①也红 = 送达失败；这条绿而判据②红 = 表头被滚走 —— 两种红形状不同")
-        if not same_size or changed is None:
-            return
-        first_diff = changed[0] if changed else -1
-        in_head = sum(1 for y in changed if st0["top"] <= y <= st0["head1"])
-        # Task 8 之后概览页的表格顶沿**上面**多了状态卡（大字 + 「静默 N 秒」摘要），
-        # 那一带每帧都在动。原来这条拿「整屏第一条变化」当表头是否被滚走的证据，
-        # 于是状态卡的活字被当成「表头被推走」（实测红过一次：第一条变化在 y=29，
-        # 而表格顶沿在 y=199）。判据改成只看表格区以内。
-        first_in_table = next((y for y in changed if y >= st0["top"]), -1)
-        above_top = sum(1 for y in changed if y < st0["top"])
-        st1 = real_window_stats(rgb2, w2, h2)
         print(f"  基线：表格顶沿 y={st0['top']}、表头墨迹带 y={st0['head0']}..{st0['head1']}、"
-              f"分隔线 {st0['lines']} 条、最右条带滑块像素 {st0['gray']}（x0={st0['gray_x0']}）")
-        print(f"  滚轮 3 次 ×{-120 * 3} 后（{way}）：变化行 {len(changed)} 条、"
-              f"第一条变化在 y={first_diff}、"
-              f"落在表头带 [y{st0['top']}, y{st0['head1']}] 里的有 {in_head} 条、"
-              f"分隔线 {st1['lines']} 条、最右条带滑块像素 {st1['gray']}")
-        check("真实窗口：滚轮在表体上滚得动（画面确实动了，不是什么都没发生）",
-              len(changed) >= WHEEL_MIN,
-              f"{len(changed)} 行变化（阈值 {WHEEL_MIN} 行 ≈ 表体的一大截）；送达通路={way}；"
-              f"{fg_note or '定向通路不经前台'}；"
-              f"够不上 {WHEEL_MIN} 行就先看上面那条送达自检——它红是送达问题（本环境的前台锁那一类），"
-              f"它绿而这条红才是那 29 行在真实面板里够不着")
-        check("真实窗口：滚轮滚过之后表头没有被滚出视野",
-              first_in_table > st0["head1"],
-              f"表格区内第一条变化的行在 y={first_in_table}，判据要求 > 表头墨迹带下沿 y={st0['head1']}"
-              f"（顶沿 y={st0['top']}、表头文字 y={st0['head0']}..{st0['head1']}）："
-              f"顶沿到表头下沿之间就是表头，整页滚动一动它就花。"
-              f"（整屏第一条在 y={first_diff} —— 顶沿以上是状态卡，那里每帧都动，不算这条的账）；"
-              + (f"送达通路={way}、变化行 {len(changed)} 条 —— 一条都没动是压根没滚起来，"
-                 f"先看上面那条「滚轮送达通道自检」，它红就是送达失败（本环境的前台锁那一类），"
-                 f"不是表头被滚走" if not changed
-                 else f"表格区内起点 {first_in_table} 落在表头带内 {in_head} 条 —— "
-                      f"这是整页滚动把表头一起推走了，送达通路={way} 与此无关"))
-        # 上一条把顶沿以上豁免了，这一条就是那条豁免的**对账**：豁免只给状态卡的活字，
-        # 不给整页位移。外壳一旦又把页面包进 ScrollViewer（Task 4 轮 2 那个缺陷的形状），
-        # 顶沿以上会跟着状态卡一起被推走，变化行几十起，这里当场红。
-        check("真实窗口：表格顶沿以上只许状态卡的活字在动（豁免不等于放过）",
-              above_top <= 12,
-              f"顶沿 y={st0['top']} 以上有 {above_top} 行变化（阈值 12 = 大字 + 摘要那两三行"
-              f"再放宽一档）；整页滚动会把这一带整体推走，量级差几十倍")
+              f"分隔线 {st0['lines']} 条、块底 y={st0['bottom']}、"
+              f"最右条带滑块像素 {st0['gray']}（x0={st0['gray_x0']}）、"
+              f"PrintWindow 通路 {capture_path(hwnd)}")
+        # 测量自检：静置两帧之间结构量一致。这一条红 = 画面根本不稳定（背衬在换、面板在重建），
+        # 后面②③的红就先别按产品回归查。
+        time.sleep(2.5)
+        w2, h2, rgb2 = capture_bar(hwnd, shot, scale=scale)
+        st1 = real_window_stats(rgb2, w2, h2) if w2 else {}
+        check("真实窗口：静置两帧之间结构量一致（逐行像素比不得，比的是结构量）",
+              (w2, h2) == (w, h) and bool(st1)
+              and (st1["top"], st1["bottom"], st1["lines"])
+              == (st0["top"], st0["bottom"], st0["lines"])
+              and not capture_flips[hwnd],
+              f"顶沿 {st0['top']}->{st1.get('top')}、块底 {st0['bottom']}->{st1.get('bottom')}、"
+              f"分隔线 {st0['lines']}->{st1.get('lines')} 条，抓帧 {w2}x{h2}（基线 {w}x{h}），"
+              f"通路 {capture_path(hwnd)}（切换 {capture_flips[hwnd]} 次，"
+              f"切换一次就代表两帧逐行不可比，见 capture_bar 上方那段）")
+        # ② 溢出发生在表格内部：可见行数远小于引擎行数。
+        check("真实窗口：表格被自己的视口裁住（溢出在表格里，不是整页长高）",
+              st0["lines"] + 1 < SCROLL_ROWS and st0["bottom"] < h - 8,
+              f"{SCROLL_ROWS} 行数据，画面上的表格里只数到 {st0['lines'] + 1} 行上下"
+              f"（分隔线 {st0['lines']} 条），表格块底在 y={st0['bottom']}、"
+              f"窗口高 {h}：整页长高的形状是块底贴到画布下沿、行数一路数到顶")
+        # ③ 外壳右沿不许有整页滚动条的滑块。
         check("真实窗口：外壳没有整页滚动条（页面拿到的是有限高度）",
               st0["gray"] <= 60,
-              f"最右侧 20 物理像素条带里 {st0['gray']} 个中灰滑块像素"
+              f"最右侧 20 物理像素条带里有 {st0['gray']} 个像素离本带众数色"
+              f"（#{st0['gray_ref'].hex()}，也就是窗口自己的背衬）差 24 以上"
               f"（最早出现在 x={st0['gray_x0']}，窗口宽 {w}）："
               f"外壳把页面包进 ScrollViewer 时整页滚动条就贴着窗口右沿；"
               f"有限高度下页面不需要它，那一条带只剩主题底色")
     finally:
-        # 这一段会 SetCursorPos 把光标挪到表格上（保持 hover 态与 Task 4 签认那张一致；
-        # 兜底那条 SendInput 通路也靠它命中），
-        # 不管前面走到哪一步、有没有抛，都得把用户的光标还回去。
-        u.SetCursorPos(home.x, home.y)
         subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         with open(eng, "wb") as fh:
             fh.write(real)
@@ -3591,8 +3529,6 @@ def check_panel_real_scroll() -> None:
             left_pids = python_pids() - before
         check("真实窗口场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
         check("真实窗口场景：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
-
-
 def check_panel_window() -> None:
     print("\n== 控制台窗口 ==")
     if not os.path.isfile(BAR_EXE) or bar_processes():
@@ -4888,6 +4824,9 @@ def main() -> int:
         check_bar_null_records()
         # 真实窗口那一侧的「有限高度」也借这份拷贝注入 29 行假引擎，
         # 所以同样排在 check_gui 之前（check_gui 要拿真引擎起状态栏）。
+        # 滚动那两条（应用自己滚 → 比两张定帧）排在真窗口段前面：同一个注入形状，
+        # 先量「会不会滚、表头动没动」，再量「外壳给的是不是有限高度」。
+        check_panel_scroll_selftest()
         check_panel_real_scroll()
         check_gui()
         check_panel_window()
