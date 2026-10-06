@@ -21,3 +21,6 @@ p2.png
 dist/
 vendor/
 setup-build.log
+
+# 人眼复核用的前后对比截图，跑完看，不进版本库
+ui-qa/

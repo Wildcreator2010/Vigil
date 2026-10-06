@@ -462,6 +462,234 @@ def check_about_page() -> None:
     check("关于页不再是透明占位（不透明像素 > 0）", opaque > 0, f"不透明像素 {opaque}")
 
 
+def notices_entries() -> list[dict]:
+    """从 THIRD-PARTY-NOTICES.md 解析出许可清单条目。
+
+    这是**判据侧**的解析器，实现侧（C#）另有一份 —— 两条独立通路量同一个事实，
+    对不上就红。spec 增补 V5 §2 的原话是「清单从 THIRD-PARTY-NOTICES.md 解析出来，
+    而不是在 C# 里再手抄一份（手抄必然漂移）」，所以这里刻意不读任何 .cs。
+
+    条目 = 带 `- **用途**：` 的 `## N.` / `### N.M` 小节（2 / 4 是容器，本身没有字段行）。
+    """
+    path = os.path.join(HERE, "THIRD-PARTY-NOTICES.md")
+    if not os.path.isfile(path):
+        return []
+    text = open(path, encoding="utf-8").read()
+    entries: list[dict] = []
+    cur: dict | None = None
+
+    def flush():
+        if cur and cur.get("purpose"):
+            entries.append(cur)
+
+    for line in text.splitlines():
+        head = re.match(r"^#{2,3}\s+(\d+(?:\.\d+)?)\.?\s*(.+?)\s*$", line)
+        if head:
+            flush()
+            title = head.group(2)
+            # 「WPF-UI 4.2.0 — MIT」/「… — 微软专有字体许可（**非 MIT**）」
+            name = re.split(r"\s+[—-]\s+", title)[0].strip()
+            cur = {"id": head.group(1), "name": name, "license": "", "url": "", "purpose": ""}
+            continue
+        if cur is None:
+            continue
+        field = re.match(r"^-\s+\*\*(.+?)\*\*\s*[：:]\s*(.*)$", line)
+        if not field:
+            continue
+        key, val = field.group(1), field.group(2).strip()
+        if key == "用途":
+            cur["purpose"] = val
+        elif key == "许可证":
+            if not cur["license"]:
+                cur["license"] = val
+        elif key == "上游":
+            m = re.search(r"https?://\S+", val)
+            if m:
+                cur["url"] = m.group(0).rstrip("｜|,，。")
+    flush()
+    return entries
+
+
+def panel_text(hwnd: int) -> str:
+    """把面板当前那一页的 UIA 文本全捞出来拼成一串（门禁按"含不含"判）。
+
+    走 `text1` 不是 `text`：MIT 全文是**一个带换行的 TextBlock**，`text` 那条按行原样
+    Write-Output，第二行起就没有 `TEXT=` 前缀了，被这里的按行解析直接丢掉 ——
+    于是"渲染了 MIT 全文"这条会假红。`text1` 把名字里的换行折成 <NL>。
+    """
+    res = uia(hwnd, "text1")
+    if not uia_ok(res):
+        return ""
+    return "\n".join(res.get("TEXT", []))
+
+
+def check_about_v5() -> None:
+    """关于页按 spec 增补 V5 的四块：身份区 / 许可清单 / 非 MIT 声明 / 数据诊断区。
+
+    这一段是 2026-10-07 补的：之前那页只有「安装 / 版本 / 检测引擎」三行，
+    V5 要求的 Logo 身份区、作者、MIT 全文、第三方清单**一块都没有**。
+    """
+    print("\n== 关于页（V5 四块）==")
+    src = os.path.join(HERE, "bar", "Panel", "Pages", "AboutPage.cs")
+    text = open(src, encoding="utf-8").read() if os.path.isfile(src) else ""
+
+    entries = notices_entries()
+    check("THIRD-PARTY-NOTICES.md 解析出条目（判据侧解析器有东西可判）", len(entries) >= 8,
+          f"只解析出 {len(entries)} 条")
+
+    # ① 清单必须是解析出来的，不是抄进代码的：任何 .cs 里都不许出现上游版权人名。
+    copied = []
+    for root, _ds, fs in os.walk(os.path.join(HERE, "bar")):
+        if "obj" in root or "bin" in root:
+            continue
+        for fn in fs:
+            if fn.endswith(".cs"):
+                body = open(os.path.join(root, fn), encoding="utf-8", errors="replace").read()
+                for name in ("Pomianowski", "Bäumlisberger", "AmorFate"):
+                    if name in body:
+                        copied.append(f"{fn}:{name}")
+    check("许可清单没有在 C# 里手抄（源码里搜不到上游版权人名）", not copied,
+          "手抄必然与 notices 漂移：" + ", ".join(copied[:4]))
+    check("关于页从 THIRD-PARTY-NOTICES.md 读清单", "THIRD-PARTY-NOTICES.md" in text,
+          "没引用那份文件，清单就是硬编码的")
+    check("THIRD-PARTY-NOTICES.md 随输出分发（csproj 里带 CopyToOutputDirectory）",
+          _csproj_ships("THIRD-PARTY-NOTICES.md"),
+          "运行时读不到那份文件，关于页只会显示空清单")
+    check("LICENSE 随输出分发（关于页要渲染 MIT 全文）", _csproj_ships("LICENSE"),
+          "关于页拿不到 MIT 全文")
+
+    # ② 身份区：Logo + 作者 + 仓库链接，数字仍归 csproj 单一来源。
+    check("身份区放 Logo（V6 的 256 大图）", "logo.png" in text, "缺 Logo")
+    check("身份区写作者，且作者取 csproj 的 <Authors> 不硬编码",
+          "Authors" in text or "AuthorText" in text,
+          "作者写死在页面上，改了 csproj 就漂移")
+    check("身份区有仓库链接，取 csproj 的 <RepositoryUrl>",
+          "RepositoryUrl" in text or "RepoUrl" in text,
+          "链接写死会在改仓库名时失效")
+
+    # ③ 非 MIT 声明 + 数据诊断区
+    check("非 MIT 那几项在页面上单独标出来", "非 MIT" in text or "专有" in text,
+          "Segoe 字体那种专有许可混在 MIT 列表里没人看得出来")
+    check("数据与诊断区复用运行页那两颗打开按钮的通路",
+          "RevealInExplorer" in text or "打开日志" in text or "OpenLog" in text,
+          "V5 §4 要求复用已有通路，不再另起一套")
+
+    if not os.path.isfile(BAR_EXE):
+        check("Vigil.exe 存在", False, "先跑 --build")
+        return
+    settings = os.path.join(ds.state_dir(), "settings.json")
+    backup = open(settings, encoding="utf-8").read() if os.path.isfile(settings) else None
+    subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+    time.sleep(1.5)
+    write_settings(theme="light", backdrop="mica", showBar=False, notify=False,
+                   interval=2, repeatSec=0)
+    proc = subprocess.Popen([BAR_EXE, "--panel", "about"], cwd=os.path.dirname(BAR_EXE))
+    try:
+        hwnd = 0
+        t0 = time.time()
+        while time.time() - t0 < 25 and not hwnd:
+            time.sleep(0.4)
+            hwnd = top_window("Vigil 控制台")
+        check("关于页真窗口开得出来", bool(hwnd), "等满 25 秒没有「Vigil 控制台」窗口")
+        if not hwnd:
+            return
+        time.sleep(3.0)  # 等清单读完 + 首帧合成
+        body = panel_text(hwnd)
+        check("关于页读出 UIA 文本", bool(body), "UIA 一条文本都没抓到")
+        missing = [e["name"] for e in entries if e["name"].replace(" ", "") not in body.replace(" ", "")]
+        check("关于页的清单逐项等于 THIRD-PARTY-NOTICES.md", not missing,
+              f"{len(missing)} 条没显示：" + "、".join(missing[:4]))
+        check("关于页渲染 MIT 全文", "Permission is hereby granted" in body,
+              "V5 §2 / spec §8 要求关于页在应用内渲染同一份清单与许可")
+        check("关于页显示作者 Wildcreator", "Wildcreator" in body, "身份区缺作者")
+        check("专有许可那一项在页面上被单独标出来", "非 MIT · 专有许可" in body,
+              "Segoe 那一格原文写的是「微软专有字体许可（非 MIT）」，混在 MIT 列表里看不出来")
+        check("仓库链接不是系统紫（V2 明文不得出现紫色）",
+              "VigilAccentBrush" in text,
+              "HyperlinkButton 默认吃系统强调色，本机那一个是紫")
+
+        # 「页面自己放 ScrollViewer」这条外壳契约，运行页在阈值行改矮之后已经撑不出来了
+        # （见 check_panel_settings_live 里那条两分支判据）。关于页天生就长：
+        # 9 条许可清单 + MIT 全文，最小尺寸下必然超视口，所以契约改钉在这一页。
+        u = _user32()
+        wl, wt_, wr, wb = rect_of(hwnd)
+        u.SetWindowPos(hwnd, 0, wl, wt_, 760, 500, 0x0004 | 0x0010)
+        sc = {}
+        prev_h = -1
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            sc = uia(hwnd, "scroll")
+            cur_h = int((sc.get("SVH") or ["-1"])[0])
+            if uia_ok(sc) and cur_h > 0 and cur_h == prev_h:
+                break
+            prev_h = cur_h
+            time.sleep(0.8)
+        check("关于页收到最小尺寸时可滚（清单 + MIT 全文超出视口，外壳不代劳整页滚动）",
+              uia_ok(sc) and (sc.get("VSCROLLABLE") or ["False"])[0] == "True",
+              f"VerticallyScrollable={sc.get('VSCROLLABLE')} SVH={sc.get('SVH')} {sc.get('ERR')}")
+        u.SetWindowPos(hwnd, 0, wl, wt_, wr - wl, wb - wt_, 0x0004 | 0x0010)
+    finally:
+        # 串行段共用的口径：自己备份、自己还原，别把 showBar=false 留给下一段。
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+        time.sleep(1.0)
+        if backup is not None:
+            with open(settings, "w", encoding="utf-8") as fh:
+                fh.write(backup)
+        elif os.path.isfile(settings):
+            os.remove(settings)
+
+
+def _csproj_ships(fname: str) -> bool:
+    """Vigil.csproj 是否把仓库根的那个文件拷进输出目录。"""
+    proj = os.path.join(HERE, "bar", "Vigil.csproj")
+    if not os.path.isfile(proj):
+        return False
+    body = open(proj, encoding="utf-8").read()
+    return fname in body and "CopyToOutputDirectory" in body
+
+
+def check_balance_detail() -> None:
+    """spec §5 余额页那一行要求「余额明细」，之前只有一句「当前余额 CNY x」。
+
+    引擎 fetch_balance 早就吐了 total / granted / topped_up / currency / source /
+    fetched_at / cached，是 C# 的 Balance 模型只接了五个字段中的三个。
+    """
+    print("\n== 余额明细 ==")
+    sc = os.path.join(HERE, "bar", "StateClient.cs")
+    body = open(sc, encoding="utf-8").read() if os.path.isfile(sc) else ""
+    for f in ("granted", "topped_up"):
+        check(f"StateClient.Balance 解析 {f}", f'JsonPropertyName("{f}")' in body,
+              "引擎给了但模型没接，页面上就永远看不见这一格")
+    pg = os.path.join(HERE, "bar", "Panel", "Pages", "BalancePage.cs")
+    page = open(pg, encoding="utf-8").read() if os.path.isfile(pg) else ""
+    check("余额页列出赠送/充值两笔明细", "赠送" in page and "充值" in page,
+          "只有一行合计，spec §5 要的明细没有")
+    check("余额页标出这一帧是不是缓存", "Cached" in body or "缓存" in page,
+          "5 分钟 TTL 内看到的是缓存帧，不标出来用户会以为刚查过")
+
+
+def check_runtime_row() -> None:
+    """运行页「阈值（只读）」那一行：说明文字与右侧长取值挤成叠排。
+
+    右列是 Auto + MaxWidth 320 右对齐换行，724 DIP 的页面里左侧说明只剩一半宽，
+    两坨文字互相咬住（离屏截图实证）。取值那一长串本来就该独占一行左对齐。
+    """
+    print("\n== 运行页阈值行 ==")
+    pg = os.path.join(HERE, "bar", "Panel", "Pages", "RuntimePage.cs")
+    body = open(pg, encoding="utf-8").read() if os.path.isfile(pg) else ""
+    row = re.search(r"Ui\.(Row|StackedRow)\(\s*\"阈值[^\"]*\"", body)
+    check("阈值那一行走整行堆叠的排法（不再塞 Ui.Row 右列）",
+          bool(row) and row.group(1) == "StackedRow",
+          f"现在是 Ui.{row.group(1) if row else '（没找到阈值行）'}")
+    check("取值文本块不再右对齐限宽",
+          "MaxWidth = 320" not in body and "TextAlignment.Right" not in body,
+          "右列限宽 + 右对齐就是叠排的来源")
+    check("Ui 里有 StackedRow 这个工厂（其他长取值行可以复用）",
+          "StackedRow" in open(os.path.join(HERE, "bar", "Panel", "Ui.cs"),
+                               encoding="utf-8").read(),
+          "排法要收在 Ui 工厂里，别在页面里手搓 Grid")
+
+
 def check_setup() -> None:
     print("\n== 安装向导 ==")
     if not shutil.which("dotnet"):
@@ -1717,13 +1945,14 @@ def check_panel_shell(empty_base: dict | None) -> dict[str, int]:
                   f"本机 {len(session_files)} 个会话：横线 {empty_base['hlines']}→{st['hlines']}、"
                   f"非纸色 {empty_base['ink']}→{st['ink']}"
                   f"（判据：至少多 1 条横线、至少多 600 像素）")
-        # 简报 Step 4 那条：**如实记它的强度** —— 概览页在 Task 4 的表格骨架时代就是 70 色、
-        # 关于页 7 色，所以这条在 Task 8 动手之前就已经是绿的。它守的是「概览页不许退回
-        # 占位那一行字」，不守「Task 8 的三块内容都填上了」；后半边由同段那几条
-        # （状态标签/配色映射、待处理整串赋值、快照跟着变的两张图）钉住，见 check_overview_page。
-        check("概览页比关于页更丰富（会话表已填上真实数据）",
-              shots.get("overview", 0) > shots.get("about", 0),
-              f"overview={shots.get('overview')} about={shots.get('about')}")
+        # 简报 Step 4 那条：原来是「概览页色数 > 关于页色数」，靠关于页是 7 色的透明占位页
+        # 撑出区分度。2026-10-07 关于页按 spec V5 补齐四块（Logo + 9 条许可清单 + MIT 全文）
+        # 之后那个参照就作废了 —— 它成了全页面最丰富的一张，这条会**永远红**。
+        # 参照换成绝对下限（spec §9 给的就是"颜色种类 > 200"）：占位页实测 7 色，
+        # 填了数据的概览页 400+ 色，退回占位照样红。
+        check("概览页色数高出占位页一个量级（会话表已填上真实数据）",
+              shots.get("overview", 0) > 200,
+              f"overview={shots.get('overview')}，判据 >200（占位页实测 7）")
 
     # 非法页名必须非零退出。旧实现把未知 key 静默当 overview：`--panel-shot nonsense`
     # 照样回 `SHOT nonsense 724 600 <概览的色数>` 且退 0，上面 parts[1] == page 只比回声，
@@ -2275,6 +2504,14 @@ switch ($Action) {
     if ($null -eq $o) { Write-Output ('ITEMNOPAT=' + $hit[0].Current.Name); exit 0 }
     Write-Output ('ITEM=' + $hit[0].Current.Name)
     Write-Output ('SELECTED=' + $o.Current.IsSelected)
+  }
+  'rect' {
+    # -Name = 元素名子串，取第一个命中。用来判断"这一格到底在不在视口里"：
+    # 页面放不下又滚不动（内容被裁）时，最下面那颗按钮的矩形会掉到视口外。
+    $hit = @($all | Where-Object { $_.Current.Name -like ('*' + $Name + '*') })
+    if ($hit.Count -eq 0) { Write-Output 'RECTMISS=0'; exit 0 }
+    $r = $hit[0].Current.BoundingRectangle
+    Write-Output ('RECT=' + [int]$r.X + '|' + [int]$r.Y + '|' + [int]$r.Width + '|' + [int]$r.Height)
   }
   'scroll' {
     if ($scrolls.Count -eq 0) { Write-Output 'ERR=NOSCROLL'; exit 4 }
@@ -2896,11 +3133,20 @@ def check_panel_settings_live() -> None:
             prev_h = cur_h
             time.sleep(0.8)
         can = (sc.get("VSCROLLABLE") or ["False"])[0] == "True"
-        check("窗口收到最小尺寸时运行页真的可滚（页内 ScrollViewer 报 VerticallyScrollable=true）",
-              uia_ok(sc) and can,
-              f"VerticallyScrollable={can} extent={sc.get('EXTENT')} viewport={sc.get('VIEWPORT')} "
-              f"SVH={sc.get('SVH')}（WPF 的 ScrollViewerAutomationPeer 在本机把 extent/viewport 都报 0，"
-              f"所以这两值只作现场、不进判据；可滚性看 VerticallyScrollable）；{sc.get('ERR')}")
+        # 两分支判据：可滚 **或** 最下面那颗按钮还在视口里。
+        # 原来只认「可滚」，而运行页在 2026-10-07 把阈值行从 Ui.Row 右列换成整行堆叠
+        # （Ui.StackedRow）之后变矮了，最小尺寸下整页放得下 —— 放得下不是缺陷，
+        # 「放不下又滚不动、内容被裁在视口外」才是这条门禁要挡的那件事。
+        rr = uia(hwnd, "rect", name="打开数据目录")
+        rect_s = (rr.get("RECT") or [""])[0]
+        inside = False
+        if rect_s:
+            bx, by, bw, bh = (int(v) for v in rect_s.split("|"))
+            inside = by + bh / 2 <= b
+        check("窗口收到最小尺寸时运行页的内容可达（可滚，或整页本来就放得下）",
+              uia_ok(sc) and (can or inside),
+              f"VerticallyScrollable={can} 末行按钮={rect_s or rr} 窗口底={b} "
+              f"（extent/viewport 本机都报 0，只作现场不进判据；{sc.get('ERR')}）")
         # 原来这里还跟着一条像素判据（「滚到底变化 ≥30 行、滚回顶部与基线差 ≤N 行」），
         # 2026-10-06 拆掉，两条理由：
         #   ① 这一段没有能滚的通路 —— 面板的合成输入在本环境送不达窗口（定向 PostMessage
@@ -4940,6 +5186,9 @@ def main() -> int:
         # 对"当前注入的是哪一帧"敏感的比样门禁。
         check_panel_backdrop()
         check_about_page()
+        check_about_v5()
+        check_balance_detail()
+        check_runtime_row()
     else:
         print("\n  （GUI 冒烟未跑，加 --gui）")
 
