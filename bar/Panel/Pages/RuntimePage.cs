@@ -22,11 +22,11 @@ namespace Vigil
     {
         // 阈值那一行是「引擎此刻看到了什么」，每个快照刷一次（Pages.cs 的 Refresh 契约）。
         // 常量本身（ACTIVE_WINDOW 等）不在这里复制 —— 复制一份数字就会和 dsh_state.py 漂移。
+        // 整行左对齐、不限宽：这一串是四个字段用「|」拼的长文本，塞进 Ui.Row 的右列
+        // 会和左边的说明咬在一起（离屏截图实证），所以走 Ui.StackedRow。
         readonly WpfControls.TextBlock _thresholds = new WpfControls.TextBlock
         {
             FontSize = 12,
-            MaxWidth = 320,
-            TextAlignment = TextAlignment.Right,
             TextWrapping = TextWrapping.Wrap,
         };
 
@@ -65,7 +65,7 @@ namespace Vigil
                 Ui.Heading("运行"),
                 Ui.Group("检测引擎",
                     Ui.Row("轮询间隔（秒）", "改完自动重启检测进程生效，不用重开面板。", interval),
-                    Ui.Row("阈值（只读）",
+                    Ui.StackedRow("阈值（只读）",
                         "活跃 / 完成 / 卡住 / 待处理升级这些判定窗口定义在 dsh_state.py 顶部，" +
                         "面板不复制数字：改常量要动引擎，并由 python test_dsh_state.py 校验边界。",
                         _thresholds),

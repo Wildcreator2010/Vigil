@@ -83,6 +83,45 @@ namespace Vigil
         }
 
         /// <summary>
+        /// 长取值专用的堆叠行：标题 + 说明在上，取值独占一整行、左对齐。
+        ///
+        /// 为什么不用 <see cref="Row"/>：Row 的右列是 Auto，给它限宽（阈值那格原来是
+        /// MaxWidth 320 + 右对齐换行）就把左侧说明挤掉一半宽，724 DIP 的页面里两坨文字
+        /// 互相咬住。取值本身是一长串「当前判定：… | 会话 … | 静默 … | 本次扫描 …」，
+        /// 天生就该整行铺开，不该塞在按钮旁边那一格里。
+        /// </summary>
+        public static FrameworkElement StackedRow(string title, string desc, FrameworkElement value)
+        {
+            var sp = new WpfControls.StackPanel { Margin = new Thickness(14, 11, 14, 11) };
+            var titleText = new WpfControls.TextBlock
+            {
+                Text = title,
+                FontSize = 13.5,
+                FontWeight = FontWeights.SemiBold,
+            };
+            Ref(titleText, WpfControls.TextBlock.ForegroundProperty, InkKey);
+            sp.Children.Add(titleText);
+            if (!string.IsNullOrEmpty(desc))
+            {
+                var descText = new WpfControls.TextBlock
+                {
+                    Text = desc,
+                    FontSize = 12,
+                    Margin = new Thickness(0, 3, 0, 0),
+                    TextWrapping = TextWrapping.Wrap,
+                };
+                Ref(descText, WpfControls.TextBlock.ForegroundProperty, InkDimKey);
+                sp.Children.Add(descText);
+            }
+            if (value != null)
+            {
+                value.Margin = new Thickness(0, 7, 0, 0);
+                sp.Children.Add(value);
+            }
+            return sp;
+        }
+
+        /// <summary>
         /// 所有由 Group 造出来的卡片，按弱引用存着。材质是三档可切的，而页面实例被面板
         /// 缓存复用（切页不重建），所以换档时必须能回头重刷每一张卡 —— 不然会出现
         /// 「外壳已经是玻璃、卡片还是实心」这种半新半旧的拼缝。
