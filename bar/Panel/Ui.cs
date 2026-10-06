@@ -145,11 +145,14 @@ namespace Vigil
             => Wpf.Ui.Appearance.ApplicationThemeManager.GetAppTheme()
                == Wpf.Ui.Appearance.ApplicationTheme.Dark;
 
-        /// <summary>按当前材质重画一张卡：圆角 14 ↔ 18，实心主题刷 ↔ 半透明 + 内高光。</summary>
+        /// <summary>按当前材质重画一张卡：圆角 12 ↔ 18，实心主题刷 ↔ 半透明 + 内高光。</summary>
         static void StyleCard(WpfControls.Border card)
         {
             if (card == null) return;
-            card.CornerRadius = new CornerRadius(Glass ? 18 : 14);
+            // 12 是 spec 增补 V2 圆角那一行给卡片的值（按钮/输入框那 8 走
+            // App.ApplyBrandPalette 里的 ControlCornerRadius 键）；玻璃档故意更大，
+            // 那一档要的是"看着最透"，18 是它自己定的。
+            card.CornerRadius = new CornerRadius(Glass ? 18 : 12);
             if (Glass)
             {
                 bool dark = DarkNow();
@@ -289,6 +292,18 @@ namespace Vigil
         }
 
         static readonly Brush Fallback = Frozen(Color.FromRgb(0x5D, 0x4B, 0x3F));
+
+        /// <summary>
+        /// 次强调：复古金 #D6A44B —— spec 增补 V2 表里那一格此前**谁都没用**。
+        /// 现在给「非 MIT」这类要提醒、但不是出问题的标记用：红色按 V4 是保留给
+        /// 「出错了」那个状态码的，拿它做合规提醒等于把状态语义借走。
+        ///
+        /// 固定色不是主题色，所以和状态色一样直接给画刷、不走 <see cref="Ref"/>；
+        /// 集中在这里给，是为了让页面上不再出现对象初始化器里的 SolidColorBrush 字面量
+        /// （plan 的 Global Constraints 那条）。
+        /// </summary>
+        public static readonly Brush SubAccent = Frozen(Color.FromRgb(0xD6, 0xA4, 0x4B));
+        public static readonly Brush SubAccentTint = Frozen(Color.FromArgb(0x33, 0xD6, 0xA4, 0x4B));
 
         static readonly Dictionary<string, Brush> Solid = new Dictionary<string, Brush>();
 

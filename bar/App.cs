@@ -288,39 +288,52 @@ namespace Vigil
             {
                 var app = System.Windows.Application.Current;
                 if (app == null) return;
-                if (_accentDict == null)
-                {
-                    _accentDict = new System.Windows.ResourceDictionary();
-                    // 两族都要覆盖：`SystemAccentColor*` 是旧的那套，而 WPF-UI 4.2 的
-                    // Fluent 控件（单选圈、开关、焦点框）实际吃 `AccentFillColor*` ——
-                    // 第一版只覆盖了前者，选中圈仍然是系统紫，白改。
-                    SetAccent("AccentFillColorPrimary", 0xD8, 0x7D, 0x44);
-                    SetAccent("AccentFillColorDefault", 0xC5, 0x6B, 0x33);
-                    SetAccent("AccentFillColorSecondary", 0xB8, 0x5F, 0x2B);
-                    SetAccent("AccentFillColorTertiary", 0xE9, 0xA9, 0x7C);
-                    SetAccent("AccentFillColorDisabled", 0xC7, 0xC1, 0xB8);
-                    SetAccent("SystemAccentColor", 0xD8, 0x7D, 0x44);
-                    SetAccent("SystemAccentColorPrimary", 0xC5, 0x6B, 0x33);
-                    SetAccent("SystemAccentColorSecondary", 0xB8, 0x5F, 0x2B);
-                    SetAccent("SystemAccentColorTertiary", 0xE9, 0xA9, 0x7C);
-                    // 强调色上的文字：橙底白字对比约 2.6:1，配深色字更稳，这里取白
-                    // 并把橙压深一档（Default/Secondary 已是深色），保证勾选圈里的白点看得清。
-                    SetAccent("AccentTextFillColorPrimary", 0xFF, 0xFF, 0xFF);
-                    SetAccent("AccentTextFillColorSecondary", 0xFF, 0xFF, 0xFF);
-                    SetAccent("AccentTextFillColorTertiary", 0xFF, 0xFF, 0xFF);
-                    SetAccent("AccentFillColorSelectedText", 0xFF, 0xFF, 0xFF);
-                    SetAccent("TextOnAccentFillColorPrimary", 0xFF, 0xFF, 0xFF);
-                    SetAccent("TextOnAccentFillColorSecondary", 0xFF, 0xFF, 0xFF);
-                    SetAccent("TextOnAccentFillColorSelectedText", 0xFF, 0xFF, 0xFF);
-                    SetBrandAccents();
-                }
-                var merged = app.Resources.MergedDictionaries;
-                int at = merged.IndexOf(_accentDict);
-                if (at >= 0) merged.RemoveAt(at);
-                merged.Add(_accentDict);
+                if (_accentDict == null) _accentDict = new System.Windows.ResourceDictionary();
+
+                // 主色随主题换档，派生色一律从主色算 —— 手抄四个数，改主色时必留对不上的边。
+                bool dark = FluentTheme() == Wpf.Ui.Appearance.ApplicationTheme.Dark;
+                var brand = dark
+                    ? System.Windows.Media.Color.FromRgb(0xEA, 0x8C, 0x70)   // 落日暮光
+                    : System.Windows.Media.Color.FromRgb(0xD8, 0x7D, 0x44);  // 暮光橙
+                SetAccent("AccentFillColorPrimary", brand);
+                SetAccent("AccentFillColorDefault", Shade(brand, 0.90));
+                SetAccent("AccentFillColorSecondary", Shade(brand, 0.82));
+                SetAccent("AccentFillColorTertiary", Shade(brand, 1.14));
+                SetAccent("AccentFillColorDisabled", System.Windows.Media.Color.FromRgb(0xC7, 0xC1, 0xB8));
+                SetAccent("SystemAccentColor", brand);
+                SetAccent("SystemAccentColorPrimary", Shade(brand, 0.90));
+                SetAccent("SystemAccentColorSecondary", Shade(brand, 0.82));
+                SetAccent("SystemAccentColorTertiary", Shade(brand, 1.14));
+                // 强调色上的文字一律白：橙底白字对比约 2.6:1，配深色字更差。
+                SetAccent("AccentTextFillColorPrimary", System.Windows.Media.Colors.White);
+                SetAccent("AccentTextFillColorSecondary", System.Windows.Media.Colors.White);
+                SetAccent("AccentTextFillColorTertiary", System.Windows.Media.Colors.White);
+                SetAccent("AccentFillColorSelectedText", System.Windows.Media.Colors.White);
+                SetAccent("TextOnAccentFillColorPrimary", System.Windows.Media.Colors.White);
+                SetAccent("TextOnAccentFillColorSecondary", System.Windows.Media.Colors.White);
+                SetAccent("TextOnAccentFillColorSelectedText", System.Windows.Media.Colors.White);
+                SetBrandAccents(brand);
+
+                ReMergeLast(app.Resources.MergedDictionaries, _accentDict);
+                // 窗口级也要重挂：控件在窗口内解析 DynamicResource 时元素级优先，
+                // 换主题后只重排应用级那一份的话，开着的窗口里颜色不会跟着换档。
+                var win = PanelWindow.Instance;
+                if (win != null) ReMergeLast(win.Resources.MergedDictionaries, _accentDict);
             }
             catch (Exception ex) { Log($"强调色覆盖失败: {ex.Message}"); }
         }
+
+        /// <summary>按系数缩放明度（&gt;1 提亮、&lt;1 加深），逐通道钳在 0..255。</summary>
+        static System.Windows.Media.Color Shade(System.Windows.Media.Color c, double k)
+        {
+            byte F(double v)
+            {
+                double x = Math.Round(v * k);
+                return (byte)(x < 0 ? 0 : (x > 255 ? 255 : x));
+            }
+            return System.Windows.Media.Color.FromRgb(F(c.R), F(c.G), F(c.B));
+        }
+
 
         static System.Windows.ResourceDictionary _accentDict;
 
@@ -365,11 +378,14 @@ namespace Vigil
                 }
                 else
                 {
-                    // 暖纸白底 / 黄昏云描边 / 夜影黑字 —— V2 浅主题那一列
-                    SetPalette("ApplicationBackgroundColor", 0xFF, 0xFB, 0xF8, 0xF3);
+                    // 暖纸白底 / 黄昏云描边 / 夜影黑字 —— V2 浅主题那一列。
+                    // 表上写的是「卡片底 = 暖纸白 #FBF8F3」，所以暖纸白给**卡片**；
+                    // 页面那一层比它深一档暖调，卡片才浮得起来（V2 只定了卡片那一格，
+                    // 页面底是照同一支色卡的暖调自定的）。
+                    SetPalette("ApplicationBackgroundColor", 0xFF, 0xF2, 0xEB, 0xE0);
                     SetPalette("LayerFillColorDefaultColor", 0xB3, 0xFF, 0xFF, 0xFF);
-                    SetPalette("CardBackgroundColor", 0xFF, 0xFF, 0xFF, 0xFF);
-                    SetPalette("CardBackgroundFillColorDefaultColor", 0xFF, 0xFF, 0xFF, 0xFF);
+                    SetPalette("CardBackgroundColor", 0xFF, 0xFB, 0xF8, 0xF3);
+                    SetPalette("CardBackgroundFillColorDefaultColor", 0xFF, 0xFB, 0xF8, 0xF3);
                     SetPalette("CardBackgroundFillColorSecondaryColor", 0xFF, 0xF6, 0xF1, 0xE9);
                     SetPalette("CardStrokeColorDefaultColor", 0x4D, 0xB0, 0xA7, 0x88);
                     SetPalette("TextFillColorPrimaryColor", 0xFF, 0x2B, 0x2A, 0x23);
@@ -381,6 +397,9 @@ namespace Vigil
                     SetPalette("DividerStrokeColorDefaultColor", 0x33, 0x2B, 0x2A, 0x23);
                     SetPalette("SubtleFillColorSecondaryColor", 0x0A, 0x2B, 0x2A, 0x23);
                 }
+                // V2 圆角那一行：按钮 / 输入框 8。WPF-UI 的表单控件全吃这一个键。
+                _paletteDict["ControlCornerRadius"] = new CornerRadius(8);
+
 
                 ReMergeLast(app.Resources.MergedDictionaries, _paletteDict);
                 // 窗口级再挂一份：控件在窗口内解析 DynamicResource 时元素级优先，
@@ -426,9 +445,8 @@ namespace Vigil
         internal static System.Windows.ResourceDictionary AccentDictionary => _accentDict;
 
         /// <summary>一个键同时给两份：不带后缀的是 Color，带 Brush 的是冻结画刷。</summary>
-        static void SetAccent(string key, byte r, byte g, byte b)
+        static void SetAccent(string key, System.Windows.Media.Color c)
         {
-            var c = System.Windows.Media.Color.FromRgb(r, g, b);
             _accentDict[key] = c;
             var br = new System.Windows.Media.SolidColorBrush(c);
             br.Freeze();
@@ -444,15 +462,15 @@ namespace Vigil
         const string AccentBrushKey = "VigilAccentBrush";
         const string AccentInkKey = "VigilAccentInkBrush";
 
-        static void SetBrandAccents()
+        static void SetBrandAccents(System.Windows.Media.Color brand)
         {
-            _accentDict[AccentBrushKey] = FrozenRgb(0xD8, 0x7D, 0x44);
-            _accentDict[AccentInkKey] = FrozenRgb(0xFF, 0xFF, 0xFF);
+            _accentDict[AccentBrushKey] = Frozen(brand);
+            _accentDict[AccentInkKey] = Frozen(System.Windows.Media.Colors.White);
         }
 
-        static System.Windows.Media.SolidColorBrush FrozenRgb(byte r, byte g, byte b)
+        static System.Windows.Media.SolidColorBrush Frozen(System.Windows.Media.Color c)
         {
-            var br = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
+            var br = new System.Windows.Media.SolidColorBrush(c);
             br.Freeze();
             return br;
         }
