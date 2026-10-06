@@ -61,14 +61,23 @@ namespace Vigil
             Ui.Ref(_big, WpfControls.TextBlock.ForegroundProperty, Ui.InkKey);
             Ui.Ref(_sub, WpfControls.TextBlock.ForegroundProperty, Ui.InkDimKey);
             Ui.Ref(_waiting, WpfControls.TextBlock.ForegroundProperty, Ui.InkKey);
-            AddColumn("项目", "Project", 150);
-            AddColumn("状态", "StateLabel", 110);
-            AddColumn("轮次", "TurnText", 80);
-            AddColumn("静默", "AgeText", 80);
-            AddColumn("任务", "TodoText", 90);
-            AddColumn("最近工具", "LastTool", 130);
-            AddColumn("tokens", "UsageText", 110);
-            AddColumn("标题", "Title", 200);
+            AddColumn("项目", "Project", 132);
+            AddColumn("状态", "StateLabel", 76);
+            AddColumn("轮次", "TurnText", 62);
+            AddColumn("静默", "AgeText", 60);
+            AddColumn("任务", "TodoText", 50);
+            AddColumn("最近工具", "LastTool", 100);
+            AddColumn("tokens", "UsageText", 70);
+            AddColumn("标题", "Title", 160);
+            // 末列改成星宽。原来八列写死合计 950 DIP，而概览页给表格的那一块只有 ~722 宽
+            // （960 窗口 - 侧栏 188 - Host 左右 24×2）：真窗口截图实测表格里因此横着一根
+            // 滚动条，「标题」整列被推到视口外看不见。星宽让它吃掉剩下的宽度，
+            // 固定列那七列的宽度也一并收到 550 —— 窗口收窄到 MinWidth 时仍会出横向条，
+            // 那是有限宽度装不下八列的正当结果，不是排版自己算错了。
+            var titleCol = _grid.Columns[^1];
+            titleCol.MinWidth = 120;
+            titleCol.Width = new WpfControls.DataGridLength(
+                1, WpfControls.DataGridLengthUnitType.Star);
 
             var statusCard = new WpfControls.Border
             {
