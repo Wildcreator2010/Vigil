@@ -310,7 +310,60 @@ SOFTWARE.
 
 ---
 
-## 5. 汇总
+## 5. Meta Platforms zstd 1.5.6 — BSD 3-Clause（**非 MIT**，双许可里取 BSD 这一支）
+
+- **用途**：C++ 状态引擎（`engine/vigil_engine.cpp`）解压 dsh 的会话文件
+  `session.v4.jsonl.zstd`。只 vendor **解压子集**（`lib/common` + `lib/decompress`，
+  约 1MB 源码），压缩侧一行未取。
+- **上游**：https://github.com/facebook/zstd ｜ 取 v1.5.6，源码落在 `engine/third_party/zstd/`
+- **许可证**：**BSD 3-Clause**（`Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.`）。
+  zstd 本身是 **BSD-3-Clause 与 GPL-2.0 双许可**，本项目按 BSD 那一支使用与分发。
+  这一项不是 MIT，与上面几项 MIT 有本质区别。
+- **为什么必须自带**：本机（Win11 10.0.26300）实测 Windows 自带压缩 API 解不了 zstd ——
+  `RtlDecompressBufferEx2` 未导出，`RtlGetCompressionWorkSpaceSize` 对候选格式全拒
+  （`C000000D` / `C000025F`）。判据是 `engine/probe_zstd.cpp` 跑出来的，不是读文档推的。
+- **当前分发状态**：**尚未随产物分发** —— C++ 引擎还在对照验证阶段，`package.cmd`
+  没有把它打进载荷。一旦它替下 CPython，这一项转为"随产物分发"，原文要同时进
+  `licenses/`（由 `tools/collect_licenses.py` 收集、`tools/verify_package.py` 断言）。
+
+许可证原文（`engine/third_party/zstd/LICENSE` 全文）：
+
+```
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+---
+
+## 6. 汇总
 
 | 组件 | 许可证 | 在本项目中的角色 | 是否随产物分发 |
 | --- | --- | --- | --- |
@@ -325,5 +378,6 @@ SOFTWARE.
 | .NET 10 运行时（coreclr / WindowsDesktop） | MIT | 自包含载荷的运行环境 | **是**，`app\` 内二进制 + `licenses\dotnet-*.txt` 原文 |
 | CPython 3.14.7 embeddable | PSF License | 状态引擎 `dsh_state.py` 的解释器 | **是**，`app\runtime\python\` + `licenses\python-PSF.txt` |
 | Python 3.14 标准库 | PSF License | 引擎只用标准库，无第三方包 | 是（含在上一行的 embeddable 包内） |
+| Meta Platforms zstd 1.5.6（解压子集） | **BSD 3-Clause（非 MIT）** | C++ 状态引擎解压会话文件 | 目前**否**（引擎未进载荷）；替下 CPython 后转"是" |
 
 如对以上声明有疑问，请开 issue 联系 Wildcreator。

@@ -30,3 +30,4 @@ ui-qa/
 
 # 打包变体的量测产物（每个 185MB，量完默认删）
 dist-measure/
+.msg.txt
