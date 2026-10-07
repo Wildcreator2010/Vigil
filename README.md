@@ -190,7 +190,7 @@ Key 存在 `%LOCALAPPDATA%\Vigil\balance.protected`，用当前 Windows 账户�
 | `build.cmd` `start-bar.bat` | 开发期编译 / 启动 |
 | `setup/` | 安装向导（net48 纯代码 WPF，26KB；`Installer.cs` 干活、`Ui.cs` 画界面、`Program.cs` 分参数） |
 | `package.cmd` | 出零前置分发物：自包含 publish + 随附 CPython + 收许可证原文 + 校验 + 压 zip |
-| `tools/` | 打包配套的常设脚本：`verify_package.py`（产物校验）、`collect_licenses.py`（收第三方许可证原文）、`read_version.py`、`write_readme_install.py` |
+| `tools/` | 常设脚本：`verify_package.py`（产物校验）、`collect_licenses.py`（收第三方许可证原文）、`read_version.py`、`write_readme_install.py`、`shot_window.py`（把真窗口的「Vigil 控制台」抓到前台截屏，专查离屏 `--panel-shot` 看不见的 DWM 背衬与标题栏） |
 | `LICENSE` | 本项目自身的 MIT 许可证全文 |
 | `THIRD-PARTY-NOTICES.md` | 第三方组件与素材的归属声明（含 WPF-UI 及其传递依赖的许可证原文） |
 
