@@ -18,7 +18,7 @@ call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\
 if errorlevel 1 ( echo [FAIL] vcvars64 did not load, see vcvars.log & exit /b 1 )
 
 cl /nologo /EHsc /W3 /O2 /std:c++20 /utf-8 ^
-   /D "ZSTD_DISABLE_ASM=1" ^
+   /D "ZSTD_DISABLE_ASM=1" /D "_CRT_SECURE_NO_WARNINGS" ^
    /I third_party\zstd ^
    vigil_engine.cpp ^
    third_party\zstd\common\debug.c ^
