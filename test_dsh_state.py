@@ -11,6 +11,7 @@ import compression.zstd as zstd
 import glob
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -655,6 +656,58 @@ def run_live():
     return errs
 
 
+def run_balance_key_roundtrip():
+    """DPAPI 不可用时的明文回退必须**读得回来**。
+
+    这是 2026-10-07 才修掉的读写不对称：`save_balance_key` 在 DPAPI 失败时把明文写到
+    `state_dir()/balance.key`，而 `balance_key()` 的候选目录里根本没有 `state_dir()`
+    （只有 here/、here/../、~/.dsh/、~/.deepseek/）。后果不是"降级存明文"，是
+    **存进去的 Key 谁也读不到**：来源永远显示 none、余额永远不可用，而保存那一步
+    照样退出 0、面板还写「已保存」。控制台余额页的注释里记着这条待办。
+    """
+    errs = []
+    probe = "UNITTEST-NOT-A-REAL-KEY-4242"
+    saved_env = {k: os.environ.get(k) for k in
+                 ("LOCALAPPDATA", "DEEPSEEK_BALANCE_KEY", "DEEPSEEK_API_KEY")}
+    real_dpapi = ds._dpapi
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["LOCALAPPDATA"] = td
+            os.environ.pop("DEEPSEEK_BALANCE_KEY", None)
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+            ds._dpapi = lambda data, protect=True: None      # 模拟 DPAPI 不可用
+            where = ds.save_balance_key(probe)
+            if "DPAPI 不可用" not in where:
+                errs.append(f"DPAPI 失败时没说明落点：{where}")
+            plain = os.path.join(td, "Vigil", "balance.key")
+            if not os.path.isfile(plain):
+                errs.append(f"明文回退没落在 state_dir()：{where}")
+            key, source = ds.balance_key()
+            if key != probe or not source.startswith("file:"):
+                errs.append(f"明文回退读不回来（写进 {where}，回读 {source}/{key!r}）")
+            # 清除走 CLI（引擎里没有 clear_balance_key 函数，删除在 --clear-balance-key 分支里）
+            env = dict(os.environ, LOCALAPPDATA=td)
+            env.pop("DEEPSEEK_BALANCE_KEY", None)
+            env.pop("DEEPSEEK_API_KEY", None)
+            r = subprocess.run([sys.executable, "-X", "utf8",
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                             "dsh_state.py"), "--clear-balance-key"],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=60, env=env)
+            if r.returncode != 0 or os.path.isfile(plain):
+                errs.append(f"--clear-balance-key 没删掉明文回退：退出码 {r.returncode} {r.stdout[:120]}")
+            if ds.balance_key()[1] != "none":
+                errs.append(f"清除后来源仍不是 none：{ds.balance_key()[1]}")
+    finally:
+        ds._dpapi = real_dpapi
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return errs
+
+
 def main() -> int:
     print("== 状态判定用例 ==")
     passed, total, failures = run_scenarios()
@@ -676,6 +729,11 @@ def main() -> int:
     if not pw:
         print("✓ recent/waiting 内容与上限与基线逐字一致")
     errs += pw
+    print("== 余额 Key 存取（含 DPAPI 失败的明文回退）==")
+    bk = run_balance_key_roundtrip()
+    if not bk:
+        print("✓ 保存 → 回读 → 清除 走通，DPAPI 失败那条分支也不再写了就丢")
+    errs += bk
     if not errs:
         print("✓ 轮次/提问/错误/todo/余额/截断/主会话选择/离线 断言通过")
     if "--live" in sys.argv:

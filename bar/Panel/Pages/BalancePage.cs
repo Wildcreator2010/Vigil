@@ -82,14 +82,12 @@ namespace Vigil
                 {
                     // 失败时**不清空**：Key 是用户从平台控制台复制来的，
                     // 一失败就清空等于让人回去重新找一遍。
-                    // 成功那句话刻意什么都不声称：引擎在 DPAPI 失败时会退回明文
-                    // balance.key 并**照样退出 0**（dsh_state.py save_balance_key），
-                    // 界面上没有凭据说它这一次走的是哪一条。
-                    // 更别指向「下面那一行的来源」—— 那条回退路径写的是
-                    // state_dir()\balance.key，而 balance_key() 的候选里根本没有这一条
-                    // （它只翻 here/、here/../、~/.dsh/、~/.deepseek/）：真到那一步，
-                    // 来源会一直显示 none，保存进去的 Key 谁也读不到。
-                    // 那是引擎侧的读写不对称，记在 SDD ledger 的待办里，不在这一页遮掩。
+                    // 成功这句话刻意什么都不声称走的是哪一条路：引擎在 DPAPI 失败时会
+                    // 退回明文 balance.key 并**照样退出 0**（dsh_state.py save_balance_key）。
+                    // 想知道落点看下面那一行的**来源**：dpapi / file:balance.key / env:… 分得开。
+                    // （2026-10-07 之前那条明文回退是写了没人读得回来的死 Key —— 候选目录里
+                    //   没有 state_dir()，来源会永远显示 none。读写已对称，见
+                    //   test_dsh_state.run_balance_key_roundtrip。）
                     if (ok) { _key.Clear(); ShowOp("已保存。"); }
                     else ShowOp("保存失败：" + why + "。输入框里的内容还留着，可以直接重试。");
                     Busy(true);

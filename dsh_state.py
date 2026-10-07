@@ -847,6 +847,11 @@ def balance_key() -> tuple[str | None, str]:
         return val, "dpapi"
     here = os.path.dirname(os.path.abspath(__file__))
     for cand in (
+        # state_dir() 排第一：DPAPI 不可用时 save_balance_key 的明文回退就写在这里
+        # （2026-10-07 之前候选里没有这一条，于是"保存成功、来源永远 none、余额永远
+        # 不可用"—— 写了没人读得回来的死 Key，且退出码还是 0）。清除分支早就删这一格了，
+        # 补齐读取侧才对称。
+        os.path.join(state_dir(), "balance.key"),
         os.path.join(here, "balance.key"),
         os.path.join(here, "..", "balance.key"),
         expand("~/.dsh/deepseek_balance_key"),
