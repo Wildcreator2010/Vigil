@@ -1,0 +1,6 @@
+# 探针与引擎的编译产物、量测中间文件不进版本库
+*.exe
+*.obj
+*.log
+t-real.zstd
+out-utf8.log
