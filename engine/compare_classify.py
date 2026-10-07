@@ -24,12 +24,27 @@ import dsh_state as ds          # noqa: E402
 
 EXE = os.path.join(HERE, "vigil-engine.exe")
 FIELDS = ("state", "turn", "step", "last_event", "last_tool", "end_reason")
+# 默认走 --session：C++ 自己解压，整条通路都不碰 CPython。加 --stdin 退回只比判定的老口径。
+FILE_MODE = "--stdin" not in sys.argv
 
 
 def cpp_verdict(records: list[bytes], mtime: float, ts: float) -> dict:
     p = subprocess.run(
         [EXE, "--classify", repr(mtime), repr(ts)],
         input=b"\n".join(records), capture_output=True, timeout=60)
+    if p.returncode != 0:
+        raise RuntimeError(f"退出码 {p.returncode}: {p.stderr[:200]!r}")
+    return json.loads(p.stdout.decode("utf-8"))
+
+
+def cpp_verdict_file(path: str, mtime: float, ts: float) -> dict:
+    """让 C++ 自己读文件、自己解压 —— 这才是能替掉 Python 的那条完整通路。
+
+    与 cpp_verdict 的区别就是"谁剥掉 zstd"：走 stdin 那份只证明判定对，
+    走 --session 这份才证明整个引擎不再需要 CPython。
+    """
+    p = subprocess.run([EXE, "--session", path, repr(mtime), repr(ts)],
+                       capture_output=True, timeout=60)
     if p.returncode != 0:
         raise RuntimeError(f"退出码 {p.returncode}: {p.stderr[:200]!r}")
     return json.loads(p.stdout.decode("utf-8"))
@@ -61,9 +76,9 @@ def main() -> int:
             if sess.get("error"):
                 continue
             want = ds.classify(sess, mtime, ts)
-            raw = ds._read_bytes(path)
-            records = [ln for ln in raw.split(b"\n") if ln.strip()]
-            got = cpp_verdict(records, mtime, ts)
+            got = (cpp_verdict_file(path, mtime, ts) if FILE_MODE
+                   else cpp_verdict([ln for ln in ds._read_bytes(path).split(b"\n") if ln.strip()],
+                                    mtime, ts))
         except Exception as exc:
             print(f"  ✗ {os.path.basename(os.path.dirname(path))}: 跑不动 {type(exc).__name__}: {exc}")
             bad += 1

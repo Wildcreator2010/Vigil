@@ -10,8 +10,14 @@
 // ACTIVE_WINDOW / DONE_WINDOW / STALL_WINDOW 等常量集中在这里，两处改一边
 // 冒烟会红（smoke_test 有"前端映射逐项等于引擎 STATES"的门禁）。
 //
-// 用法：  vigil-engine --classify <mtime> <now>   < records.jsonl
-// 依赖：  只有 Win32 + 标准库。没有第三方。
+// 用法：
+//   vigil-engine --session <session.v4.jsonl.zstd> <mtime> <now>   自己读文件、自己解压
+//   vigil-engine --classify <mtime> <now>  < records.jsonl          只判已解压的记录
+//
+// 两条入口共用同一个判定核心，区别只在"谁把 zstd 剥掉"。
+#include "third_party/zstd/zstd.h"
+#include "third_party/zstd/zstd_errors.h"
+
 #include <cstdio>
 #include <cstdint>
 #include <cctype>
@@ -433,35 +439,134 @@ static std::string ToJson(const Verdict &v) {
     return o;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 4 || std::string(argv[1]) != "--classify") {
-        std::printf("用法: vigil-engine --classify <mtime> <now>  < records.jsonl\n");
-        return 2;
-    }
-    double mtime = strtod(argv[2], nullptr), ts = strtod(argv[3], nullptr);
+// ---------------------------------------------------------------- zstd 解压
+// 照 dsh_state.py 的 _read_bytes 一比一搬：dsh 把**每条 JSONL 记录**压成一个独立
+// zstd 帧，所以逐帧解；正在写入的最后一帧可能不完整，跳帧能保住前面所有记录。
+// 首帧就失败时退回"整条流"解法（_whole_stream）：那是历史文件用过另一种写法的形状。
+static const unsigned char kMagic[4] = {0x28, 0xB5, 0x2F, 0xFD};
 
+static bool IsMagic(const std::vector<unsigned char> &b, size_t i) {
+    return i + 3 < b.size() && b[i] == kMagic[0] && b[i + 1] == kMagic[1] &&
+           b[i + 2] == kMagic[2] && b[i + 3] == kMagic[3];
+}
+
+// 单帧解压。目标缓冲按帧头声明的内容大小给，拿不到就逐步放大。
+static bool DecompressFrame(const unsigned char *src, size_t srcLen, std::string &out) {
+    unsigned long long cs = ZSTD_getFrameContentSize(src, srcLen);
+    if (cs == ZSTD_CONTENTSIZE_ERROR) return false;
+    size_t cap = (cs == ZSTD_CONTENTSIZE_UNKNOWN) ? (1u << 20) : (size_t)cs + 1;
+    for (int tries = 0; tries < 8; ++tries) {
+        std::vector<char> dst(cap);
+        size_t got = ZSTD_decompress(dst.data(), cap, src, srcLen);
+        if (!ZSTD_isError(got)) { out.assign(dst.data(), got); return true; }
+        size_t code = ZSTD_getErrorCode(got);
+        // dstSize_tooSmall：放大再试；其余错误直接判这帧坏了
+        if (code != ZSTD_error_dstSize_tooSmall) return false;
+        cap *= 4;
+    }
+    return false;
+}
+
+// 整条流：流式解到解不动为止，末尾半帧丢掉（对应 Python 里 catch EOFError/ZstdError 就 break）
+static bool DecompressStreamAll(const std::vector<unsigned char> &src, std::string &out) {
+    ZSTD_DCtx *dctx = ZSTD_createDCtx();
+    if (!dctx) return false;
+    ZSTD_inBuffer in{src.data(), src.size(), 0};
+    char buf[1 << 16];
+    bool any = false;
+    while (in.pos < in.size) {
+        ZSTD_outBuffer o{buf, sizeof buf, 0};
+        size_t r = ZSTD_decompressStream(dctx, &o, &in);
+        if (ZSTD_isError(r)) break;
+        if (o.pos) { out.append(buf, o.pos); any = true; }
+        if (r == 0 && in.pos == in.size) break;
+    }
+    ZSTD_freeDCtx(dctx);
+    return any;
+}
+
+static std::string Unpack(const std::vector<unsigned char> &data) {
+    std::string out;
+    if (data.empty()) return out;
+    size_t n = data.size(), pos = 0;
+    while (pos < n) {
+        size_t nxt = n;
+        for (size_t i = pos + 1; i + 3 < n; ++i) if (IsMagic(data, i)) { nxt = i; break; }
+        std::string piece;
+        if (DecompressFrame(data.data() + pos, nxt - pos, piece)) {
+            out += piece;
+        } else {
+            if (out.empty()) { DecompressStreamAll(data, out); return out; }   // 首帧就解不动
+            std::string tail;
+            DecompressStreamAll(std::vector<unsigned char>(data.begin() + pos, data.end()), tail);
+            out += tail;
+            return out;
+        }
+        if (nxt == n) break;
+        pos = nxt;
+    }
+    return out;
+}
+
+// 整个文件读进内存：会话文件最大的也就几 MB，而逐帧切分需要看到全貌。
+// 用 ifstream 而不是 CreateFileA —— 这个文件不依赖 Win32 头，跨编译器少一层麻烦。
+static bool ReadWholeFile(const char *path, std::vector<unsigned char> &out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.seekg(0, std::ios::end);
+    std::streamoff len = f.tellg();
+    if (len <= 0) { out.clear(); return len == 0; }
+    f.seekg(0, std::ios::beg);
+    out.resize((size_t)len);
+    f.read(reinterpret_cast<char *>(out.data()), len);
+    out.resize((size_t)f.gcount());
+    return f.gcount() > 0;
+}
+
+// ---------------------------------------------------------------- 记录 → 判定
+// 两条入口共用：拿到明文后怎么切记录、怎么留尾部、怎么找 last_turn_end，只有一份。
+static std::string Judge(const std::string &plain, double mtime, double ts) {
     Events ev;
     ev.reserve(1024);
-    const JValue *lastTurnEnd = nullptr;
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        // 与 Python 的 _iter_records 同口径：坏行跳过，不整体失败
-        if (line.empty() || line[strspn(line.data(), " \t\r")] == 0) continue;
+    size_t start = 0, n = plain.size();
+    while (start < n) {
+        size_t end = plain.find('\n', start);
+        std::string line = (end == std::string::npos) ? plain.substr(start)
+                                                      : plain.substr(start, end - start);
+        start = (end == std::string::npos) ? n : end + 1;
+        if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
         JValue v;
-        if (!json::Parse(line, v) || v.kind != JValue::Obj) continue;
-        if (ev.size() >= kTailEvents) ev.erase(ev.begin());   // 只留尾部 N 条
+        if (!json::Parse(line, v) || v.kind != JValue::Obj) continue;   // 坏行跳过，不整体失败
+        if (ev.size() >= kTailEvents) ev.erase(ev.begin());
         ev.push_back(std::move(v));
     }
-    // last_turn_end 要的是**整文件**最后一条 turn/end，指针可能因 erase 失效，
-    // 所以这里在保留下来的尾部里再找一次（Python 侧是全量扫描时记的）
+    // Python 侧的 last_turn_end 是全量扫描时记的；这里只留了尾部 500 条，
+    // 所以在保留下来的记录里从后往前找同一条。turn/end 若在 500 条之外，
+    // 说明会话已经跑了很久，那一格的取值对判定不再有影响（open turn 由尾部决定）。
+    const JValue *lastTurnEnd = nullptr;
     for (auto it = ev.rbegin(); it != ev.rend(); ++it)
         if (TypeOf(*it) == "turn/end") { lastTurnEnd = &*it; break; }
+    return ToJson(Classify(ev, mtime, ts, lastTurnEnd));
+}
 
-    Verdict v = Classify(ev, mtime, ts, lastTurnEnd);
-    std::string out = ToJson(v);
+int main(int argc, char **argv) {
 #if defined(_WIN32)
     _setmode(_fileno(stdout), _O_BINARY);   // 中文按 UTF-8 原样出，别让 CRT 转码
 #endif
-    std::printf("%s\n", out.c_str());
-    return 0;
+    if (argc >= 5 && std::string(argv[1]) == "--session") {
+        std::vector<unsigned char> raw;
+        if (!ReadWholeFile(argv[2], raw)) { std::printf("{\"error\":\"读不到文件\"}\n"); return 1; }
+        std::printf("%s\n", Judge(Unpack(raw), strtod(argv[3], nullptr), strtod(argv[4], nullptr)).c_str());
+        return 0;
+    }
+    if (argc >= 4 && std::string(argv[1]) == "--classify") {
+        std::string plain, line;
+        while (std::getline(std::cin, line)) { plain += line; plain += '\n'; }
+        std::printf("%s\n", Judge(plain, strtod(argv[2], nullptr), strtod(argv[3], nullptr)).c_str());
+        return 0;
+    }
+    std::printf("用法: vigil-engine --session <会话文件> <mtime> <now>\n"
+                "      vigil-engine --classify <mtime> <now>  < records.jsonl\n");
+    return 2;
 }
+
