@@ -24,3 +24,6 @@ setup-build.log
 
 # 人眼复核用的前后对比截图，跑完看，不进版本库
 ui-qa/
+
+# 隔离工作区（git worktree），不进版本库
+.worktrees/
