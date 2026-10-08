@@ -1817,6 +1817,16 @@ int main(int argc, char **argv) {
                             ts);
             }
             std::fflush(stdout);
+            // 读端（Vigil.exe）关掉管道就是"父进程没了"这件事唯一的外部信号。
+            // README 承诺"引擎子进程靠 stdout 管道断裂随后自行退出，不会留孤儿"：
+            // Python 那边靠 sys.stdout.write 抛 BrokenPipeError 自然退出，而 C 的
+            // printf 失败只置流上的错误位、不抛不醒 —— 原来这里不检查，`taskkill /f`
+            // 掉 Vigil 之后这颗 exe 会一直睡下去（孤儿）。ferror 一响就收工。
+            if (ferror(stdout)) {
+                std::fprintf(stderr, "stdout 读端已关闭，常驻循环退出\n");
+                std::fflush(stderr);
+                break;
+            }
             for (double slept = 0; slept < interval; slept += 0.1) {
                 Sleep(100);
             }

@@ -314,3 +314,35 @@ package.cmd [win-x64|win-arm64]
   矩形 `(6,915)-(205,957)`；`/UNINSTALL /S` 退出码 0、目录删净、`%LOCALAPPDATA%\Vigil` 保留。
 - **未做**：真正的第二台干净机器验证（本机已装 .NET/Python，只能靠削 `PATH` 逼近）。
   无签名产物在别的机器上被 SmartScreen / 杀软拦住的体验仍未验证，spec §11 那条风险仍然挂着。
+
+---
+
+## 增补（2026-10-08）：载荷里的解释器退场，引擎换成 vigil-engine.exe
+
+本 spec 定下的"随附 CPython 3.14.7 embeddable"这一条**已被推翻**，推翻它的不是新的
+审美，是 2026-10-05 §2 那条理由反过来的结果：当时不选"引擎移植"的理由是
+`python dsh_state.py` 的 CLI 契约本身是产品功能；而这次把 C++ 那份按同一份契约
+逐项搬齐（`--json` / `--state-only` / `--watch` / `--demo` / `--states` / `--pretty` /
+`--save-balance-key` / `--clear-balance-key`），并用七条对照把它钉在 Python 的行为上
+（`engine/compare_*.py`，见 smoke_test 的 `check_engine_parity`），那个理由就不成立了。
+
+| 原设计 | 现在的做法 | 依据 |
+| --- | --- | --- |
+| §2 第 2 条 / §4：`app\runtime\python\` 37 个文件 | 载荷里放 `app\vigil-engine.exe`（0.5MB），**不再有** `runtime\` 那棵树 | 单帧快照实测 2279ms → 1751ms（−23%）；载荷 185MB → 161.6MB |
+| §6 第 6 步"随附解释器能跑引擎" | 同一步改成"随包的 vigil-engine.exe 能跑出 ok:true" | 判据内容没变：仍然是产物自己那份引擎真跑一次 |
+| §7 削 PATH 那条 | 判据从 `python=` 换成 `kind=native` + `engine=` | 目标机没装 Python 时 `python=none` 从此是正常答案，不是故障 |
+| §8 第 6 步 `licenses\python-PSF.txt` | 换成 `licenses\zstd-BSD.txt`（原文取 `engine/third_party/zstd/LICENSE`） | 分发对象换了：PSF 那条义务失去标的，编进 exe 的 zstd 子集（BSD-3）接手 |
+| §4.2 "Python 3.14 版本下限" | 下限只对**回退级** `dsh_state.py` 仍然成立；正常安装碰不到 | `bar/Engine.cs`：C++ 引擎不在才退到 python，`--engine-probe` 报 `kind=` |
+
+未被推翻的部分：安装器本体（§5）、目录布局约定（§3）、卸载与 Run 键口径、
+"构建输出不要接管道"那条编译门禁。
+
+**这次换级踩到的坑记在这里**：给产品加一层更高优先级的实现之后，按旧层级注入的
+测试会**集体空跑而不是报错**。`--all` 里 16 条 GUI 判据一起红，症状全是"面板收不到
+任何帧"，看着像产品坏了 —— 实际是它们把假引擎写进 `bin\...\dsh_state.py`，而 App
+从此先认 `vigil-engine.exe`，那份脚本一次都没被读。`smoke_test.native_engine_hide/restore`
+是这一族的解法（注入时把上一层挪开、finally 还原，并把"已还原"写成断言）。
+同族还有一条更硬的：`engine_pids()` 原来只数 `python.exe`，切换后"引擎子进程已拉起"
+反过来红、而"退出后无孤儿"变成**看不见**孤儿 —— 实测留下 3 个睡死的 vigil-engine.exe。
+README 承诺的"靠 stdout 管道断裂自行退出"在 C++ 这边不自动成立（`printf` 失败只置
+错误位、不抛），要靠 `ferror(stdout)` 显式检查，判据在 `compare_watch.orphan_check()`。

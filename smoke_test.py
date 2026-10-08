@@ -1056,6 +1056,11 @@ def check_installer_e2e() -> None:
     shutil.rmtree(E2E_ROOT, ignore_errors=True)
     os.makedirs(os.path.join(E2E_PKG, "app"))
     shutil.copytree(BAR_OUT, os.path.join(E2E_PKG, "app"), dirs_exist_ok=True)
+    # 引擎也要进这份演练载荷：csproj 不拷它（它是 engine\build.cmd 的产物，
+    # 由 package.cmd 放进 dist），所以这里手工放 —— 安装器"整棵树照搬"这件事，
+    # 只有让树里真的有一颗非托管 exe 才算演过。
+    if os.path.isfile(NATIVE_ENGINE):
+        shutil.copy2(NATIVE_ENGINE, os.path.join(E2E_PKG, "app", "vigil-engine.exe"))
     setup = os.path.join(E2E_PKG, "Vigil-Setup.exe")
     shutil.copy(SETUP_EXE, setup)
 
@@ -1064,7 +1069,13 @@ def check_installer_e2e() -> None:
                            capture_output=True, timeout=900)
         check("静默安装退出码 0", r.returncode == 0,
               f"rc={r.returncode}，见 {os.path.join(ds.state_dir(), 'setup.log')}")
-        for rel in ("Vigil.exe", "Vigil.dll", "dsh_state.py", "Vigil-Setup.exe", "Wpf.Ui.dll"):
+        for rel in ("Vigil.exe", "Vigil.dll", "dsh_state.py", "Vigil-Setup.exe", "Wpf.Ui.dll",
+                    "vigil-engine.exe"):
+            if rel == "vigil-engine.exe" and not os.path.isfile(
+                    os.path.join(E2E_PKG, "app", rel)):
+                check("演练载荷里有 vigil-engine.exe（引擎没编就演不了这一条）", False,
+                      f"{os.path.join(E2E_PKG, 'app', rel)} 不在：先跑 engine\\build.cmd")
+                continue
             check(f"装完有 {rel}", os.path.isfile(os.path.join(E2E_TARGET, rel)), E2E_TARGET)
         check("Run 值格式与 App.cs 的写法逐字一致（带引号的 exe 全路径）",
               reg_run_value() == '"' + os.path.join(E2E_TARGET, "Vigil.exe") + '"',
@@ -1787,10 +1798,23 @@ def bar_processes() -> set[int]:
     return {int(p.split('","')[1]) for p in out.splitlines() if p.count('"') >= 3}
 
 
-def python_pids() -> set[int]:
-    out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq python.exe", "/fo", "csv", "/nh"],
-                         capture_output=True, text=True, errors="replace").stdout
-    return {int(p.split('","')[1]) for p in out.splitlines() if p.count('"') >= 3}
+ENGINE_IMAGES = ("python.exe", "vigil-engine.exe")
+
+
+def engine_pids() -> set[int]:
+    """当前在跑的**引擎子进程**集合：两个层级都数。
+
+    原来这一族判据（"引擎子进程已拉起"、"退出后无孤儿"、"冷开无残留"）只数
+    python.exe —— 那是"引擎=脚本"时代的口径。切到 vigil-engine.exe 之后它们不会报错，
+    只会**看不见**：一颗赖着不走的 vigil-engine.exe 从此不在射程里，
+    而"没有新增 python 进程"反过来会红（那条就是这么红的，产品没毛病）。
+    """
+    pids: set[int] = set()
+    for img in ENGINE_IMAGES:
+        out = subprocess.run(["tasklist", "/fi", f"IMAGENAME eq {img}", "/fo", "csv", "/nh"],
+                             capture_output=True, text=True, errors="replace").stdout
+        pids |= {int(p.split('","')[1]) for p in out.splitlines() if p.count('"') >= 3}
+    return pids
 
 
 PANEL_PAGES = ("overview", "notify", "appearance", "runtime", "balance", "about")
@@ -2054,6 +2078,7 @@ def shot_with_fake_engine(source: str, out_path: str,
         return -1, "", None
     with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
         real = fh.read()
+    native_engine_hide()      # 不挪开的话 App 第一选择是 vigil-engine.exe，这份注入轮不到
     try:
         with open(eng, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(source)
@@ -2068,7 +2093,8 @@ def shot_with_fake_engine(source: str, out_path: str,
     finally:
         with open(eng, "wb") as fh:
             fh.write(real)
-        check(f"{label}：引擎拷贝已按仓库根还原", open(eng, "rb").read() == real, eng)
+        check(f"{label}：引擎拷贝已按仓库根还原",
+              open(eng, "rb").read() == real and native_engine_restore(), eng)
         if os.path.isfile(out_path):
             os.remove(out_path)
 
@@ -2565,7 +2591,7 @@ def check_overview_page() -> None:
     eng_bin = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
     if not check("概览页注入点就位", os.path.isfile(eng_bin), eng_bin):
         return
-    before = python_pids()
+    before = engine_pids()
 
     def shot_and_stats(tag: str) -> tuple[str, int, dict | None]:
         """出一张概览页离屏图，返回 (整幅 md5, 色数, 表格结构量)；读完就删（磁盘紧）。"""
@@ -2668,11 +2694,11 @@ def check_overview_page() -> None:
             subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
             engine_restore(real)
             time.sleep(2)
-            left = python_pids() - before
+            left = engine_pids() - before
             t2 = time.time()
             while left and time.time() - t2 < 20:
                 time.sleep(1)
-                left = python_pids() - before
+                left = engine_pids() - before
             check("概览页真窗口场景：退出后无引擎孤儿子进程", not left, f"仍在跑 {sorted(left)}")
             check("概览页真窗口场景：退出后 Vigil 已消失", not bar_processes(),
                   str(bar_processes()))
@@ -3069,6 +3095,33 @@ def fake_action_engine_source(state: str = "needs_action", every: float = 0.5) -
         '    pass\n') % (state, state, every)
 
 
+NATIVE_ENGINE = os.path.join(HERE, "engine", "vigil-engine.exe")
+
+
+def native_engine_hide() -> bool:
+    """把 C++ 引擎挪到一边，让注入进产物目录的那份 python 脚本真的被用上。
+
+    bar/Engine.cs 的第一选择是 vigil-engine.exe（开发检出走的是仓库根 engine\\ 那条
+    候选），只换 dsh_state.py 的话注入永远轮不到 —— --all 里 16 条 GUI 判据就是这么
+    一起红的：面板收不到任何注入帧，"引擎子进程已拉起"也数不到进程。
+    为什么不干脆给产品加一个"强制用 python"的开关：那个开关只有冒烟会按，
+    留在产物里就是给将来的行为漂移留口子。挪开 + 还原放在 swap/restore 里，
+    所以每一条已经写了 `finally: engine_restore(...)` 的路径自动覆盖到。
+    """
+    if not os.path.isfile(NATIVE_ENGINE):
+        return False
+    os.replace(NATIVE_ENGINE, NATIVE_ENGINE + ".hidden")
+    return True
+
+
+def native_engine_restore() -> bool:
+    """还原挪开的引擎；返回"现在引擎在位"这个事实。"""
+    aside = NATIVE_ENGINE + ".hidden"
+    if os.path.isfile(aside):
+        os.replace(aside, NATIVE_ENGINE)
+    return os.path.isfile(NATIVE_ENGINE) and not os.path.isfile(aside)
+
+
 def engine_swap(source: str) -> bytes | None:
     """把编译产物里的引擎拷贝换成 source，返回原字节（没换成功返回 None）。
 
@@ -3081,17 +3134,18 @@ def engine_swap(source: str) -> bytes | None:
         return None
     with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
         real = fh.read()
+    native_engine_hide()
     with open(eng, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(source)
     return real
 
 
 def engine_restore(real: bytes) -> bool:
-    """按仓库根字节还原产物里的引擎拷贝。"""
+    """按仓库根字节还原产物里的引擎拷贝，并把 C++ 引擎放回原位。"""
     eng = os.path.join(os.path.dirname(BAR_EXE), "dsh_state.py")
     with open(eng, "wb") as fh:
         fh.write(real)
-    return open(eng, "rb").read() == real
+    return open(eng, "rb").read() == real and native_engine_restore()
 
 
 def check_pages_filled() -> None:
@@ -3290,7 +3344,7 @@ def check_panel_settings_live() -> None:
     f = os.path.join(ds.state_dir(), "settings.json")
     backup = open(f, encoding="utf-8").read() if os.path.isfile(f) else None
     reg_had = reg_run_value()
-    before_pids = python_pids()
+    before_pids = engine_pids()
     real = engine_swap(fake_action_engine_source("needs_action"))
     if not check("真窗口段的引擎注入点就位（needs_action 持续吐帧）", real is not None,
                  "bin 下没有 dsh_state.py 拷贝"):
@@ -3570,11 +3624,11 @@ def check_panel_settings_live() -> None:
               (open(f, encoding="utf-8").read() if os.path.isfile(f) else None) == backup, f)
         if os.path.exists(req):
             os.remove(req)
-        left = python_pids() - before_pids
+        left = engine_pids() - before_pids
         t1 = time.time()
         while left and time.time() - t1 < 20:
             time.sleep(1)
-            left = python_pids() - before_pids
+            left = engine_pids() - before_pids
         check("真窗口段之后无残留（Vigil / 引擎子进程 / panel.request 都清干净）",
               not bar_processes() and not left and not os.path.exists(req),
               f"Vigil={sorted(bar_processes())} python={sorted(left)} req={os.path.exists(req)}")
@@ -3606,7 +3660,7 @@ def check_bar_null_records() -> None:
         real = fh.read()
     log = os.path.join(ds.state_dir(), "bar.log")
     log_offset = os.path.getsize(log) if os.path.isfile(log) else 0
-    before = python_pids()
+    before = engine_pids()
     shot = os.path.join(ds.state_dir(), "smoke-nullrec-bar.png")
     # (0x16,0xA3,0x4A)：假引擎第二帧的圆点色，真实状态表里没有这个值
     target = (22, 163, 74)
@@ -3636,6 +3690,7 @@ def check_bar_null_records() -> None:
             'except (BrokenPipeError, ValueError, OSError):\n'
             '    pass\n'
         )
+        native_engine_hide()      # 不挪开的话注入的这份 python 永远轮不到
         with open(eng, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(fake)
         proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
@@ -3676,14 +3731,15 @@ def check_bar_null_records() -> None:
         with open(eng, "wb") as fh:
             fh.write(real)
         check("records:null 注入后引擎拷贝已按仓库根还原",
-              open(eng, "rb").read() == real, eng)
+              open(eng, "rb").read() == real and native_engine_restore(),
+              f"{eng}；vigil-engine.exe 在位={os.path.isfile(NATIVE_ENGINE)}")
         if os.path.isfile(shot):
             os.remove(shot)
-        left_pids = python_pids() - before
+        left_pids = engine_pids() - before
         t0 = time.time()
         while left_pids and time.time() - t0 < 20:
             time.sleep(1)
-            left_pids = python_pids() - before
+            left_pids = engine_pids() - before
         check("records:null 场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
         check("records:null 场景：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 
@@ -3922,6 +3978,7 @@ def check_panel_scroll_selftest() -> None:
     a = os.path.join(ds.state_dir(), "scroll-a.png")
     b = os.path.join(ds.state_dir(), "scroll-b.png")
     try:
+        native_engine_hide()
         with open(eng, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(fake_engine_source(SCROLL_ROWS))
         for f in (a, b):
@@ -4002,7 +4059,8 @@ def check_panel_scroll_selftest() -> None:
         with open(eng, "wb") as fh:
             fh.write(real)
         check("滚动自证：注入后引擎拷贝已按仓库根还原",
-              open(eng, "rb").read() == real, eng)
+              open(eng, "rb").read() == real and native_engine_restore(),
+              f"{eng}；vigil-engine.exe 在位={os.path.isfile(NATIVE_ENGINE)}")
         for f in (a, b):
             if os.path.isfile(f):
                 os.remove(f)
@@ -4037,10 +4095,11 @@ def check_panel_real_scroll() -> None:
         return
     with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
         real = fh.read()
-    before = python_pids()
+    before = engine_pids()
     shot = os.path.join(ds.state_dir(), "smoke-panel-real.png")
     u = _user32()
     try:
+        native_engine_hide()
         with open(eng, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(fake_engine_source(SCROLL_ROWS, watch=True))
         subprocess.Popen([BAR_EXE, "--panel"], cwd=os.path.dirname(BAR_EXE))
@@ -4115,14 +4174,15 @@ def check_panel_real_scroll() -> None:
         with open(eng, "wb") as fh:
             fh.write(real)
         check("真实窗口场景：注入后引擎拷贝已按仓库根还原",
-              open(eng, "rb").read() == real, eng)
+              open(eng, "rb").read() == real and native_engine_restore(),
+              f"{eng}；vigil-engine.exe 在位={os.path.isfile(NATIVE_ENGINE)}")
         if os.path.isfile(shot):
             os.remove(shot)
-        left_pids = python_pids() - before
+        left_pids = engine_pids() - before
         t2 = time.time()
         while left_pids and time.time() - t2 < 20:
             time.sleep(1)
-            left_pids = python_pids() - before
+            left_pids = engine_pids() - before
         check("真实窗口场景：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
         check("真实窗口场景：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 def check_panel_window() -> None:
@@ -4235,7 +4295,7 @@ def check_panel_direct_page() -> None:
         return
     with open(os.path.join(HERE, "dsh_state.py"), "rb") as fh:
         real = fh.read()
-    before = python_pids()
+    before = engine_pids()
     req = os.path.join(ds.state_dir(), "panel.request")
     shot = os.path.join(ds.state_dir(), "smoke-panel-direct.png")
     refs = {p: os.path.join(ds.state_dir(), f"panel-direct-{p}.png") for p in PANEL_PAGES}
@@ -4244,6 +4304,7 @@ def check_panel_direct_page() -> None:
         # 一份假引擎同时喂两条通路：--panel-shot 走 --json（出一帧就退），面板走 --watch（持续吐帧）。
         # 数据固定成 29 行，离屏那张与真窗口那张才是同一份内容的两种画法，
         # 拿本机真实会话当基准的话，两次取样的行数都能对不上。
+        native_engine_hide()
         with open(eng, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(fake_engine_source(29, watch=True))
         for page in PANEL_PAGES:
@@ -4351,7 +4412,7 @@ def check_panel_direct_page() -> None:
                 os.remove(req)
             # 「请求之前那一帧」是新鲜度的参照：拿不到它就退化成只比配色。
             wb, hb, bufb = capture_bar(hwnd, shot, scale=scale)
-            # 别叫 before：本函数 finally 里那个 `before = python_pids()` 是 PID 集合。
+            # 别叫 before：本函数 finally 里那个 `before = engine_pids()` 是 PID 集合。
             pre_hash = box_hash(bufb, wb, hb, scale) if wb else ""
             # 用 Popen 而不是 run(timeout=30)：这句的本意是"二次实例把请求递进去就退"，
             # 可一旦常驻实例不在了（前面的门禁把它收了、或前台被抢导致它没起来），
@@ -4392,16 +4453,18 @@ def check_panel_direct_page() -> None:
         time.sleep(3)
         with open(eng, "wb") as fh:
             fh.write(real)
-        check("直达段：注入后引擎拷贝已按仓库根还原", open(eng, "rb").read() == real, eng)
+        check("直达段：注入后引擎拷贝已按仓库根还原",
+              open(eng, "rb").read() == real and native_engine_restore(),
+              f"{eng}；vigil-engine.exe 在位={os.path.isfile(NATIVE_ENGINE)}")
         for p in list(refs.values()) + [shot]:
             if os.path.isfile(p):
                 os.remove(p)
         check("直达段：退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
-        left_pids = python_pids() - before
+        left_pids = engine_pids() - before
         t3 = time.time()
         while left_pids and time.time() - t3 < 20:
             time.sleep(1)
-            left_pids = python_pids() - before
+            left_pids = engine_pids() - before
         check("直达段：退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
 
 
@@ -4605,7 +4668,7 @@ def check_panel_cold_open() -> None:
     if os.path.isfile(req):
         os.remove(req)  # 上一轮残留的请求会让常驻实例一起来就自己把面板弹出来
     check("冷打开前无残留请求文件", not os.path.exists(req), req)
-    before = python_pids()
+    before = engine_pids()
     proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
     try:
         t0 = time.time()
@@ -4636,10 +4699,10 @@ def check_panel_cold_open() -> None:
     finally:
         subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         deadline = time.time() + 20
-        while time.time() < deadline and (bar_processes() or python_pids() - before):
+        while time.time() < deadline and (bar_processes() or engine_pids() - before):
             time.sleep(1)
-        check("冷打开后无残留", not bar_processes() and not (python_pids() - before),
-              f"Vigil={sorted(bar_processes())} python={sorted(python_pids() - before)}")
+        check("冷打开后无残留", not bar_processes() and not (engine_pids() - before),
+              f"Vigil={sorted(bar_processes())} 引擎={sorted(engine_pids() - before)}")
 
 
 def lock_against_delete(path: str) -> int:
@@ -5139,7 +5202,7 @@ def check_panel_request_containment() -> None:
     check("消费失败测试前无残留请求", not os.path.exists(req), req)
     log_offset = os.path.getsize(os.path.join(ds.state_dir(), "bar.log")) \
         if os.path.isfile(os.path.join(ds.state_dir(), "bar.log")) else 0
-    before = python_pids()
+    before = engine_pids()
     proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
     holder = 0
     try:
@@ -5200,13 +5263,13 @@ def check_panel_request_containment() -> None:
             unlock(holder)  # 顺序不能反：先释放句柄，否则请求文件删不掉
         subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         deadline = time.time() + 20
-        while time.time() < deadline and (bar_processes() or python_pids() - before):
+        while time.time() < deadline and (bar_processes() or engine_pids() - before):
             time.sleep(1)
         if os.path.exists(req):
             os.remove(req)  # 放弃路径只在能删时才删；测试自己不留垃圾给下一轮
         check("消费失败测试后无残留",
-              not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
-              f"Vigil={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
+              not bar_processes() and not (engine_pids() - before) and not os.path.exists(req),
+              f"Vigil={sorted(bar_processes())} 引擎={sorted(engine_pids() - before)} req={os.path.exists(req)}")
 
 
 def check_panel_request_race() -> None:
@@ -5234,7 +5297,7 @@ def check_panel_request_race() -> None:
     check("竞态测试前无残留请求", not os.path.exists(req), req)
     log_path = os.path.join(ds.state_dir(), "bar.log")
     log_offset = os.path.getsize(log_path) if os.path.isfile(log_path) else 0
-    before = python_pids()
+    before = engine_pids()
     proc = subprocess.Popen([BAR_EXE], cwd=os.path.dirname(BAR_EXE))
     try:
         t0 = time.time()
@@ -5289,13 +5352,13 @@ def check_panel_request_race() -> None:
     finally:
         subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         deadline = time.time() + 20
-        while time.time() < deadline and (bar_processes() or python_pids() - before):
+        while time.time() < deadline and (bar_processes() or engine_pids() - before):
             time.sleep(1)
         if os.path.exists(req):
             os.remove(req)
         check("竞态测试后无残留",
-              not bar_processes() and not (python_pids() - before) and not os.path.exists(req),
-              f"Vigil={sorted(bar_processes())} python={sorted(python_pids() - before)} req={os.path.exists(req)}")
+              not bar_processes() and not (engine_pids() - before) and not os.path.exists(req),
+              f"Vigil={sorted(bar_processes())} 引擎={sorted(engine_pids() - before)} req={os.path.exists(req)}")
 
 
 def check_gui() -> None:
@@ -5306,7 +5369,7 @@ def check_gui() -> None:
     if bar_processes():
         check("启动前无残留实例", False, "已有 Vigil 在跑，先退出它再冒烟")
         return
-    before = python_pids()
+    before = engine_pids()
     log = os.path.join(ds.state_dir(), "bar.log")
     log_offset = os.path.getsize(log) if os.path.isfile(log) else 0
     t_launch = time.time()
@@ -5391,7 +5454,8 @@ def check_gui() -> None:
                        if lost else f"{near} 像素命中（等满 20 秒状态栏也没追上引擎报的这个色），")
                       + f"画面主色 {[c[0].hex() for c in top.most_common(4)]}")
                 print(f"  画面存到 {shot}")
-        check("引擎子进程已拉起", not python_pids() <= before, "没有新增 python 进程")
+        check("引擎子进程已拉起", not engine_pids() <= before,
+              "没有新增引擎子进程（python.exe / vigil-engine.exe 都没多）")
         try:
             with open(log, encoding="utf-8-sig", errors="replace") as fh:
                 fh.seek(log_offset)
@@ -5404,11 +5468,11 @@ def check_gui() -> None:
         # 优雅 taskkill 对 WS_CHILD 窗口无效（WM_CLOSE 送不到），只能强杀。
         subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
         # 引擎靠 stdout 管道断裂退出，父进程死后还要一两秒才收尾，轮询而不是定死等待。
-        left_pids = python_pids() - before
+        left_pids = engine_pids() - before
         deadline = time.time() + 20
         while left_pids and time.time() < deadline:
             time.sleep(1)
-            left_pids = python_pids() - before
+            left_pids = engine_pids() - before
         check("退出后无引擎孤儿子进程", not left_pids, f"仍在跑 {sorted(left_pids)}")
         check("退出后 Vigil 已消失", not bar_processes(), str(bar_processes()))
 
