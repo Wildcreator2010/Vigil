@@ -846,6 +846,7 @@ def check_engine_parity() -> None:
         ("compare_classify", "单会话判定逐字段（真实会话 + 舍入边界）"),
         ("compare_snapshot", "整帧快照逐字段（同一时刻）"),
         ("compare_snapshot_boundary", "阈值与取整边界（合成会话，年龄已知）"),
+        ("compare_json", "坏 JSON 的行级取舍（16 种坏行整行丢弃）"),
         ("compare_watch", "常驻 --watch 节奏与解析缓存"),
         ("compare_balance", "Key 存取双向互操作"),
     ):

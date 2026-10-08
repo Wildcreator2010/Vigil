@@ -134,9 +134,14 @@ struct JValue {
 
     const JValue *at(const std::string &key) const {
         if (kind != Obj) return nullptr;
+        // 取**最后**一个同名键：Python 的 json.loads 把这些记录直接装进 dict，
+        // 重复键是后者覆盖前者。原来这里返回第一个，于是 {"a":1,"a":null}
+        // 在 Python 是"没有 a"，在 C++ 却读出 1。
+        const JValue *last = nullptr;
+        bool seen = false;
         for (const auto &kv : obj)
-            if (kv.first == key && kv.second.kind != Null) return &kv.second;
-        return nullptr;
+            if (kv.first == key) { last = &kv.second; seen = true; }
+        return (seen && last->kind != Null) ? last : nullptr;
     }
     std::string asStr() const { return kind == Str ? str : std::string(); }
 };
@@ -150,6 +155,41 @@ struct Parser {
 
     void Skip() { while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) ++i; }
 
+    // 字面量必须逐字节匹配。原来写的是 `if (c == 't') { v.b = true; i += 4; }`，
+    // 于是 "truX"、"nul"、甚至结尾只剩 "f" 的残行都被当成合法值收下 ——
+    // Python 的 json.loads 对这些抛错，这条记录整条丢掉。判定的差异就出在
+    // "少一条记录"和"多一条半截记录"之间，而这种残行恰恰是会话正在写的时候
+    // 最容易出现的。
+    bool Lit(const char *word) {
+        size_t n = strlen(word);
+        if (s.compare(i, n, word) != 0) { Fail = true; return false; }
+        i += n;
+        return true;
+    }
+
+    // RFC 8259 的数：-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?
+    // 前导零（01）、裸负号（-）、悬空的指数（1e）、加号开头（+5）Python 全拒。
+    bool Digits() { size_t s0 = i; while (i < s.size() && isdigit((unsigned char)s[i])) ++i; return i > s0; }
+    void Number(JValue &v) {
+        size_t start = i;
+        if (i < s.size() && s[i] == '-') ++i;
+        if (i >= s.size()) { Fail = true; return; }
+        if (s[i] == '0') {
+            ++i;                                        // 0 之后不许再接数字
+        } else if (!Digits()) { Fail = true; return; }
+        if (i < s.size() && s[i] == '.') {
+            ++i;
+            if (!Digits()) { Fail = true; return; }
+        }
+        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+            ++i;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+            if (!Digits()) { Fail = true; return; }
+        }
+        v.kind = JValue::Num;
+        v.num = strtod(s.substr(start, i - start).c_str(), nullptr);
+    }
+
     void Value(JValue &v) {
         Skip();
         if (i >= s.size()) { Fail = true; return; }
@@ -157,15 +197,11 @@ struct Parser {
         if (c == '{') return Obj(v);
         if (c == '[') return Arr(v);
         if (c == '"') { v.kind = JValue::Str; Str(v.str); return; }
-        if (c == 't') { v.kind = JValue::Bool; v.b = true; i += 4; return; }
-        if (c == 'f') { v.kind = JValue::Bool; v.b = false; i += 5; return; }
-        if (c == 'n') { v.kind = JValue::Null; i += 4; return; }
-        v.kind = JValue::Num;
-        size_t start = i;
-        while (i < s.size() && (isdigit((unsigned char)s[i]) || s[i] == '-' || s[i] == '+' ||
-                                s[i] == '.' || s[i] == 'e' || s[i] == 'E')) ++i;
-        if (i == start) { Fail = true; return; }
-        v.num = strtod(s.substr(start, i - start).c_str(), nullptr);
+        if (c == 't') { if (Lit("true")) { v.kind = JValue::Bool; v.b = true; } return; }
+        if (c == 'f') { if (Lit("false")) { v.kind = JValue::Bool; v.b = false; } return; }
+        if (c == 'n') { if (Lit("null")) { v.kind = JValue::Null; } return; }
+        if (c == '-' || isdigit((unsigned char)c)) { Number(v); return; }
+        Fail = true;
     }
     void Str(std::string &out) {
         if (i >= s.size() || s[i] != '"') { Fail = true; return; }
@@ -174,6 +210,9 @@ struct Parser {
         while (i < s.size()) {
             char c = s[i++];
             if (c == '"') { out = r; return; }
+            // 未转义的控制字符 Python 直接报错（"Invalid control character"），
+            // 整条记录丢掉；原来这里照单收下，两边的记录数就分叉了。
+            if ((unsigned char)c < 0x20) { Fail = true; return; }
             if (c != '\\') { r += c; continue; }
             if (i >= s.size()) break;
             char e = s[i++];
@@ -187,16 +226,25 @@ struct Parser {
                 case '\\': r += '\\'; break;
                 case '/': r += '/'; break;
                 case 'u': {
+                    // \u 后面必须正好是 4 个十六进制数字：原来交给 strtoul，
+                    // "\u12" 解成 0x12、"\uZZZZ" 解成 0，两条都 Python 是抛错丢行。
                     if (i + 4 > s.size()) { Fail = true; return; }
+                    for (size_t k = 0; k < 4; ++k)
+                        if (!isxdigit((unsigned char)s[i + k])) { Fail = true; return; }
                     unsigned cp = (unsigned)strtoul(s.substr(i, 4).c_str(), nullptr, 16);
                     i += 4;
                     if (cp >= 0xD800 && cp < 0xDC00 && i + 6 <= s.size() && s[i] == '\\' && s[i + 1] == 'u') {
-                        unsigned lo = (unsigned)strtoul(s.substr(i + 2, 4).c_str(), nullptr, 16);
-                        if (lo >= 0xDC00 && lo < 0xE000) {           // 代理对合成一个码点
+                        bool hex = true;
+                        for (size_t k = 2; k < 6; ++k)
+                            if (!isxdigit((unsigned char)s[i + k])) { hex = false; break; }
+                        unsigned lo = hex ? (unsigned)strtoul(s.substr(i + 2, 4).c_str(), nullptr, 16) : 0;
+                        if (hex && lo >= 0xDC00 && lo < 0xE000) {   // 代理对合成一个码点
                             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                             i += 6;
                         }
                     }
+                    // 落单的代理项不特判：dsh 写出的会话是合法 UTF-8，
+                    // 这里按码点原样编码；真出现半对代理，两边本来就都不该继续。
                     if (cp < 0x80) r += (char)cp;
                     else if (cp < 0x800) { r += (char)(0xC0 | (cp >> 6)); r += (char)(0x80 | (cp & 0x3F)); }
                     else if (cp < 0x10000) {
@@ -208,10 +256,10 @@ struct Parser {
                     }
                     break;
                 }
-                default: r += e;
+                default: Fail = true; return;    // 未知转义：Python 抛 "Invalid \escape"
             }
         }
-        Fail = true;
+        Fail = true;   // 走到这里说明引号没闭合
     }
     void Arr(JValue &v) {
         v.kind = JValue::Arr; ++i;
@@ -251,7 +299,13 @@ struct Parser {
     }
 };
 static bool Parse(const std::string &src, JValue &out) {
-    Parser p(src); p.Value(out); return !p.Fail;
+    Parser p(src);
+    p.Value(out);
+    if (p.Fail) return false;
+    // json.loads 要求整行被消费干净：`{"a":1} 尾巴` 在 Python 是抛错丢行，
+    // 原来这里只看"开头那个值能不能解出来"，于是半截好值 + 半截坏值会被收下。
+    p.Skip();
+    return p.i == p.s.size();
 }
 static void EmitStr(std::string &o, const std::string &s) {
     o += '"';
