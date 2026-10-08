@@ -18,19 +18,22 @@
 - 状态：正在思考 / 正在回答 / 正在执行工具 / 回答完成 / 待命 / 需要操作 / 出错了 / 已中断 / 疑似卡住 / 未运行
 - 「需要操作」把问题正文直接写在栏上，并弹系统通知，处理前按间隔重复提醒
 - 余额走官方接口 `GET https://api.deepseek.com/user/balance`
-- 实现栈：C# WPF（.NET 10 桌面运行时，本机已装，首次编译需要联网还原 NuGet 包）+ Python 3.14 标准库做状态引擎
+- 实现栈：C# WPF（.NET 10 桌面运行时，本机已装，首次编译需要联网还原 NuGet 包）+ C++ 状态引擎（`engine/vigil_engine.cpp`，自带 zstd 解压）；`dsh_state.py` 留作对照基准与回退级
 - 交互与停靠方式参考 [AF-Media-Bar](https://github.com/Fervent-Tempo/AF-Media-Bar)
 
 ## 快速开始
 
 ```bat
+engine\build.cmd :: 编 C++ 状态引擎（要 MSVC；不编的话开发期自动退到 python 那一级）
 build.cmd        :: dotnet build -c Release（开发期：框架依赖，只在装了 .NET 10 SDK 的机器上跑）
 start-bar.bat    :: 启动 bar\bin\Release\net10.0-windows\Vigil.exe
-package.cmd      :: 出可分发到任何电脑的零前置安装包（见下一节）
+package.cmd      :: 出可分发到任何电脑的零前置安装包（第一步就是 engine\build.cmd）
 ```
 
 `build.cmd` 和 `package.cmd` 是两条路，别混：前者 6.7MB、秒编、要求本机有运行时；
-后者 184MB 自包含、要跑几分钟、产物什么都不要求。
+后者 161MB 自包含 + 0.5MB 引擎、要跑几分钟、产物什么都不要求。
+（开发期没跑 `engine\build.cmd` 时，`Vigil.exe --engine-probe` 会报 `kind=python` —— 那
+是回退级在工作，不是坏，但冒烟里那七条 C++↔Python 对照会红，因为引擎没编出来。）
 
 启动前可以先验证引擎能读懂你机器上的 dsh 会话：
 
@@ -44,7 +47,7 @@ python test_dsh_state.py --live
 ```bat
 python smoke_test.py           :: 引擎与 CLI 契约，无副作用
 python smoke_test.py --setup   :: 编译安装向导 + 开一次窗口读控件 + 静默装到 %TEMP% 再卸载
-python smoke_test.py --package :: 校验 dist/ 分发产物（随附解释器跑真引擎、两个 exe 版本对齐）
+python smoke_test.py --package :: 校验 dist/ 分发产物（随包引擎跑真快照、两个 exe 版本对齐）
 python smoke_test.py --all     :: 上面全部 + Release 编译 + 状态栏 GUI 冒烟
 ```
 
@@ -53,8 +56,8 @@ python smoke_test.py --all     :: 上面全部 + Release 编译 + 状态栏 GUI 
 ## 装到任何电脑
 
 前提：**Win10 1607+ / Win11，x64**。不需要预装 .NET，不需要预装 Python，不需要管理员权限；
-装到目标机的全过程不碰网络。注意区分：**打包**那台机器要联网（首次拉 NuGet 的运行时包、
-下 12MB 的 CPython embeddable），目标机什么都不用下。支持面到此为止 —— .NET 10 的 WPF
+装到目标机的全过程不碰网络。注意区分：**打包**那台机器要联网（首次拉 NuGet 的运行时包），
+目标机什么都不用下。支持面到此为止 —— .NET 10 的 WPF
 不支持 Win7/8。
 
 ```bat
@@ -74,14 +77,17 @@ Vigil-Setup.exe /UNINSTALL /S                 :: 静默卸载（默认保留设�
 Vigil-Setup.exe /S /NO-AUTOSTART /NO-START    :: 不写开机自启、装完不启动
 ```
 
-里面装了什么：自包含的 .NET 10 运行时（161MB / 255 个文件）+ CPython 3.14.7 embeddable
-（24MB，状态引擎靠它解会话文件的 zstd 帧）+ `dsh_state.py` + 安装向导。
-第三方许可证原文随附在 `licenses\`，见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 第 4 节。
+里面装了什么：自包含的 .NET 10 运行时（161MB / 259 个文件）+ `vigil-engine.exe`
+（0.5MB 的 C++ 状态引擎，zstd 解压子集编在它自己怀里）+ `dsh_state.py`（回退级脚本）+ 安装向导。
+载荷里**不再带解释器** —— 少 24MB，目标机上也没有"到底认的哪个 Python"可猜。
+第三方许可证原文随附在 `licenses\`，见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 第 4、5 节。
 
 想单独用引擎，不必装任何东西：
 
 ```bat
-%LOCALAPPDATA%\Programs\Vigil\runtime\python\python.exe %LOCALAPPDATA%\Programs\Vigil\dsh_state.py --pretty
+%LOCALAPPDATA%\Programs\Vigil\vigil-engine.exe --pretty    :: 详细视图
+%LOCALAPPDATA%\Programs\Vigil\vigil-engine.exe --json      :: 一行机器可读快照
+%LOCALAPPDATA%\Programs\Vigil\vigil-engine.exe --states    :: 状态图例
 ```
 
 ## 怎么嵌进任务栏的
@@ -226,9 +232,9 @@ DeepSeek Harness 把每个会话的完整事件流写在
 - **状态一直「待命」**：`python dsh_state.py --pretty` 会显示最后事件与静默秒数，确认 `~/.dsh/sessions/` 在动。
 - **余额报 401**：Key 无余额查询权限或已失效，到平台控制台 API Keys 页确认。
 - **`No module named 'compression'`**：那是 Python 低于 3.14。用 `package.cmd` 出的安装包
-  不会遇到 —— 随附的 `runtime\python\` 里带了 `_zstd.pyd`。只有你**手动**拿系统 Python
-  跑引擎时才需要 3.14；不确定它认的是哪个解释器就 `Vigil.exe --engine-probe`，
-  正常应输出安装目录里那份 `runtime\python\python.exe`。
+  不会遇到 —— 随包的 `vigil-engine.exe` 自带解压能力。只有你**手动**拿系统 Python
+  跑回退级 `dsh_state.py` 时才需要 3.14；不确定它认的是哪一级就 `Vigil.exe --engine-probe`，
+  正常答案是 `kind=native` 加上安装目录里那份 `vigil-engine.exe`。
 - **换电脑后余额不显示**：Key 用当前 Windows 账户的 DPAPI 加密，换机器/换账户必然读不出来，
   重新录一次即可（这是 DPAPI 的设计，不是 bug）。
 - **开机自启**：菜单勾选即可（写 `HKCU\...\Run` 的 `Vigil` 值指向 `Vigil.exe`），取消勾选删除。
@@ -240,8 +246,9 @@ DeepSeek Harness 把每个会话的完整事件流写在
 
 本项目以 **MIT 许可证**开源（见 [`LICENSE`](LICENSE)）；所有第三方组件、字体与设计参照的归属声明见
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)——随产物分发的每一条都附了许可证原文。
-零前置安装包会把 .NET 运行时二进制与 CPython embeddable 解释器一起带走，因此这两者的
-许可证原文也随包分发在 `licenses\`（`.NET` 是 MIT、`Python` 是 PSF License），
+零前置安装包会把 .NET 运行时二进制与 vendored 的 zstd 解压子集（编在 `vigil-engine.exe` 里）
+一起带走，因此这两者的
+许可证原文也随包分发在 `licenses\`（`.NET` 是 MIT、`zstd` 是 BSD-3-Clause），
 由 `tools/collect_licenses.py` 自动收集、`tools/verify_package.py` 断言齐全。
 
 ## 致谢

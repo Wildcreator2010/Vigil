@@ -17,8 +17,9 @@ TEXT = """Vigil 安装说明
    · 全程不弹 UAC：只写当前用户（%LOCALAPPDATA%\\Programs\\Vigil 与 HKCU）。
 三、按提示安装。装完状态栏就出现在任务栏里，托盘图标在通知区。
 
-前提：Win10 1607+ 或 Win11，x64。什么都不用另外装 —— .NET 运行时和解会话文件用的
-Python 都随附在 app\\runtime\\python 里。不支持 Win7/8（.NET 10 的 WPF 只到 Win10）。
+前提：Win10 1607+ 或 Win11，x64。什么都不用另外装 —— .NET 运行时随自包含载荷走，
+状态引擎是 app\\vigil-engine.exe（解压会话文件的能力编在它自己怀里，不再需要 Python）。
+不支持 Win7/8（.NET 10 的 WPF 只到 Win10）。
 
 命令行/无人值守安装：
     Vigil-Setup.exe /S /D=D:\\Vigil        静默安装到指定目录
@@ -31,10 +32,12 @@ Python 都随附在 app\\runtime\\python 里。不支持 Win7/8（.NET 10 的 WP
 
 排障：
   · 状态栏没出现：看 %LOCALAPPDATA%\\Vigil\\bar.log；安装过程看 setup.log。
-  · 想知道它认的是哪个 Python：Vigil.exe --engine-probe
-    （正常应输出 app\\runtime\\python\\python.exe）。
-  · 想单独用状态引擎：
-    app\\runtime\\python\\python.exe app\\dsh_state.py --pretty
+  · 想知道它认的是哪个引擎：Vigil.exe --engine-probe
+    （正常应输出 kind=native 与 app\\vigil-engine.exe；kind=python 说明那份 exe 不在）。
+  · 想单独跑状态引擎：app\\vigil-engine.exe --pretty
+    · --json 出一行机器可读快照，--watch 常驻每 2 秒一行 NDJSON，--states 打印状态图例。
+    · 回退级（vigil-engine.exe 缺失时程序自己会走）：
+      python -X utf8 app\\dsh_state.py --pretty —— 需要本机装有 Python 3.14。
 """
 
 

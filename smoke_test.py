@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import winreg
 
@@ -255,14 +256,14 @@ def find_zstdless_python() -> str | None:
     return None
 
 
-def probe_python(env: dict | None = None) -> dict[str, str]:
+def probe_python(env: dict | None = None, exe: str | None = None) -> dict[str, str]:
     """跑 `Vigil.exe --engine-probe`，把 stdout 那几行 `k=v` 收成 dict（含 `_rc`）。
 
     用 Popen + 超时后 kill，而不是 `subprocess.run(timeout=)`：`--engine-probe` 没被实现
     认出来之前，Vigil 会把它当普通参数、直接起状态栏并且**永不退出**，`run()` 抛
     `TimeoutExpired` 会把整轮冒烟带崩（本文件一贯的口径是不让 traceback 收场）。
     """
-    p = subprocess.Popen([BAR_EXE, "--engine-probe"], stdout=subprocess.PIPE,
+    p = subprocess.Popen([exe or BAR_EXE, "--engine-probe"], stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True, errors="replace",
                          cwd=HERE, env=env)
     try:
@@ -277,33 +278,93 @@ def probe_python(env: dict | None = None) -> dict[str, str]:
     return kv
 
 
+@contextlib.contextmanager
+def fallback_payload():
+    """把开发产物搬进一个**够不着** engine\\vigil-engine.exe 的目录，探一次再交还。
+
+    bar/Engine.cs 认两条候选：`AppContext.BaseDirectory\\vigil-engine.exe`，以及往上
+    四级的 `engine\\vigil-engine.exe`。临时目录里的 `app\\` 两条都落空（第四级是
+    %TEMP% 的某个祖父目录，那儿没有 engine\\），于是只剩 python + dsh_state.py 那一
+    级 —— 这就是回退级的真实形状。
+    为什么不在产品代码里加个"强制用 python"的开关：那个开关只有冒烟会按，
+    留在产物里就是给未来的行为漂移留口子。
+
+    用 contextmanager 而不是"探完就删"：毒化那一条还要拿同一份临时产物再跑一次
+    Vigil.exe，目录要是跟着探测函数一起没了，那条就只剩 WinError 2（真红过一次）。
+    """
+    if not os.path.isdir(BAR_OUT):
+        yield None, None
+        return
+    tmp = tempfile.mkdtemp(prefix="vigil-fallback-")
+    try:
+        app = os.path.join(tmp, "app")
+        os.makedirs(app)
+        for fn in ("Vigil.exe", "Vigil.dll", "Vigil.runtimeconfig.json", "Vigil.deps.json",
+                   "Wpf.Ui.dll"):
+            src = os.path.join(BAR_OUT, fn)
+            if os.path.isfile(src):
+                shutil.copy2(src, app)
+        exe = os.path.join(app, "Vigil.exe")
+        if not os.path.isfile(exe):
+            yield None, None
+            return
+        # dsh_state.py 是回退级要用的脚本，位置必须跟着产物走（csproj 平时就把它拷到 bin）
+        src = os.path.join(BAR_OUT, "dsh_state.py")
+        if not os.path.isfile(src):
+            src = os.path.join(HERE, "dsh_state.py")
+        shutil.copy2(src, os.path.join(app, "dsh_state.py"))
+        yield probe_python(exe=exe), exe
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def check_python_resolution() -> None:
-    print("\n== 解释器解析 ==")
+    """引擎解析门禁：随包的 vigil-engine.exe 优先，Python 那一级是回退。
+
+    名字还叫 python_resolution、标题也跟着改了一半，是因为**两**级都要钉：
+    只钉"C++ 在就用 C++"的话，回退级就没人看着 —— 而回退级存在的全部意义
+    是开发检出没跑 engine\\build.cmd 时状态栏还能起得来。
+    """
+    print("\n== 引擎解析（C++ 优先，解释器回退） ==")
     if not os.path.isfile(BAR_EXE):
         check("Vigil.exe 存在", False, "先跑 --build 或 build.cmd")
         return
     kv = probe_python()
-    check("--engine-probe 解析成功并吐出三行",
-          kv.get("_rc") == "0" and kv.get("zstd") == "ok"
-          and os.path.isabs(kv.get("python", "")) and os.path.isfile(kv.get("engine", "")),
-          f"实得 {kv}")
-    if kv.get("python") and kv.get("python") != "none":
-        q = subprocess.run([kv["python"], "-c", "import compression.zstd"],
-                           capture_output=True, timeout=30)
-        check("报告的解释器真能 import compression.zstd", q.returncode == 0,
-              q.stderr.decode("utf-8", "replace")[:200])
+    native = os.path.join(HERE, "engine", "vigil-engine.exe")
+    check("--engine-probe 认的是随包/编好的 C++ 引擎",
+          kv.get("_rc") == "0" and kv.get("kind") == "native"
+          and os.path.isfile(kv.get("engine", "")) and kv.get("zstd") == "built-in",
+          f"实得 {kv}（engine/vigil-engine.exe 存在={os.path.isfile(native)}，"
+          "没有就先跑 engine/build.cmd）")
 
-    poison = find_zstdless_python()
-    check("找到无 zstd 的解释器作为毒化靶子（找不到这条就失效）", poison is not None,
-          f"扫 {os.path.expandvars('%APPDATA%\\uv\\python')} 没找到 3.13 及以下的解释器")
-    if poison:
-        pdir = os.path.dirname(poison)
-        env = dict(os.environ, PATH=pdir + os.pathsep + os.environ.get("PATH", ""))
-        kv2 = probe_python(env)
-        got = os.path.normcase(os.path.dirname(kv2.get("python", "")))
-        check("把无 zstd 的解释器插到 PATH 最前面，解析结果不被它带走",
-              kv2.get("_rc") == "0" and got != os.path.normcase(pdir),
-              f"毒化目录 {pdir}，实选 {kv2.get('python')}")
+    # 回退级：把产物搬进"够不着 vigil-engine.exe"的目录再探一次（详见 fallback_payload）
+    with fallback_payload() as (fb, fb_exe):
+        if fb is None:
+            check("回退级可探测（临时产物搭得起来）", False,
+                  "bar/bin/Release/net10.0-windows 或那份 Vigil.exe 不在，"
+                  "回退级这半没有凭据")
+            return
+        check("没有 C++ 引擎时退到 python + dsh_state.py",
+              fb.get("_rc") == "0" and fb.get("kind") == "python"
+              and os.path.isabs(fb.get("python", "")) and os.path.isfile(fb.get("python", "")),
+              f"实得 {fb}")
+        if fb.get("python") and fb.get("python") != "none":
+            q = subprocess.run([fb["python"], "-c", "import compression.zstd"],
+                               capture_output=True, timeout=30)
+            check("报告的解释器真能 import compression.zstd", q.returncode == 0,
+                  q.stderr.decode("utf-8", "replace")[:200])
+
+        poison = find_zstdless_python()
+        check("找到无 zstd 的解释器作为毒化靶子（找不到这条就失效）", poison is not None,
+              f"扫 {os.path.expandvars('%APPDATA%\\uv\\python')} 没找到 3.13 及以下的解释器")
+        if poison:
+            pdir = os.path.dirname(poison)
+            env = dict(os.environ, PATH=pdir + os.pathsep + os.environ.get("PATH", ""))
+            kv2 = probe_python(env, exe=fb_exe)
+            got = os.path.normcase(os.path.dirname(kv2.get("python", "")))
+            check("把无 zstd 的解释器插到 PATH 最前面，解析结果不被它带走",
+                  kv2.get("_rc") == "0" and got != os.path.normcase(pdir),
+                  f"毒化目录 {pdir}，实选 {kv2.get('python')}")
 
 
 SETUP_EXE = os.path.join(HERE, "setup", "bin", "Release", "net48", "Vigil-Setup.exe")
@@ -481,9 +542,10 @@ def notices_entries() -> list[dict]:
     cur: dict | None = None
 
     def flush():
-        # 「有任一字段行」才算条目，不是「有用途行」：4.3 CPython embeddable 那一节写的
-        # 是版本下限/许可证/原文随附，偏偏没有用途行 —— 按用途判就会把这条**随产物分发**
-        # 的项整个漏掉。判据侧与 Credits.cs 必须同规则，但各写各的代码。
+        # 「有任一字段行」才算条目，不是「有用途行」：4.1 .NET 运行时那一节写的
+        # 是用途/上游/许可证/原文随附，而 §5 zstd 的标题行里就带许可证 ——
+        # 按"必须有用途行"判就会把这种**随产物分发**的项整个漏掉。
+        # 判据侧与 Credits.cs 必须同规则，但各写各的代码。
         if cur and (cur.get("purpose") or cur.get("license") or cur.get("url")):
             entries.append(cur)
 
@@ -541,9 +603,10 @@ def check_about_v5() -> None:
     entries = notices_entries()
     check("THIRD-PARTY-NOTICES.md 解析出条目（判据侧解析器有东西可判）", len(entries) >= 10,
           f"只解析出 {len(entries)} 条")
-    check("随产物分发的 CPython/PSF 那一条在清单里（它没有「用途」行，最容易被规则漏掉）",
-          any("CPython" in e["name"] for e in entries),
-          "V5 §3 要单独标出的非 MIT 项，漏一条就是合规缺口")
+    check("随产物分发的 zstd（非 MIT）那一条在清单里（它最容易被"
+          "「只列 MIT 项」的规则漏掉）",
+          any("zstd" in e["name"].lower() or "Zstandard" in e["name"] for e in entries),
+          "§5 是双许可里取 BSD 的一支，关于页要单独标出非 MIT 项，漏一条就是合规缺口")
 
     # ① 清单必须是解析出来的，不是抄进代码的：任何 .cs 里都不许出现上游版权人名。
     copied = []
@@ -847,6 +910,7 @@ def check_engine_parity() -> None:
         ("compare_snapshot", "整帧快照逐字段（同一时刻）"),
         ("compare_snapshot_boundary", "阈值与取整边界（合成会话，年龄已知）"),
         ("compare_json", "坏 JSON 的行级取舍（16 种坏行整行丢弃）"),
+        ("compare_pretty", "--pretty 详细视图逐行（README 排障那一条走它）"),
         ("compare_watch", "常驻 --watch 节奏与解析缓存"),
         ("compare_balance", "Key 存取双向互操作"),
     ):
@@ -959,10 +1023,13 @@ def check_package() -> None:
                                 "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
                                 "APPDATA": os.environ.get("APPDATA", "")})
         kv = dict(l.split("=", 1) for l in (r.stdout or "").splitlines() if "=" in l)
-        check("PATH 被削到只剩 System32（模拟没装 Python 的机器），仍认随附解释器",
-              os.path.normcase(kv.get("python", ""))
-              == os.path.normcase(os.path.join(app, "runtime", "python", "python.exe")),
-              f"rc={r.returncode} 实得 {kv.get('python')}")
+        # 判据从"选中随附解释器"换成"选中随包的 vigil-engine.exe"：载荷里已经没有
+        # 解释器这个东西了，而这条断言的原意没变 —— 宿主 PATH 上有什么都不该影响它。
+        check("PATH 被削到只剩 System32（模拟没装 Python 的机器），仍认随包的 C++ 引擎",
+              kv.get("kind") == "native"
+              and os.path.normcase(kv.get("engine", ""))
+              == os.path.normcase(os.path.join(app, "vigil-engine.exe")),
+              f"rc={r.returncode} 实得 {kv}")
 
 
 def check_installer_e2e() -> None:
@@ -1107,8 +1174,10 @@ LICENSE_MUST_CONTAIN = (
     "Bäumlisberger",                           # VirtualizingWrapPanel（WPF-UI 传递依赖）
     "fluentui-system-icons", "microsoft-ui-xaml", "dotnet/wpf",
     "Segoe Fluent Icons",
-    # 随附分发的 embeddable 解释器：PSF 许可要求保留其版权声明，声明里必须有一节
-    "Python 3.14.7", "Python Software Foundation",
+    # 编进 vigil-engine.exe 的解压子集：BSD-3 要求副本保留版权声明，声明里必须有一节。
+    # 上一版这里钉的是 embeddable 解释器的 PSF —— 载荷不再带解释器，那条义务失去对象；
+    # 留着这两个关键词等于把"产物里有 Python"这句话钉回门禁。
+    "Meta Platforms", "Zstandard", "BSD 3-Clause",
 )
 
 # 标准 SPDX MIT 正文——去掉标题行与版权行之后剩下的那部分。权威参照逐字取自本机
@@ -4811,24 +4880,38 @@ def check_balance_key_handling() -> None:
           f"仍在引用的文件：{' '.join(callers) or '无'}")
 
     # ② Key 只能从 stdin 进引擎。argv 不是秘密存放处：本机任何进程都能读到子进程命令行。
+    # 调用点从"App.cs 里一段 ProcessStartInfo"变成了"App.cs 调 Engine.Start(verb, …)"
+    # + "Engine.cs 里拼参数"，所以这一段扫的是**两段合起来**的形状 ——
+    # 判据的内容一个字没松：命令行里不许出现 Key、stdin 只在有 Key 时开、两侧显式 UTF-8。
     gi = app_src.find("static void RunEngineVerb(")
     ge = app_src.find("static void FinishEngineVerb", gi) if gi >= 0 else -1
     verb_body = app_src[gi:ge] if gi >= 0 and ge > gi else ""
-    arg_lines = [l.strip() for l in verb_body.splitlines() if "Arguments" in l]
-    check("找到了 RunEngineVerb 的引擎调用站点", bool(verb_body) and bool(arg_lines),
-          "App.cs 里没有 static void RunEngineVerb(（到 FinishEngineVerb 之间），"
-          "或它没有 Arguments 赋值")
+    eng_path = os.path.join(HERE, "bar", "Engine.cs")
+    eng_src = open(eng_path, encoding="utf-8-sig", errors="replace").read() if os.path.isfile(eng_path) else ""
+    ei = eng_src.find("internal static ProcessStartInfo Start(")
+    ee = eng_src.find("internal static string Describe()", ei) if ei >= 0 else -1
+    engine_body = eng_src[ei:ee] if ei >= 0 and ee > ei else ""
+    scan_body = verb_body + "\n" + engine_body
+    arg_lines = [l.strip() for l in scan_body.splitlines() if "Arguments" in l]
+    check("找到余额子命令的引擎调用站点（App.cs 的 RunEngineVerb 调 Engine.Start，"
+          "Engine.cs 里那段负责拼参数）",
+          bool(verb_body) and bool(engine_body) and bool(arg_lines)
+          and "Engine.Start(verb, withStdin: key != null)" in verb_body,
+          f"verb_body={len(verb_body)} 字符 / Engine.Start 体={len(engine_body)} 字符 / "
+          f"Arguments 行 {len(arg_lines)} 条")
     check("引擎命令行里不含 Key（Arguments 只拼 python、脚本路径和 verb）",
           bool(arg_lines) and all("key" not in l.lower() for l in arg_lines),
           ("这些行里出现了 key：" + " / ".join(arg_lines)
            + "（把 Key 插进 argv = 本机任何进程读得到）"))
     check("Key 走 StandardInput.Write，且只在有 Key 时才重定向 stdin",
-          "RedirectStandardInput = key != null" in verb_body
+          "if (withStdin)" in engine_body
+          and "psi.RedirectStandardInput = true" in engine_body
           and "proc.StandardInput.Write(key)" in verb_body,
-          "没找到 RedirectStandardInput = key != null / StandardInput.Write(key)")
+          "Engine.Start 里没有以 withStdin 为门的 RedirectStandardInput，"
+          "或 App.cs 那侧不是 StandardInput.Write(key)")
     check("stdin 与 stdout 都显式 UTF-8（否则非 ASCII 的 Key 会被本机码页改形后存进 DPAPI）",
-          "StandardInputEncoding = new UTF8Encoding(false)" in verb_body
-          and "StandardOutputEncoding = new UTF8Encoding(false)" in verb_body,
+          "psi.StandardInputEncoding = new UTF8Encoding(false)" in engine_body
+          and "StandardOutputEncoding = new UTF8Encoding(false)" in engine_body,
           "少了 StandardInputEncoding：写入侧默认按本机 ANSI 码页走")
 
     # ②b 这一路必须跑在后台线程上。KeyDialog 时代同步等只冻一扇模态窗，

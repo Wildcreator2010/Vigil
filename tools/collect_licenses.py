@@ -2,9 +2,10 @@
 """把随产物分发的第三方许可证原文收进 `dist/<name>/licenses/`。
 
 为什么需要这一步：`--self-contained` 的载荷里不只是我们的代码 —— 它把 .NET 运行时的
-二进制一起分发了，而那份 MIT 要求"所有副本或实质部分都保留版权声明"。Python 同理，
-embeddable 包里的 `LICENSE.txt` 是 PSF 许可全文。只在本仓库的声明文件里写一句
-"人家是 MIT" 不满足这个条件，原文必须跟着产物走。
+二进制一起分发了，而那份 MIT 要求"所有副本或实质部分都保留版权声明"。
+`vigil-engine.exe` 同理：它把 vendored 的 zstd 解压子集编在了自己怀里，BSD-3 的
+版权声明要跟着走。只在本仓库的声明文件里写一句"人家是 MIT/BSD"不满足这个条件，
+原文必须跟着产物走。
 
   python tools/collect_licenses.py <dist 目录>
 
@@ -70,18 +71,22 @@ def main() -> int:
         lines.append(f"{fname}\n  组件：{role}\n  来源包：{pkg} {ver}\n  许可证：MIT\n")
         print(f"  OK {fname}  <- {pkg} {ver}")
 
-    py_lic = os.path.join(dist, "app", "runtime", "python", "LICENSE.txt")
-    if os.path.isfile(py_lic):
-        with open(py_lic, encoding="utf-8", errors="replace") as f:
+    # zstd 的原文从**仓库里那份 vendored 源码**取，而不是从 THIRD-PARTY-NOTICES 抄：
+    # 声明文件是人写的摘要，摘要会漂；随包分发的那 11 个 .c 自己带的 LICENSE 才是凭据。
+    # 上一版这里收的是 embeddable 解释器的 PSF 全文 —— 载荷不再带 CPython，
+    # 那条义务跟着走；换成编译进 vigil-engine.exe 的解压子集。
+    zsrc = os.path.join(ROOT, "engine", "third_party", "zstd", "LICENSE")
+    if os.path.isfile(zsrc):
+        with open(zsrc, encoding="utf-8", errors="replace") as f:
             body = f.read()
-        with open(os.path.join(out, "python-PSF.txt"), "w", encoding="utf-8", newline="\r\n") as f:
+        with open(os.path.join(out, "zstd-BSD.txt"), "w", encoding="utf-8", newline="\r\n") as f:
             f.write(body)
-        lines.append("python-PSF.txt\n  组件：CPython 3.14.7 embeddable（app\\runtime\\python）\n"
-                     "  许可证：Python Software Foundation License\n"
-                     "  同一份原文也随附在 app\\runtime\\python\\LICENSE.txt\n")
-        print("  OK python-PSF.txt  <- app\\runtime\\python\\LICENSE.txt")
+        lines.append("zstd-BSD.txt\n  组件：libzstd 解压子集（编进 app\\vigil-engine.exe）\n"
+                     "  来源：engine\\third_party\\zstd，原文即本文件\n"
+                     "  许可证：BSD-3-Clause（与 Apache-2.0 双许可，本项目取 BSD-3）\n")
+        print("  OK zstd-BSD.txt  <- engine\\third_party\\zstd\\LICENSE")
     else:
-        missing.append("app\\runtime\\python\\LICENSE.txt（embeddable 包解压缺失）")
+        missing.append("engine\\third_party\\zstd\\LICENSE（vendored zstd 的原文，随包分发义务）")
 
     with open(os.path.join(out, "README.txt"), "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write("\n".join(lines))

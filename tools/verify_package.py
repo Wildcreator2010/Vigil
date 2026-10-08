@@ -21,25 +21,19 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# 校验和不在这里查：package.cmd 在下载环节查（查不过根本不会有 dist 产物）。
-# 这里只面对已经落地的产物，再抄一份 PIN 常量就是第二个要记着改的地方。
+# 校验和不在这里查：以前查的是 CPython 那个 zip，现在包里根本没有 zip 了。
 MUST_EXIST_APP = (
-    "Vigil.exe", "Vigil.dll", "Vigil.runtimeconfig.json", "Vigil.deps.json", "dsh_state.py",
+    "Vigil.exe", "Vigil.dll", "Vigil.runtimeconfig.json", "Vigil.deps.json",
+    "vigil-engine.exe",
+    # 引擎的回退级：vigil-engine.exe 不在时才用得上（bar/Engine.cs）。它只是一份脚本，
+    # 40KB，跟着走不亏；真不带它，回退级就退化成"这机器碰巧装了 Python 3.14"。
+    "dsh_state.py",
     "Wpf.Ui.dll", "Vigil-Setup.exe",
-    os.path.join("runtime", "python", "python.exe"),
-    os.path.join("runtime", "python", "python314.dll"),
-    os.path.join("runtime", "python", "python314.zip"),
-    os.path.join("runtime", "python", "_zstd.pyd"),
-    os.path.join("runtime", "python", "_ssl.pyd"),
-    # PSF 许可证的随附义务落点：删这条等于分发产物却漏了许可证原文。
-    os.path.join("runtime", "python", "LICENSE.txt"),
 )
 MUST_EXIST_ROOT = ("Vigil-Setup.exe", "LICENSE.txt", "THIRD-PARTY-NOTICES.md", "安装说明.txt",
-                   # 自包含载荷把 .NET 运行时二进制一起分发了，MIT 要求版权声明随副本走；
-                   # PSF 同理。只在本仓库写句"人家是 MIT"不满足条件，原文必须在包里。
+                   # 自包含载荷把 .NET 运行时二进制一起分发了，MIT 要求版权声明随副本走。
                    os.path.join("licenses", "dotnet-runtime-MIT.txt"),
                    os.path.join("licenses", "dotnet-windowsdesktop-MIT.txt"),
-                   os.path.join("licenses", "python-PSF.txt"),
                    os.path.join("licenses", "README.txt"))
 
 
@@ -66,13 +60,13 @@ def verify(dist_dir: str) -> list[str]:
         if not os.path.isfile(os.path.join(dist_dir, rel)):
             bad.append(f"缺 {rel}")
 
-    py = os.path.join(app, "runtime", "python", "python.exe")
-    engine = os.path.join(app, "dsh_state.py")
+    eng = os.path.join(app, "vigil-engine.exe")
+    script = os.path.join(app, "dsh_state.py")
     exe = os.path.join(app, "Vigil.exe")
 
-    # ① 随附解释器必须真能把引擎跑出 ok:true（--no-balance：校验不该依赖网络）
-    if os.path.isfile(py) and os.path.isfile(engine):
-        r = subprocess.run([py, "-X", "utf8", engine, "--json", "--no-balance"],
+    # ① 随包的 C++ 引擎必须真能出 ok:true（--no-balance：校验不该依赖网络）
+    if os.path.isfile(eng):
+        r = subprocess.run([eng, "--json", "--no-balance"],
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=180, cwd=app)
         lines = (r.stdout or "").strip().splitlines()
@@ -82,23 +76,33 @@ def verify(dist_dir: str) -> list[str]:
         except Exception:
             snap = None
         if r.returncode != 0 or not snap or snap.get("ok") is not True:
-            bad.append(f"随附解释器跑不动引擎：rc={r.returncode} "
+            bad.append(f"随包引擎跑不动：rc={r.returncode} "
                        f"err={(r.stderr or '')[-200:]} out={(r.stdout or '')[-200:]}")
         else:
-            print(f"  OK 随附解释器出快照：state={snap.get('state')} "
+            print(f"  OK 随包引擎出快照：state={snap.get('state')} "
                   f"会话扫描={snap.get('sessions_scanned')}")
 
-    # ② 产物里的 Vigil 必须认随附解释器，而不是宿主 PATH 上那份
+    # ② 产物里的 Vigil 必须认那份 C++ 引擎。
+    # 上一版这条比的是 python= 指向随附解释器；现在 python= 应当是 none —— 不是故障，
+    # 是"包里就没有解释器"这件事的证据。所以判据换成 kind + engine 两格。
     if os.path.isfile(exe):
         p = subprocess.run([exe, "--engine-probe"], capture_output=True, text=True,
                            errors="replace", timeout=180, cwd=app)
         kv = dict(l.split("=", 1) for l in (p.stdout or "").splitlines() if "=" in l)
-        got = os.path.normcase(kv.get("python", ""))
-        want = os.path.normcase(py)
-        if got != want:
-            bad.append(f"--engine-probe 没选中随附解释器：实得 {kv.get('python')}，应为 {py}")
+        if kv.get("kind") != "native":
+            bad.append(f"--engine-probe 没走随包引擎：kind={kv.get('kind')} 实得 {kv}")
+        elif os.path.normcase(kv.get("engine", "")) != os.path.normcase(eng):
+            bad.append(f"--engine-probe 报的引擎不在产物里：{kv.get('engine')} 应为 {eng}")
         else:
-            print("  OK Vigil --engine-probe 认的是随附解释器")
+            print("  OK Vigil --engine-probe 认的是随包的 vigil-engine.exe")
+
+    # ②b 反向证据：载荷里不该再有解释器那棵树。留着就是 24MB，而且
+    # "没有 python" 才是"目标机零前置"这句话的可检查形式。
+    leftover = [p for p in glob.glob(os.path.join(app, "runtime", "**", "*"), recursive=True)
+                if os.path.isfile(p)]
+    if leftover:
+        bad.append(f"载荷里还留着 runtime\\ 那 {len(leftover)} 个文件（CPython 已不再是引擎）："
+                   + ", ".join(os.path.relpath(x, app) for x in leftover[:4]))
 
     # ③ 两个 exe 的版本必须相等（package.cmd 用同一个 -p:Version 喂两边）
     v_app = file_version(exe) if os.path.isfile(exe) else ""

@@ -49,7 +49,8 @@ namespace Vigil
                     Ui.Row("安装位置", "状态栏与随附检测引擎所在的目录。卸载要认的就是这个目录。", _where),
                     Ui.Row("版本", "数字版本归工程文件；后面的种加词是发布代号，不参与比较。", _version),
                     Ui.Row("检测引擎",
-                        "优先用随附的 runtime\\python\\python.exe，不受宿主 PATH 影响。" +
+                        "随包的 vigil-engine.exe（解压与判定都在它自己怀里，不解释器）。" +
+                        "它不在时会退到 python + dsh_state.py 那一级。" +
                         "命令行里 Vigil.exe --engine-probe 打印的就是这一格的判断结果。", _engine)),
                 Ui.Group("数据与日志",
                     Ui.Row("日志", "状态不对时先看它；按钮在资源管理器里选中 bar.log。",

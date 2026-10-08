@@ -40,6 +40,13 @@
 
 - 目标框架 `net10.0-windows`，`UseWPF` + `UseWindowsForms`，`Nullable=disable`，`ImplicitUsings=disable` —— 所有 C# 文件必须显式 `using`。
 - 引擎侧**只用 Python 3.14 标准库**，不得引入第三方包。
+  （2026-10-08 增补：这条约束针对的是 Python 那版引擎，它仍是判据的参照实现。
+  分发面换成 `engine/vigil_engine.cpp` 之后，"引擎侧不引第三方包"这条**不再覆盖
+  引擎本身** —— C++ 那份带了 vendored 的 zstd 解压子集（BSD-3，见
+  THIRD-PARTY-NOTICES.md §5），因为本机实测 Windows 自带压缩 API 解不了 zstd
+  （engine/probe_zstd.cpp）。相应地，判据从"Python 引擎自测"变成
+  "C++ 与 Python 逐字段对照"，见 engine/compare_*.py 与 smoke_test.py 的
+  check_engine_parity。）
 - 编译门禁：`dotnet build -c Release` 必须 **0 error 0 warning**。跑构建时不要把输出接管道（`| tail` 会吞掉退出码），先重定向到文件再判 `$?`。
 - 面板文案全中文；面板**默认浅色主题（白底黑字）**，任务栏状态条继续跟随系统深浅色，两者互不影响。
 - C# 里 `Wpf.Ui.Controls` 与 `System.Windows.Controls` 有同名 `TextBlock`/`Button`，**code-behind 一律 `using WpfControls = System.Windows.Controls;` 起别名**，只从 `Wpf.Ui.Controls` 显式 import 用到的类型，否则 CS0104 二义性。

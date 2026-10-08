@@ -746,20 +746,8 @@ namespace Vigil
         {
             try
             {
-                string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
-                if (!File.Exists(engine))
-                    engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
-                string python = ResolvePython();
-                if (python == null || !File.Exists(engine)) return;
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = python,
-                    Arguments = $"-X utf8 \"{engine}\" --json --no-balance",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    StandardOutputEncoding = new UTF8Encoding(false),
-                };
+                var psi = Engine.Start("--json --no-balance");
+                if (psi == null) return;
                 using var proc = System.Diagnostics.Process.Start(psi);
                 // ReadLine() 没有超时：python 起不来、或者卡在网络请求上不肯写 stdout 时，
                 // --panel-shot 会在这里永挂，冒烟侧只能等到 subprocess 的 120 秒超时抛
@@ -992,21 +980,17 @@ namespace Vigil
 
         private static void StartClient()
         {
-            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
-            if (!File.Exists(engine))
+            // 引擎在哪、怎么起，全收在 Engine 里；这里只负责"起不来要说什么"。
+            if (Engine.Kind().Length == 0)
             {
-                engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
-            }
-            string python = ResolvePython();
-            if (python == null || !File.Exists(engine))
-            {
-                Log($"找不到引擎或 python engine={engine} python={python ?? "null"}");
+                Log($"找不到引擎 native={Engine.NativePath() ?? "无"} script={Engine.ScriptPath() ?? "无"}");
                 Balloon("状态检测引擎不可用",
-                        "随附解释器 runtime\\python\\python.exe 缺失，且系统里找不到能解 zstd 的 Python 3.14",
+                        "随包的 vigil-engine.exe 不在，回退用的 runtime\\python\\python.exe"
+                        + "（或系统里能解 zstd 的 Python 3.14）也找不到",
                         ToolTipIcon.Error);
                 return;
             }
-            _client = new StateClient(python, engine, _settings.Interval);
+            _client = new StateClient(_settings.Interval);
             _client.Log += Log;
             _client.Updated += snap => _window.Dispatcher.BeginInvoke(new Action(() => OnSnapshot(snap)));
             _client.Start();
@@ -1015,20 +999,10 @@ namespace Vigil
         /// <summary>--demo 只喂一帧伪造快照，用来肉眼核对各状态的视觉。</summary>
         private static void DemoOnce(string state)
         {
-            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
-            string python = ResolvePython();
-            if (python == null || !File.Exists(engine)) return;
+            var psi = Engine.Start($"--demo {state} --json");
+            if (psi == null) return;
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = python,
-                    Arguments = $"-X utf8 \"{engine}\" --demo {state} --json",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    StandardOutputEncoding = new UTF8Encoding(false),
-                };
                 using var proc = System.Diagnostics.Process.Start(psi);
                 string line = proc.StandardOutput.ReadLine();
                 proc.WaitForExit(15000);
@@ -1159,20 +1133,26 @@ namespace Vigil
             catch { return false; }
         }
 
-        /// <summary>关于页用：当前解析到的解释器路径。复用 ResolvePython，别再抄一份查找逻辑。</summary>
-        internal static string EnginePathForDisplay() => ResolvePython() ?? "未找到能解 zstd 的 Python 3.14";
+        /// <summary>关于页用：当前用的到底是哪一级引擎、在哪。</summary>
+        internal static string EnginePathForDisplay() => Engine.Describe();
 
         /// <summary>`Vigil.exe --engine-probe`：只报解析结果就退，不开窗口、不抢单实例。</summary>
         private static int EngineProbe()
         {
-            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
-            if (!File.Exists(engine))
-                engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
-            string python = ResolvePython();
-            Console.WriteLine("python=" + (python ?? "none"));
-            Console.WriteLine("engine=" + engine);
-            Console.WriteLine("zstd=" + (python == null || !File.Exists(engine) ? "fail" : "ok"));
-            return python == null || !File.Exists(engine) ? 3 : 0;
+            // 四行 k=v 是给冒烟与安装包校验读的，不是给人看的，所以 kind 单独一行：
+            // 随包切到 vigil-engine.exe 之后，"python=none" 不再是故障，
+            // 而 kind 缺了的话两边的判据都只能猜。
+            string kind = Engine.Kind();
+            string exe = Engine.NativePath(), script = Engine.ScriptPath();
+            string py = Engine.PythonForFallback();
+            Console.WriteLine("kind=" + (kind.Length == 0 ? "none" : kind));
+            Console.WriteLine("engine=" + (exe ?? script ?? "none"));
+            Console.WriteLine("python=" + (exe != null ? "none" : (py ?? "none")));
+            bool ok = exe != null || (script != null && py != null);
+            // zstd 这一格的原义是"选中的解释器能 import compression.zstd"。
+            // C++ 那份把解压能力编在自己怀里，所以同一句"能不能解 zstd"答案是 built-in。
+            Console.WriteLine("zstd=" + (exe != null ? "built-in" : (ok ? "ok" : "fail")));
+            return ok ? 0 : 3;
         }
 
         private static void DockNow(IntPtr hwnd)
@@ -1653,14 +1633,14 @@ namespace Vigil
         /// </summary>
         static void RunEngineVerb(string verb, string key, Action<bool, string> done)
         {
-            string engine = Path.Combine(AppContext.BaseDirectory, "dsh_state.py");
-            if (!File.Exists(engine))
-                engine = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "dsh_state.py"));
-            string python = ResolvePython();
-            if (python == null || !File.Exists(engine))
+            // 引擎在哪、怎么起，收在 Engine 里；Key 只走 stdin（argv 不是秘密存放处：
+            // 本机任何进程都能读到子进程的命令行）。
+            System.Diagnostics.ProcessStartInfo probe = Engine.Start(verb, withStdin: key != null);
+            if (probe == null)
             {
                 Balloon("状态检测引擎不可用",
-                        "随附解释器 runtime\\python\\python.exe 缺失，且系统里找不到能解 zstd 的 Python 3.14",
+                        "随包的 vigil-engine.exe 不在，回退用的 runtime\\python\\python.exe"
+                        + "（或系统里能解 zstd 的 Python 3.14）也找不到",
                         ToolTipIcon.Error);
                 done?.Invoke(false, "状态检测引擎不可用");
                 return;
@@ -1683,21 +1663,7 @@ namespace Vigil
                 string fail = "";
                 try
                 {
-                    var psi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = python,
-                        Arguments = $"-X utf8 \"{engine}\" {verb}",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardInput = key != null,
-                        RedirectStandardOutput = true,
-                        WorkingDirectory = Path.GetDirectoryName(engine),
-                        // 两侧都要显式 UTF-8：不写 StandardInputEncoding 时写入侧按本机
-                        // ANSI 码页走，非 ASCII 的 Key 会被改形成再存进 DPAPI —— 而 Key 是
-                        // 用户从控制台复制粘贴的，恰恰最可能带非 ASCII。
-                        StandardOutputEncoding = new UTF8Encoding(false),
-                        StandardInputEncoding = new UTF8Encoding(false),
-                    };
+                    var psi = probe;
                     using var proc = System.Diagnostics.Process.Start(psi);
                     var reading = proc.StandardOutput.ReadToEndAsync();
                     if (key != null)

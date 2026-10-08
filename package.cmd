@@ -1,14 +1,16 @@
 @echo off
 setlocal EnableExtensions
 rem Builds the zero-prerequisite Vigil distribution: no .NET and no Python needed
-rem on the target machine.
+rem on the target machine. The state engine is vigil-engine.exe (C++, its own
+rem zstd decoder), so nothing interpreter-shaped ships any more.
 rem
-rem   package.cmd                full run: two publishes + vendored CPython + verify + zip
+rem   package.cmd                full run: engine + two publishes + verify + zip
 rem   package.cmd --verify-only  only verify an existing dist\ payload
 rem                                (this is what "python smoke_test.py --package" calls)
 rem
-rem Build machine needs: .NET 10 SDK, Python 3.14, and curl/tar/certutil (built into
-rem Win10 1803+). The target machine needs nothing. Do not confuse the two.
+rem Build machine needs: .NET 10 SDK, MSVC (for engine\build.cmd), Python 3.14 for
+rem the tooling under tools\, and curl/tar/certutil (built into Win10 1803+).
+rem The target machine needs nothing. Do not confuse the two.
 rem
 rem THIS FILE MUST STAY PURE ASCII. cmd.exe reads batch files in the OEM codepage
 rem (GBK on zh-CN), and UTF-8 Chinese inside a `rem` line swallows the line break --
@@ -20,10 +22,6 @@ set "RID=win-x64"
 rem Always the system bsdtar: a Git Bash on PATH brings its own GNU tar,
 rem which cannot read a .zip and dies with "does not look like a tar archive".
 set "TAR=%SystemRoot%\System32\tar.exe"
-set "PY_VER=3.14.7"
-set "PY_SHA256=d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15"
-set "PY_ZIP=vendor\python-%PY_VER%-embed-amd64.zip"
-set "PY_URL=https://www.python.org/ftp/python/%PY_VER%/python-%PY_VER%-embed-amd64.zip"
 
 for /f "delims=" %%v in ('python -X utf8 tools\read_version.py') do set "VER=%%v"
 if "%VER%"=="" ( echo [FAIL] cannot read Version from bar\Vigil.csproj & exit /b 1 )
@@ -33,25 +31,23 @@ echo == %NAME% ==
 
 if /i "%~1"=="--verify-only" goto verify
 
-echo [1/6] publish app (self-contained %RID%)
+echo [1/6] build native state engine
+rem The payload ships vigil-engine.exe instead of a 24MB vendored CPython: the
+rem C++ engine carries its own zstd decoder, so the target machine needs no
+rem interpreter at all. dsh_state.py stays in the payload as the fallback level
+rem (see bar/Engine.cs) -- it is 40KB, the interpreter was not.
+rem engine\build.cmd 必须以 call 调：批处理里不加 call 就是把控制权交出去不再回来，
+rem 整条流水线在 [1/6] 之后静默结束 —— 实测红过一次（那次连 [2/6] 都没打印）。
+call engine\build.cmd > pkg-engine.log 2>&1
+if errorlevel 1 ( echo [FAIL] engine build failed, see pkg-engine.log & exit /b 1 )
+if not exist "engine\vigil-engine.exe" ( echo [FAIL] engine\build.cmd left no vigil-engine.exe & exit /b 1 )
+
+echo [2/6] publish app (self-contained %RID%)
 dotnet publish bar\Vigil.csproj -c Release -r %RID% --self-contained true -p:Version=%VER% -o "%DIST%\app" --nologo > pkg-bar.log 2>&1
 if errorlevel 1 ( echo [FAIL] app publish failed, see pkg-bar.log & exit /b 1 )
 call :assert_clean pkg-bar.log app || exit /b 1
-
-echo [2/6] vendor CPython %PY_VER%
-if not exist vendor mkdir vendor
-if not exist "%PY_ZIP%" (
-  echo   downloading %PY_URL%
-  curl -L --fail --retry 3 -sS -o "%PY_ZIP%" "%PY_URL%"
-  if errorlevel 1 ( echo [FAIL] download failed & exit /b 1 )
-)
-set "GOT="
-for /f "skip=1 delims=" %%h in ('certutil -hashfile "%PY_ZIP%" SHA256') do if not defined GOT set "GOT=%%h"
-if /i not "%GOT%"=="%PY_SHA256%" ( echo [FAIL] SHA256 mismatch: %GOT% & exit /b 1 )
-if exist "%DIST%\app\runtime\python" rmdir /s /q "%DIST%\app\runtime\python"
-mkdir "%DIST%\app\runtime\python"
-"%TAR%" -xf "%PY_ZIP%" -C "%DIST%\app\runtime\python"
-if errorlevel 1 ( echo [FAIL] unzip failed & exit /b 1 )
+copy /y "engine\vigil-engine.exe" "%DIST%\app\vigil-engine.exe" >nul
+if errorlevel 1 ( echo [FAIL] copy vigil-engine.exe into payload failed & exit /b 1 )
 
 echo [3/6] publish setup wizard (net48)
 dotnet publish setup\Vigil.Setup.csproj -c Release -p:Version=%VER% -o "dist\setup-out" --nologo > pkg-setup.log 2>&1

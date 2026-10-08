@@ -126,8 +126,8 @@ namespace Vigil
     }
 
     /// <summary>
-    /// 状态来源：常驻子进程 python dsh_state.py --watch，逐行读 NDJSON。
-    /// 读管道放在独立线程，避免阻塞 UI；子进程退出后自动重启。
+    /// 状态来源：常驻子进程（vigil-engine.exe --watch，没有才退回 python dsh_state.py），
+    /// 逐行读 NDJSON。读管道放在独立线程，避免阻塞 UI；子进程退出后自动重启。
     /// </summary>
     internal sealed class StateClient : IDisposable
     {
@@ -136,8 +136,6 @@ namespace Vigil
             PropertyNameCaseInsensitive = true,
         };
 
-        private readonly string _python;
-        private readonly string _engine;
         private readonly int _intervalSeconds;
         private readonly object _gate = new object();
         private Process _proc;
@@ -149,10 +147,8 @@ namespace Vigil
         public event Action<Snapshot> Updated;
         public event Action<string> Log;
 
-        public StateClient(string python, string engine, int intervalSeconds)
+        public StateClient(int intervalSeconds)
         {
-            _python = python;
-            _engine = engine;
             _intervalSeconds = Math.Max(1, intervalSeconds);
         }
 
@@ -161,18 +157,12 @@ namespace Vigil
             lock (_gate)
             {
                 if (_disposed || _proc != null) return;
-                var psi = new ProcessStartInfo
+                var psi = Engine.Start($"--watch --interval {_intervalSeconds}", withStderr: true);
+                if (psi == null)
                 {
-                    FileName = _python,
-                    Arguments = $"-X utf8 \"{_engine}\" --watch --interval {_intervalSeconds}",
-                    WorkingDirectory = Path.GetDirectoryName(_engine),
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    StandardOutputEncoding = new UTF8Encoding(false),
-                    StandardErrorEncoding = new UTF8Encoding(false),
-                };
+                    RaiseLog("引擎起不来：既没有 vigil-engine.exe，也没有能解 zstd 的 Python 3.14");
+                    return;
+                }
                 try
                 {
                     _proc = Process.Start(psi);
