@@ -24,8 +24,37 @@ namespace Vigil.Setup
         // 或者卸完载 Run 值还留着、下次开机弹「找不到 Vigil.exe」。
         internal const string ProductName = "Vigil";
         internal const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        // 开机自启**两个版本共用一个值**（与 bar/App.cs 的 RunValue 同一处名字，那边
+        // 也有自己一条从 dsh-status 迁过来的历史）。为什么不各占一个：Run 里两个都写
+        // = 开机两版都启动 = 第二个必然弹「同时只能开一个」，用户一开机就被骚扰。
+        // 共用一个的代价是"装第二版会把手拨到自己身上"，所以向导在检测到槽已被
+        // 另一个版本占用时要问一句自启交给谁（见 AutostartOwner），卸载时也只清
+        // 指向自己的那一个（见 SetRunValue 的 off 分支）。
         internal const string RunKeyValueName = "Vigil";
-        internal const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Vigil";
+        internal static string UninstallKeyPath =>
+            @"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + InstallKeyName;
+        // 遗留单版（分版本改名之前装的那一份）用的无后缀名字。它不属于任何版本，
+        // 只用于安装时把旧安装迁到 Vachellia 那一套身份上。
+        internal const string LegacyInstallKeyName = "Vigil";
+        internal static string InstallKeyName => ProductName + "-" + ProductSlug;
+        /// <summary>给人看的那一行：带代号，控制面板里两条才能分清谁是谁。</summary>
+        internal static string DisplayName =>
+            ProductName + (Codename.Length == 0 ? "" : " " + Codename);
+
+        /// <summary>代号与 slug 从工程文件读（package.cmd 用 -p: 喂两个工程）。</summary>
+        internal static string Codename => Metadata("Codename");
+        internal static string ProductSlug => Metadata("Slug");
+
+        static string Metadata(string key)
+        {
+            foreach (var obj in typeof(Installer).Assembly
+                         .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false))
+            {
+                if (obj is System.Reflection.AssemblyMetadataAttribute a && a.Key == key) return a.Value;
+            }
+            return "";
+        }
+
         internal const string SetupExeName = "Vigil-Setup.exe";
         internal const string MainExeName = "Vigil.exe";
         internal const string PayloadFolderName = "app";
@@ -44,7 +73,12 @@ namespace Vigil.Setup
 
         public static string DefaultTargetDir() => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Programs", ProductName);
+            "Programs", InstallKeyName);
+
+        /// <summary>分版本之前那份遗留安装的位置（Programs\Vigil）。</summary>
+        public static string LegacyTargetDir() => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs", LegacyInstallKeyName);
 
         public static string PayloadDirOf(string setupDir) => Path.Combine(setupDir, PayloadFolderName);
 
@@ -75,11 +109,101 @@ namespace Vigil.Setup
 
         // ---------------------------------------------------------------- 安装
 
+        /// <summary>
+        /// 把"分版本之前"那一份遗留安装（Programs\Vigil + Uninstall\Vigil + Vigil.lnk）
+        /// 迁到 Vachellia 那一套身份上。装任何一个版本之前都先跑一次。
+        ///
+        /// 为什么由向导来做：已经发出去的那份 Vigil.exe 里没有迁移代码，没法让它
+        /// 事后长出来 —— 只有下一次安装时我们说了算。
+        /// 为什么迁成 Vachellia：遗留那一份的引擎就是 CPython，按定下的对应关系
+        /// （Vachellia=Python 引擎 / Lilium=C++ 引擎）它的身份就是 Vachellia。
+        /// 数据目录 %LOCALAPPDATA%\Vigil **一个字节都不动**：两版共用一份设置与余额
+        /// Key 是设计决定，迁移动它就是把用户的 Key 弄丢。
+        /// </summary>
+        public static void MigrateLegacyInstall(Action<string> log)
+        {
+            var legacy = LegacyTargetDir();
+            // 判据是"那儿真有一套装开的 Vigil"，不是"目录存在"：装到一半崩过、
+            // 或者只留了个空壳的目录不该被当成一次安装搬走。
+            if (!File.Exists(Path.Combine(legacy, MainExeName))) return;
+
+            const string legacySlug = "Vachellia";
+            var to = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs", ProductName + "-" + legacySlug);
+            if (Directory.Exists(to))
+            {
+                log("遗留安装还在，但 " + to + " 已存在 —— 不动它，两套并存由用户自己清");
+                return;
+            }
+            log("发现分版本之前的遗留安装，先迁到 " + Path.GetFileName(to));
+            Try(() => Directory.Move(legacy, to), log);
+            if (!Directory.Exists(to)) { log("✗ 遗留目录没搬动，后面的注册表跟着不动"); return; }
+
+            Try(() =>
+            {
+                using (var old = Registry.CurrentUser.OpenSubKey(
+                           @"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + LegacyInstallKeyName))
+                {
+                    if (old == null) return;
+                    using (var key = Registry.CurrentUser.CreateSubKey(
+                               @"Software\Microsoft\Windows\CurrentVersion\Uninstall\"
+                               + ProductName + "-" + legacySlug))
+                    {
+                        if (key == null) return;
+                        foreach (string name in old.GetValueNames())
+                        {
+                            object v = old.GetValue(name);
+                            string s = v as string;
+                            if (s != null) s = s.Replace(legacy, to);
+                            // DisplayName 那格补上代号，控制面板里两条才分得开
+                            key.SetValue(name, name == "DisplayName"
+                                ? ProductName + " Vachellia farnesiana"
+                                : (object)s ?? v);
+                        }
+                    }
+                    Registry.CurrentUser.DeleteSubKeyTree(
+                        @"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + LegacyInstallKeyName, false);
+                }
+            }, log);
+
+            // 共用的那一个 Run 槽：指向遗留路径就改成新路径 —— 这是"它还是原来那一版
+            // 在自启"，不是"我把自启抢过来"。
+            Try(() =>
+            {
+                using (var run = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                {
+                    object v = run?.GetValue(RunKeyValueName);
+                    if (v == null) return;
+                    string s = v.ToString();
+                    if (!s.Contains(legacy)) return;
+                    run.SetValue(RunKeyValueName, s.Replace(legacy, to));
+                    log("开机自启改指迁移后的位置（自启归属没变）");
+                }
+            }, log);
+
+            // 旧的无后缀 .lnk 指向搬走的路径，留着就是死链：按新版本名重建再删旧的。
+            foreach (var (oldLnk, newLnk) in new[]
+                     {
+                         (LegacyStartMenuPath(), Path.Combine(
+                             Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs",
+                             ProductName + "-" + legacySlug + ".lnk")),
+                         (LegacyDesktopPath(), Path.Combine(
+                             Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                             ProductName + "-" + legacySlug + ".lnk")),
+                     })
+            {
+                if (!File.Exists(oldLnk)) continue;
+                if (MakeShortcut(newLnk, to, log)) Try(() => File.Delete(oldLnk), log);
+            }
+        }
+
         public static bool Install(Options o)
         {
             try
             {
                 GuardNotInsideTarget(o);
+                MigrateLegacyInstall(o.Log);
                 var payload = Path.GetFullPath(o.PayloadDir);
                 if (!File.Exists(Path.Combine(payload, MainExeName)))
                 {
@@ -334,12 +458,41 @@ namespace Vigil.Setup
                 {
                     if (key == null) return false;
                     if (on) key.SetValue(RunKeyValueName, $"\"{Path.Combine(target, MainExeName)}\"");
-                    else key.DeleteValue(RunKeyValueName, false);
+                    else if (RunPointsAtTarget(AutostartOwner(), target)) key.DeleteValue(RunKeyValueName, false);
+                    else log("开机自启现在指向别的版本，这一版不动它");
                 }
                 log("Run 值 -> " + on);
                 return true;
             }
             catch (Exception ex) { log("✗ 写 Run 值失败：" + ex.Message); return false; }
+        }
+
+        /// <summary>共用那一个 Run 槽当前指向哪个 exe（没注册就是空串，不给 null ——
+        /// 调用点是向导打开时立刻读的，null 会让第一屏直接炸）。</summary>
+        public static string AutostartOwner()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(RunKeyPath))
+                {
+                    object v = key?.GetValue(RunKeyValueName);
+                    return v == null ? "" : v.ToString().Trim('"');
+                }
+            }
+            catch (Exception) { return ""; }
+        }
+
+        /// <summary>自启那一条指的是不是这一版的目标目录。装第二版时用它判断"要不要问用户"。</summary>
+        public static bool RunPointsAtTarget(string owner, string target)
+        {
+            if (string.IsNullOrEmpty(owner)) return false;
+            try
+            {
+                return string.Equals(Path.GetFullPath(owner.Trim('"')),
+                    Path.GetFullPath(Path.Combine(target, MainExeName)),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { return false; }   // 路径非法（遗留的半截值）就当不属于任何版本
         }
 
         public static bool WriteUninstallKey(string target, Action<string> log)
@@ -351,7 +504,7 @@ namespace Vigil.Setup
                     if (key == null) return false;
                     string setup = Path.Combine(target, SetupExeName);
                     string exe = Path.Combine(target, MainExeName);
-                    key.SetValue("DisplayName", ProductName);
+                    key.SetValue("DisplayName", DisplayName);
                     key.SetValue("DisplayVersion", Version());
                     key.SetValue("Publisher", "Wildcreator");
                     key.SetValue("URL", "https://github.com/Wildcreator2010/dsh-status");
@@ -367,11 +520,25 @@ namespace Vigil.Setup
             catch (Exception ex) { log("✗ 写卸载项失败：" + ex.Message); return false; }
         }
 
+        // 快捷方式也按版本分开：两版共用 `Vigil.lnk` 的话，后装的那版会把前一版的
+        // 开始菜单入口直接抢走 —— 表现为"我桌面上那个 Vigil 怎么变成另一个版本了"，
+        // 而且不留任何痕迹（.lnk 就是一个文件，覆盖即消失）。
         public static string StartMenuPath() => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", ProductName + ".lnk");
+            Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs",
+            ProductName + "-" + ProductSlug + ".lnk");
 
         public static string DesktopPath() => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), ProductName + ".lnk");
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            ProductName + "-" + ProductSlug + ".lnk");
+
+        /// <summary>分版本之前的两个无后缀快捷方式路径（迁移要认它们）。</summary>
+        public static string LegacyStartMenuPath() => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs",
+            LegacyInstallKeyName + ".lnk");
+
+        public static string LegacyDesktopPath() => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            LegacyInstallKeyName + ".lnk");
 
         /// <summary>late-bound COM 走 WScript.Shell：net48 里不引 IWshRuntimeLibrary 互操作程序集。</summary>
         public static bool MakeShortcut(string lnk, string target, Action<string> log)

@@ -11,10 +11,21 @@
     <RootNamespace>Vigil</RootNamespace>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.0</Version>
+    <!-- 1.1.0：状态引擎从 CPython 换成 vigil-engine.exe —— 载荷里不再带解释器、
+         引擎多了 pretty 模式，分发的形状变了。数字版本仍然只有这一处：package.cmd、
+         安装向导的 DisplayVersion、量测脚本都经 tools/read_version.py 读它。
+         （注释里刻意不写双连字符那种子命令名：XML 注释不允许出现连续的减号。） -->
+    <Version>1.1.0</Version>
+    <!-- 发布代号 = 区分两个并存版本的标识。这一处是**当前分支**（C++ 引擎）的默认值；
+         出 Python 引擎那一版时由 package.cmd 用 -p:ProductCodename / -p:ProductSlug
+         覆盖成 "Vachellia farnesiana" / "Vachellia"。Slug 是进文件系统与注册表的那一段
+         （Programs\Vigil-Lilium、HKCU\...\Uninstall\Vigil-Lilium），所以必须是单个
+         无空格的词；代号给人看，slug 给机器用。 -->
+    <ProductCodename>Lilium</ProductCodename>
+    <ProductSlug>Lilium</ProductSlug>
     <AssemblyTitle>Vigil · dsh 任务栏状态栏</AssemblyTitle>
     <Product>Vigil</Product>
-    <Description>Vigil —— 嵌在任务栏里的 dsh 会话守望条与控制台（版本代号 Vachellia farnesiana）</Description>
+    <Description>Vigil —— 嵌在任务栏里的 dsh 会话守望条与控制台（版本代号 $(ProductCodename)）</Description>
     <Authors>Wildcreator</Authors>
     <Copyright>Copyright (c) 2026 Wildcreator</Copyright>
     <RepositoryUrl>https://github.com/Wildcreator2010/dsh-status</RepositoryUrl>
@@ -40,6 +51,11 @@
          复制。挂成 AssemblyMetadata 后页面读的是工程文件里的同一个值。
          RepositoryUrl 由 SDK 自动emit，不用重复声明。 -->
     <AssemblyMetadata Include="Authors" Value="$(Authors)" />
+    <!-- 关于页那一行「Vigil 1.1.0 · Lilium」与安装器的目录名/卸载键都从这两个读。
+         不这么做的话就得在 C# 里再抄一遍代号 —— 而两版并存之后抄错的代价不是
+         "页面写着旧名字"，是"两个版本装出来同名同目录，后装的把前一个盖了"。 -->
+    <AssemblyMetadata Include="Codename" Value="$(ProductCodename)" />
+    <AssemblyMetadata Include="Slug" Value="$(ProductSlug)" />
   </ItemGroup>
 
   <ItemGroup>

@@ -16,9 +16,22 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\bar\assets\dsh.ico</ApplicationIcon>
     <WarningLevel>4</WarningLevel>
-    <!-- 版本号不在这里写：package.cmd 用同一个 -p:Version 同时喂主程序和向导，
-         两边 AssemblyVersion 相等才有意义（冒烟的契约门禁看这个）。 -->
+    <!-- 版本号：打包时 package.cmd 用同一个 -p:Version 喂两个工程（全局属性压过这里的值），
+         但开发期 build.cmd 不传参数 —— 这里不写就退回 SDK 默认的 1.0.0，而主程序那边
+         csproj 写死了真实版本，两边一比就成了"已装的是 1.1.0，请升级到 1.0.0"。
+         向导靠这个数判「修复 / 升级到」，写歪了用户点下去装的是旧号。
+         抄的第二份必须与 bar/Vigil.csproj 相等，冒烟的契约门禁比的就是这两个字面值。
+         代号/slug 同理 —— 向导拿它决定装到哪个目录、注册哪个卸载键，两边不一致就会出现
+         "向导装到 Vigil-Lilium、主程序以为自己是 Vigil-Vachellia"这种两台机器都复现不了的怪事。 -->
+    <Version>1.1.0</Version>
+    <ProductCodename>Lilium</ProductCodename>
+    <ProductSlug>Lilium</ProductSlug>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="Codename" Value="$(ProductCodename)" />
+    <AssemblyMetadata Include="Slug" Value="$(ProductSlug)" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="PresentationFramework" />

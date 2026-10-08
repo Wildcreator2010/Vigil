@@ -30,19 +30,25 @@ namespace Vigil
         private const string LegacyRunValue = "dsh-status";
 
         /// <summary>
-        /// 版本号。`VersionText` 是给人看的那一行；数字版本仍归 csproj 的 &lt;Version&gt;，
-        /// 种加词式的代号（Vachellia farnesiana = 甜金合欢，本仓库所在目录的名字）
-        /// 是用户指定的发布标识，不参与任何比较逻辑。
+        /// 版本号。`VersionText` 是给人看的那一行；数字版本与发布代号都归工程文件
+        /// （`&lt;Version&gt;` / `&lt;ProductCodename&gt;`），这里只读不写。
+        /// 种加词式的代号（Vachellia farnesiana = 甜金合欢、Lilium = 百合）是**区分两个
+        /// 并存版本的标识**，不参与任何比较逻辑；`ProductSlug` 是它进文件系统与注册表的
+        /// 形态（Programs\Vigil-Lilium、Uninstall\Vigil-Lilium），所以是单个无空格的词。
+        /// 为什么不再抄成字面量：两版并存以后，抄错的代价不再是"页面写着旧名字"，
+        /// 而是"两个版本装进同一个目录、抢同一个卸载键，后装的把前一个盖掉"。
         /// </summary>
         internal const string ProductName = "Vigil";
-        internal const string VersionCodename = "Vachellia farnesiana";
+        internal static string VersionCodename => AssemblyMetadata("Codename");
+        internal static string ProductSlug => AssemblyMetadata("Slug");
         internal static string VersionText
         {
             get
             {
                 var v = typeof(App).Assembly.GetName().Version;
                 string num = v == null ? "0.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
-                return $"{ProductName} {num} · {VersionCodename}";
+                string code = VersionCodename;
+                return $"{ProductName} {num}" + (code.Length == 0 ? "" : $" · {code}");
             }
         }
 
@@ -211,11 +217,17 @@ namespace Vigil
             }
             if (!owned)
             {
-                RequestPanel(panel);
+                // 一台机器上同时只跑一版 Vigil（两个版本并存以后这条更硬：两个都起来
+                // 会抢同一条任务栏带、同一份 settings.json）。原来这里是**静默**把手
+                // 交给已运行实例的 —— 装了第二版之后，"我双击的为什么没开"变成没有答案
+                // 的谜，所以要说话；但面板交接不能丢，那是改名前就有的有用行为。
+                ShowAlreadyRunning(panel);
                 return 0;
             }
 
             _settings = Settings.Load(SettingsFile);
+            // 抢到互斥体才算"这一版在跑"，名片也跟着只在真的在跑的时候存在
+            WriteRunningInfo();
             Log($"Vigil 启动 interval={_settings.Interval} notify={_settings.Notify} demo={demo ?? "-"} panel={panel ?? "-"}");
 
             var app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -257,6 +269,166 @@ namespace Vigil
         internal static string LogPath => LogFile;
         internal static string DataDir => StateDir;
         internal static string PanelRequestFile => Path.Combine(StateDir, "panel.request");
+
+        // -------------------------------------------------- 第二实例的告知
+
+        /// <summary>正在跑的那一版留下的名片，供第二个实例说明"起来的是哪一个版本"。
+        /// 两个版本共用一个数据目录，所以这张名片天然是跨版本的。
+        /// 它是**信息**不是锁：真正常用的判据是互斥体，这儿只为了把话说清楚，
+        /// 因此读的时候必须校验 PID 还活着（被 taskkill 强杀的那次来不及删）。</summary>
+        internal static string RunningInfoFile => Path.Combine(StateDir, "running.json");
+
+        sealed class RunningInfo
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("pid")] public int Pid { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("exe")] public string Exe { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("codename")] public string Codename { get; set; }
+        }
+
+        static void WriteRunningInfo()
+        {
+            try
+            {
+                var info = new RunningInfo
+                {
+                    Pid = System.Diagnostics.Process.GetCurrentProcess().Id,
+                    Exe = Environment.ProcessPath ?? "",
+                    Codename = VersionCodename,
+                };
+                Directory.CreateDirectory(StateDir);
+                File.WriteAllText(RunningInfoFile,
+                    System.Text.Json.JsonSerializer.Serialize(info));
+            }
+            catch (Exception ex) { Log("写运行中名片失败: " + ex.Message); }
+        }
+
+        static void ClearRunningInfo()
+        {
+            try { if (File.Exists(RunningInfoFile)) File.Delete(RunningInfoFile); }
+            catch (Exception ex) { Log("清运行中名片失败: " + ex.Message); }
+        }
+
+        static RunningInfo ReadRunningInfo()
+        {
+            try
+            {
+                if (!File.Exists(RunningInfoFile)) return null;
+                var info = System.Text.Json.JsonSerializer.Deserialize<RunningInfo>(
+                    File.ReadAllText(RunningInfoFile));
+                if (info == null || info.Pid <= 0) return null;
+                // 陈旧名片比没有名片更坏：它会指着一条已经不存在的安装说"那个版本在跑"
+                try { System.Diagnostics.Process.GetProcessById(info.Pid); }
+                catch (ArgumentException) { return null; }
+                catch (Exception) { return info; }    // 活着但没权限看：仍算在跑
+                return info;
+            }
+            catch (Exception) { return null; }       // 半截 JSON 同理：宁可不提版本
+        }
+
+        /// <summary>
+        /// 已经有实例在跑时给用户一个说得清楚的窗，而不是静默退出。
+        ///
+        /// 三条约束决定了它长这样：
+        /// · 是界面不是对话框 —— 用面板同一套资源键（页底/墨/卡片/描边/品牌橙），
+        ///   不碰 Win32 MessageBox（那东西深浅色都不跟产品走）；
+        /// · **非模态且定时自收**（8 秒）—— 冒烟与打包验证都是无人值守地连开 Vigil，
+        ///   一个会一直等的模态窗能把整轮量测挂死，那条超时还是唯一出口的那种；
+        /// · 主按钮仍然是"叫出已在运行的面板"（写 panel.request）—— 两版并存之前
+        ///   双击图标就是这个行为，告知不该把它换掉。
+        /// </summary>
+        static void ShowAlreadyRunning(string page)
+        {
+            var info = ReadRunningInfo();
+            string who = info == null ? "" :
+                (string.IsNullOrEmpty(info.Codename) ? "" : "（版本 " + info.Codename + "）");
+            try
+            {
+                bool ownsApp = false;
+                var app = System.Windows.Application.Current;
+                if (app == null) { app = new System.Windows.Application { ShutdownMode = ShutdownMode.OnExplicitShutdown }; ownsApp = true; }
+                ApplyFluentTheme();
+
+                var title = new System.Windows.Controls.TextBlock
+                {
+                    Text = "Vigil 已经在运行",
+                    FontSize = 18,
+                    FontWeight = FontWeights.SemiBold,
+                    Margin = new Thickness(0, 0, 0, 8),
+                };
+                title.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, Ui.InkKey);
+                var body = new System.Windows.Controls.TextBlock
+                {
+                    Text = "同一台机器上同时只能开一个 Vigil。" + who
+                           + (info != null && !string.IsNullOrEmpty(info.Exe) ? "\n正在运行的是：" + info.Exe : ""),
+                    FontSize = 13,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 0, 0, 16),
+                };
+                body.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, Ui.InkDimKey);
+
+                var open = new System.Windows.Controls.Button
+                {
+                    Content = "打开它的面板",
+                    MinWidth = 120,
+                    Height = 30,
+                    Margin = new Thickness(0, 0, 8, 0),
+                    Padding = new Thickness(12, 0, 12, 0),
+                };
+                open.SetResourceReference(System.Windows.Controls.Button.BackgroundProperty, AccentBrushKey);
+                open.SetResourceReference(System.Windows.Controls.Button.ForegroundProperty, "ControlFillColorDefaultBrush");
+                var close = new System.Windows.Controls.Button { Content = "知道了", MinWidth = 90, Height = 30 };
+                var actions = new System.Windows.Controls.StackPanel
+                {
+                    Orientation = System.Windows.Controls.Orientation.Horizontal,
+                    HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+                };
+                actions.Children.Add(open);
+                actions.Children.Add(close);
+
+                var card = new System.Windows.Controls.Border
+                {
+                    CornerRadius = new CornerRadius(8),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(18),
+                    Child = new System.Windows.Controls.StackPanel { Children = { title, body, actions } },
+                };
+                card.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, Ui.CardKey);
+                card.SetResourceReference(System.Windows.Controls.Border.BorderBrushProperty, Ui.LineKey);
+
+                var win = new System.Windows.Window
+                {
+                    Title = "Vigil 已经在运行",
+                    Content = card,
+                    SizeToContent = SizeToContent.WidthAndHeight,
+                    ResizeMode = ResizeMode.NoResize,
+                    WindowStyle = WindowStyle.SingleBorderWindow,
+                    ShowInTaskbar = true,
+                    Topmost = true,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    Background = System.Windows.Media.Brushes.Transparent,
+                };
+                win.SetResourceReference(System.Windows.Window.BackgroundProperty, Ui.PageKey);
+
+                void Dismiss(object s, RoutedEventArgs e) { win.Close(); }
+                open.Click += (s, e) => { RequestPanel(page); win.Close(); };
+                close.Click += Dismiss;
+
+                // 8 秒自收：无人值守的连开（冒烟、量测脚本）等不到人点按钮
+                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
+                timer.Tick += (s, e) => { timer.Stop(); win.Close(); };
+                timer.Start();
+                win.Closed += (s, e) => timer.Stop();
+                win.ShowDialog();
+                if (ownsApp) app.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                // 弹窗本身失败不能把这条路堵死：交接照做，人至少不会觉得"双击没反应"
+                Log("弹「已在运行」提示失败: " + ex.Message);
+                RequestPanel(page);
+            }
+        }
+
 
         internal static void RestartEngine() => RestartClient();
         internal static void RequestBalanceRefresh() => RefreshBalance();
@@ -1876,6 +2048,7 @@ namespace Vigil
                 _watchdog?.Stop();
                 _tween?.Stop();
                 _client?.Dispose();
+                ClearRunningInfo();
                 var hwnd = new System.Windows.Interop.WindowInteropHelper(_window).Handle;
                 Native.Undock(hwnd);
                 if (_tray != null)

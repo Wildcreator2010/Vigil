@@ -35,6 +35,23 @@ namespace Vigil.Setup
             dirRow.Children.Add(browse);
 
             var auto = new CheckBox { Content = "开机自动启动", IsChecked = true, Foreground = Ink, Margin = new Thickness(0, 0, 0, 6) };
+            // 一台机器上只有一个开机自启槽（两版各写一条 = 开机两版都启动，第二版
+            // 必然弹「同时只能开一个」，用户一开机就被骚扰）。所以槽已被别的版本占着时，
+            // 这里必须**说出来**并且默认不勾 —— 不打招呼就把别人的自启拨走是错的。
+            TextBlock autoNotice = null;
+            string owner = Installer.AutostartOwner();
+            if (owner.Length > 0 && !Installer.RunPointsAtTarget(owner, o.TargetDir))
+            {
+                auto.IsChecked = false;
+                auto.Content = "开机自动启动（改由本版本负责）";
+                autoNotice = new TextBlock
+                {
+                    Text = "这台机器上已经有一个 Vigil 注册了开机自启：" + owner
+                           + "\n自启槽只有一个，勾上就是把自启交给正在安装的这一版；不勾则保持原样。",
+                    FontSize = 12, Foreground = Dim, Margin = new Thickness(0, 0, 0, 10),
+                    TextWrapping = TextWrapping.Wrap,
+                };
+            }
             var startmenu = new CheckBox { Content = "创建开始菜单快捷方式", IsChecked = true, Foreground = Ink, Margin = new Thickness(0, 0, 0, 6) };
             var desk = new CheckBox { Content = "创建桌面快捷方式", IsChecked = false, Foreground = Ink, Margin = new Thickness(0, 0, 0, 14) };
             var launch = new CheckBox { Content = "装完立即启动 Vigil", IsChecked = true, Foreground = Ink, Margin = new Thickness(0, 0, 0, 14) };
@@ -63,6 +80,7 @@ namespace Vigil.Setup
             col.Children.Add(status);
             col.Children.Add(dirRow);
             col.Children.Add(auto);
+            if (autoNotice != null) col.Children.Add(autoNotice);
             col.Children.Add(startmenu);
             col.Children.Add(desk);
             col.Children.Add(launch);

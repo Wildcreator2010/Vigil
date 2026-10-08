@@ -369,12 +369,25 @@ def check_python_resolution() -> None:
 
 SETUP_EXE = os.path.join(HERE, "setup", "bin", "Release", "net48", "Vigil-Setup.exe")
 BAR_OUT = os.path.join(HERE, "bar", "bin", "Release", "net10.0-windows")
-UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Vigil"
+
+
+def cs_property(name: str, project: str = os.path.join("bar", "Vigil.csproj")) -> str:
+    """读工程文件里的一个属性 —— 与 package.cmd、read_version.py 同一个来源。"""
+    text = open(os.path.join(HERE, project), encoding="utf-8-sig").read()
+    m = re.search(rf"<{name}>([^<]+)</{name}>", text)
+    return m.group(1).strip() if m else ""
+
+
+# 两版并存以后，安装名是 Vigil-<slug>（Programs\Vigil-Lilium、Uninstall\Vigil-Lilium、
+# Vigil-Lilium.lnk）。这几个名字以前在门禁里是写死的 "Vigil" —— 写死的那份一旦装上
+# 就指不到刚装的那一版，红的看起来像安装器坏了，其实是门禁跟着旧身份一起冻住了。
+INSTALL_KEY = "Vigil-" + cs_property("ProductSlug")
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall" + "\\" + INSTALL_KEY
 E2E_ROOT = os.path.join(os.environ.get("TEMP", HERE), "vigil-e2e")
 E2E_PKG = os.path.join(E2E_ROOT, "pkg")             # 模拟分发目录：Vigil-Setup.exe + app\
 E2E_TARGET = os.path.join(E2E_ROOT, "installed")    # 安装目标
 E2E_LNK = os.path.join(os.environ.get("APPDATA", HERE),
-                       "Microsoft", "Windows", "Start Menu", "Programs", "Vigil.lnk")
+                       "Microsoft", "Windows", "Start Menu", "Programs", INSTALL_KEY + ".lnk")
 
 
 def reg_kv(key: str, value: str) -> str | None:
@@ -1163,6 +1176,15 @@ def check_setup_contract() -> None:
           "任一边丢了那对引号，安装目录带空格时开机路径就断")
     check("数据目录名两边都是 Vigil",
           'StateDirName = "Vigil"' in app_cs and '"Vigil"' in inst_cs, "")
+
+    # 身份三件套在两个工程文件里各写了一份。打包时 package.cmd 用 -p: 同时压两边，
+    # 值相等是白来的；开发期 build.cmd 不传参数，这时才靠这两个字面值自己对齐。
+    # 歪了的症状很隐蔽：向导把同版本认成升级，点「升级到」装出来的是旧号。
+    for prop in ("Version", "ProductCodename", "ProductSlug"):
+        bar_v = cs_property(prop)
+        setup_v = cs_property(prop, os.path.join("setup", "Vigil.Setup.csproj"))
+        check(f"两个工程的 <{prop}> 相等",
+              bar_v != "" and bar_v == setup_v, f"bar={bar_v!r} setup={setup_v!r}")
 
 
 def check_engine_copy() -> None:
