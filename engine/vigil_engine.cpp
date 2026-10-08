@@ -737,6 +737,54 @@ static Verdict Classify(const Session &s, double mtime, double ts) {
     return v;
 }
 
+// ---------------------------------------------------------------- 解析缓存
+// 照 read_session_cached：按 (大小, mtime) 复用解析结果，LRU 逐个淘汰。
+// 上限 200 与 _CACHE_MAX 同值 —— 那边注释里记着教训：会话数一超上限就用 clear()
+// 的写法等于**永远不命中**，而这恰恰是最需要它的时候（本机 59 个会话时单轮 1567ms）。
+//
+// 命中数每轮打到 stderr 的 CACHE 行：常驻引擎"这一轮到底重解了几个文件"本来就是
+// 排障要看的东西，不是只为测试才有的开关。
+struct CacheEntry {
+    std::string path;
+    long long size = 0;
+    double mtime = 0;
+    std::shared_ptr<Session> sess;
+};
+static std::vector<CacheEntry> gCache;
+static const size_t kCacheMax = 200;
+
+static long long FileSize(const std::string &path) {
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &d)) return -1;
+    ULARGE_INTEGER u; u.LowPart = d.nFileSizeLow; u.HighPart = d.nFileSizeHigh;
+    return (long long)u.QuadPart;
+#else
+    struct stat st{};
+    if (stat(path.c_str(), &st) != 0) return -1;
+    return (long long)st.st_size;
+#endif
+}
+
+static std::shared_ptr<Session> ReadSessionCached(const std::string &path, double mtime,
+                                                  long long size, long long &hits) {
+    for (size_t i = 0; i < gCache.size(); ++i) {
+        if (gCache[i].path == path && gCache[i].size == size && gCache[i].mtime == mtime) {
+            ++hits;
+            auto e = gCache[i];
+            gCache.erase(gCache.begin() + i);
+            gCache.push_back(e);                       // move_to_end
+            return e.sess;
+        }
+    }
+    std::vector<unsigned char> raw;
+    auto s = std::make_shared<Session>();
+    if (ReadWholeFile(path, raw)) *s = ReadSessionFromPlain(Unpack(raw));
+    gCache.push_back({path, size, mtime, s});
+    while (gCache.size() > kCacheMax) gCache.erase(gCache.begin());
+    return s;
+}
+
 // ---------------------------------------------------------------- 一行会话
 struct Row {
     Verdict v;
@@ -748,7 +796,7 @@ struct Row {
     Todo todo;
 };
 
-static std::vector<Row> Scan(const std::string &globRoot, double ts) {
+static std::vector<Row> Scan(const std::string &globRoot, double ts, long long &hits) {
     std::vector<std::string> files;
     WalkSessions(globRoot, 1, files);
     std::vector<std::pair<double, std::string>> stamped;
@@ -761,27 +809,37 @@ static std::vector<Row> Scan(const std::string &globRoot, double ts) {
               [](const std::pair<double, std::string> &a, const std::pair<double, std::string> &b) {
                   return a.first > b.first;                        // mtime 倒序
               });
+
+    // 文件已经消失的缓存条目先丢掉（Python 的 scan 里同一段）
+    std::vector<std::string> alive;
+    for (const auto &it : stamped) alive.push_back(it.second);
+    for (size_t i = 0; i < gCache.size();) {
+        bool keep = false;
+        for (const auto &a : alive) if (a == gCache[i].path) { keep = true; break; }
+        if (keep) ++i; else gCache.erase(gCache.begin() + i);
+    }
+
     std::vector<Row> out;
     for (const auto &it : stamped) {
-        std::vector<unsigned char> raw;
-        if (!ReadWholeFile(it.second, raw)) continue;
-        Session s = ReadSessionFromPlain(Unpack(raw));
+        long long size = FileSize(it.second);
+        std::shared_ptr<Session> sp = ReadSessionCached(it.second, it.first, size, hits);
         Row r;
         r.path = it.second;
-        r.v = Classify(s, it.first, ts);
+        r.v = Classify(*sp, it.first, ts);
         r.key = SessionKey(it.second);
-        r.cwd = s.cwd;
-        r.project = ProjectName(s.cwd, ProjectFallback(it.second));
-        r.title = s.title;
-        r.records = s.records;
+        r.cwd = sp->cwd;
+        r.project = ProjectName(sp->cwd, ProjectFallback(it.second));
+        r.title = sp->title;
+        r.records = sp->records;
         r.hasRecords = true;
-        r.usageIn = s.usageIn; r.usageOut = s.usageOut; r.usageTotal = s.usageTotal;
-        r.todo = TodoProgress(s.lastTodo.get());
+        r.usageIn = sp->usageIn; r.usageOut = sp->usageOut; r.usageTotal = sp->usageTotal;
+        r.todo = TodoProgress(sp->lastTodo.get());
         r.priority = StateOf(r.v.state)->priority;
         out.push_back(std::move(r));
     }
     return out;
 }
+
 
 // 主状态取"最近在干活的那个"；等你处理的单独列出来。照 pick_primary 一比一。
 static void PickPrimary(const std::vector<Row> &rows, const Row *&primary,
@@ -1004,11 +1062,16 @@ static void EmitSessionDict(W &w, const Row &r) {
 }
 
 // ---------------------------------------------------------------- 整帧快照
-static std::string Snapshot(double ts, bool wantBalance) {
+static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nullptr) {
+    long long hits = 0;
     std::string home = getenv("USERPROFILE") ? getenv("USERPROFILE") : "";
     std::string root = home + "\\.dsh\\sessions";
     bool running = HarnessRunning();
-    std::vector<Row> rows = Scan(root, ts);
+    std::vector<Row> rows = Scan(root, ts, hits);
+    // 每轮一行诊断：常驻时看"这轮重解了几个文件"，就能看出缓存到底有没有在工作
+    std::fprintf(stderr, "CACHE files=%zu hits=%lld\n", rows.size(), hits);
+    std::fflush(stderr);
+    if (hitsOut) *hitsOut = hits;
 
     const Row *primary = nullptr;
     std::vector<const Row *> waiting;
@@ -1132,8 +1195,38 @@ int main(int argc, char **argv) {
         std::printf("%s\n", Snapshot(strtod(argv[2], nullptr), wantBalance).c_str());
         return 0;
     }
+    if (mode == "--watch") {
+        // 照 Python 的 --watch：每 interval 秒出一行 NDJSON，供 StateClient 按行读。
+        // 余额的 TTL / refresh.token 强刷那一层还没搬，先把节奏与缓存做对。
+        double interval = 2.0;
+        bool wantBalance = true;
+        for (int i = 2; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--interval" && i + 1 < argc) interval = strtod(argv[++i], nullptr);
+            else if (a == "--no-balance") wantBalance = false;
+        }
+        if (interval <= 0) interval = 2.0;
+        for (;;) {
+            struct timespec t{};
+            timespec_get(&t, TIME_UTC);
+            double ts = (double)t.tv_sec + t.tv_nsec / 1e9;
+            std::printf("%s\n", Snapshot(ts, wantBalance).c_str());
+            std::fflush(stdout);
+            // 分片睡：整段 Sleep(interval) 时外部 terminate/kill 也是立刻生效的，
+            // 但分片能让"睡够就走"不累积误差，且将来插 refresh.token 检查有落点。
+            for (double slept = 0; slept < interval; slept += 0.1) {
+#if defined(_WIN32)
+                Sleep(100);
+#else
+                struct timespec nap{0, 100000000L}; nanosleep(&nap, nullptr);
+#endif
+            }
+        }
+        return 0;
+    }
     std::printf("用法: vigil-engine --session <会话文件> <mtime> <now>\n"
                 "      vigil-engine --classify <mtime> <now>  < records.jsonl\n"
-                "      vigil-engine --snapshot <now> [--no-balance]\n");
+                "      vigil-engine --snapshot <now> [--no-balance]\n"
+                "      vigil-engine --watch [--interval 秒] [--no-balance]\n");
     return 2;
 }
