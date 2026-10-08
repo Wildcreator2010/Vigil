@@ -49,7 +49,10 @@ def walk(a, b, path=""):
     if isinstance(a, bool) or isinstance(b, bool):
         return [] if a == b else [f"{path}: py={a!r} cpp={b!r}"]
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return [] if abs(float(a) - float(b)) < 0.55 else [f"{path}: py={a!r} cpp={b!r}"]
+        # 容差 0.55 曾经把"age_sec 从一位小数被改成整数秒"整个吞掉 —— 变异测试当场
+        # 抓到：注入那个改动，对照器照样报"一致"。age_sec 两边都是 %.1f，
+        # 该逐字相等；其余数值是计数，也该精确相等。留 0.05 只给浮点表示差异。
+        return [] if abs(float(a) - float(b)) < 0.05 else [f"{path}: py={a!r} cpp={b!r}"]
     return [] if a == b else [f"{path}: py={a!r} cpp={b!r}"]
 
 
