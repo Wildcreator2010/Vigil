@@ -128,6 +128,9 @@ struct JValue {
     enum Kind { Null, Bool, Num, Str, Arr, Obj } kind = Null;
     bool b = false;
     double num = 0;
+    // 整数还是浮点：C++ 这边一律 double，而 Python 的 f-string 走的是 str()，
+    // 12 与 12.0 打出来不一样（--pretty 的轮次是整数、age_sec 是浮点）。
+    bool isInt = false;
     std::string str;
     std::vector<JValue> arr;
     std::vector<std::pair<std::string, JValue>> obj;      // 保序；会话记录字段少，线性找够用
@@ -187,7 +190,10 @@ struct Parser {
             if (!Digits()) { Fail = true; return; }
         }
         v.kind = JValue::Num;
-        v.num = strtod(s.substr(start, i - start).c_str(), nullptr);
+        std::string tok = s.substr(start, i - start);
+        v.isInt = tok.find('.') == std::string::npos &&
+                  tok.find('e') == std::string::npos && tok.find('E') == std::string::npos;
+        v.num = strtod(tok.c_str(), nullptr);
     }
 
     void Value(JValue &v) {
@@ -1603,6 +1609,103 @@ static std::string ToJson(const Verdict &v) {
     return w.o;
 }
 
+// ---------------------------------------------------------------- 详细视图
+// README 的排障那一条（"状态一直待命，看看 ~/.dsh/sessions 到底在不在动"）走的是
+// --pretty，而目标机上没有 Python —— 所以这一格必须跟着引擎走，不然那句排障指引
+// 对装了产物的人就是一句空话。
+//
+// 刻意**不**从内存里的 rows/primary 直接拼，而是把 Snapshot() 那份 JSON 读回来再拼：
+// 判定的事实只有一份，界面文案与详细视图就不会各说各话（这个引擎一路的坑都是
+// "同一个事实两处算，两处漂移"）。Python 那边也是同一个形状 —— render_pretty(snap)。
+//
+// AsText 要照 Python 的 f-string（= str(v)）而不是 C++ 的 to_string：
+// None→"None"、True/False、整数不带小数点、浮点走 repr。这里只用得到
+// 整数与"已舍入到 1 位小数"的浮点两种，所以 %.1f 就是 repr。
+static std::string AsText(const JValue *v) {
+    if (!v) return "None";
+    switch (v->kind) {
+        case JValue::Null: return "None";
+        case JValue::Bool: return v->b ? "True" : "False";
+        case JValue::Str: return v->str;
+        case JValue::Num: {
+            char buf[40];
+            if (v->isInt) snprintf(buf, sizeof buf, "%lld", (long long)v->num);
+            else snprintf(buf, sizeof buf, "%.1f", v->num);
+            return buf;
+        }
+        default: return "";
+    }
+}
+
+static bool Truthy(const JValue *v) {
+    if (!v) return false;
+    switch (v->kind) {
+        case JValue::Null: return false;
+        case JValue::Bool: return v->b;
+        case JValue::Num: return v->num != 0;
+        case JValue::Str: return !v->str.empty();
+        case JValue::Arr: return !v->arr.empty();
+        case JValue::Obj: return !v->obj.empty();
+    }
+    return false;
+}
+
+static std::string RenderPretty(const JValue &snap) {
+    // 没有主会话时 Python 是 `snap["session"] or {}` —— 空对象，不是 null
+    JValue empty;
+    const JValue *sess = snap.at("session");
+    if (!sess || sess->kind != JValue::Obj) sess = &empty;
+    std::string out;
+    auto line = [&](const std::string &s) { if (!out.empty()) out += '\n'; out += s; };
+    line("状态    " + AsText(snap.at("label")) + "  (" + AsText(snap.at("state")) + ")");
+    line(std::string("应用    ") + (Truthy(snap.at("app_running")) ? "运行中" : "未运行"));
+    const JValue *proj = sess->at("project");
+    line("项目    " + (Truthy(proj) ? proj->str : std::string("-")));
+    if (Truthy(sess->at("title"))) line("标题    " + AsText(sess->at("title")));
+    // Python 是 `if s.get("turn") is not None`：0 也算"有轮次"，只有 null 才跳过
+    const JValue *turn = sess->at("turn");
+    if (turn && turn->kind != JValue::Null)
+        line("轮次    T" + AsText(turn) + "/S" + AsText(sess->at("step")) +
+             "  最后事件 " + AsText(sess->at("last_event")) +
+             "  " + AsText(sess->at("age_sec")) + "s 前");
+    const JValue *pend = sess->at("pending");
+    if (Truthy(pend)) {
+        line("等你    " + AsText(pend->at("text")));
+        const JValue *opts = pend->at("options");
+        if (Truthy(opts)) {
+            std::string joined;
+            for (size_t i = 0; i < opts->arr.size(); ++i) {
+                if (i) joined += " / ";
+                joined += AsText(&opts->arr[i]);
+            }
+            line("选项    " + joined);
+        }
+    }
+    if (Truthy(sess->at("error"))) line("错误    " + AsText(sess->at("error")));
+    const JValue *todo = sess->at("todo");
+    if (Truthy(todo))
+        line("任务    " + AsText(todo->at("done")) + "/" + AsText(todo->at("total")) +
+             " 完成，" + AsText(todo->at("in_progress")) + " 进行中");
+    const JValue *bal = snap.at("balance");
+    if (bal && Truthy(bal->at("available")))
+        line("余额    " + AsText(bal->at("currency")) + " " + AsText(bal->at("total")) +
+             "（赠送 " + AsText(bal->at("granted")) + " / 充值 " +
+             AsText(bal->at("topped_up")) + "）");
+    else
+        line("余额    不可用：" + AsText(bal ? bal->at("error") : nullptr));
+    const JValue *wait = snap.at("waiting");
+    if (wait && wait->kind == JValue::Arr) {
+        for (const auto &w : wait->arr) {
+            // int(age_sec)：向零截断，且用的是**已舍入**的那个值（与 Python 同）
+            const JValue *age = w.at("age_sec");
+            long long secs = age ? (long long)age->num : 0;
+            line("待处理  " + AsText(w.at("project")) + "：" + AsText(w.at("text")) +
+                 "（" + std::to_string(secs) + "s 前）");
+        }
+    }
+    return out;
+}
+
 // 现在 7 条，且 flag 是全局扫的（原来只认 argv[2]，`--json --no-balance` 那种
 // 不带位置的调用形状根本走不通 —— 而 App.cs:757 就是这么调的）
 static double NowSeconds() {
@@ -1622,6 +1725,23 @@ int main(int argc, char **argv) {
     };
     std::string mode = a.empty() ? "" : a[0];
     bool wantBalance = !has("--no-balance");
+    // --pretty 是"同一帧快照换一种画法"，不是一个独立的数据源：拿 Snapshot() 已经
+    // 拼好的 JSON 读回来再画，界面文案与详细视图共用同一份事实（这个引擎一路的坑
+    // 都是"同一个事实两处算，两处漂移"）。
+    // 优先级照 dsh_state.py:1076-1082：state-only > json > pretty；而 --demo 在那
+    // 之前就 return 了 —— 所以 demo 那一支**永远出 JSON**，不跟着 --pretty 走。
+    bool pretty = has("--pretty");
+    auto emitFrame = [&](const std::string &frame) -> int {
+        if (!pretty) { std::printf("%s\n", frame.c_str()); return 0; }
+        JValue j;
+        if (!json::Parse(frame, j)) {          // 自己造的帧解不开 = 引擎坏了
+            std::fprintf(stderr, "帧不是合法 JSON，原样输出\n");
+            std::printf("%s\n", frame.c_str());
+            return 1;
+        }
+        std::printf("%s\n", RenderPretty(j).c_str());
+        return 0;
+    };
     // C# 侧的形状：`--json --no-balance`（一次性快照）、`--demo STATE --json`、
     // `--state-only`。--json 在两边都只是"出机器可读的一行"，与 --snapshot 同义。
     if (mode == "--json" || mode == "--state-only") {
@@ -1630,9 +1750,11 @@ int main(int argc, char **argv) {
             size_t p = out.find("\"state\":\"");
             size_t q = p == std::string::npos ? std::string::npos : out.find('"', p + 9);
             std::printf("%s\n", p == std::string::npos ? "" : out.substr(p + 9, q - p - 9).c_str());
-        } else std::printf("%s\n", out.c_str());
-        return 0;
+            return 0;
+        }
+        return emitFrame(out);
     }
+    if (mode == "--pretty") return emitFrame(Snapshot(NowSeconds(), wantBalance));
     if (mode == "--demo") {
         std::string state = a.size() > 1 ? a[1] : "";
         bool known = false;
@@ -1644,7 +1766,9 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "\n");
             return 2;
         }
-        // demo 与 Python 一样不查余额
+        // demo 与 Python 一样不查余额，也一样**只出 JSON**（dsh_state.py:1065 在
+        // pretty 分派之前就 return 了）—— 视觉自检走的是 --demo X --json，别在这里
+        // 因为全局 --pretty 而改道。
         std::printf("%s\n", Snapshot(NowSeconds(), false, &state).c_str());
         return 0;
     }
@@ -1673,8 +1797,7 @@ int main(int argc, char **argv) {
     if (mode == "--snapshot") {
         // <now> 可省：省略就是"现在"，与 --json 同义
         double ts = a.size() >= 2 ? strtod(a[1].c_str(), nullptr) : NowSeconds();
-        std::printf("%s\n", Snapshot(ts, wantBalance).c_str());
-        return 0;
+        return emitFrame(Snapshot(ts, wantBalance));
     }
     if (mode == "--watch") {
         double interval = strtod(valueOf("--interval", "2").c_str(), nullptr);
@@ -1729,6 +1852,7 @@ int main(int argc, char **argv) {
     }
     std::printf("用法: vigil-engine --watch [--interval 秒] [--no-balance]\n"
                 "      vigil-engine --json [--no-balance]        一次性快照\n"
+                "      vigil-engine --pretty [--no-balance]      详细视图（README 排障那条）\n"
                 "      vigil-engine --state-only                 只出状态码\n"
                 "      vigil-engine --demo <状态码>              伪造一帧，视觉自检\n"
                 "      vigil-engine --states                     打印状态图例\n"
