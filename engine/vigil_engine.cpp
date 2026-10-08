@@ -1010,6 +1010,7 @@ static Text ComposeText(const Row *primary, const std::string &state, const std:
 struct W {
     std::string o;
     bool first = true;
+    bool outerFirst = true;     // beginElement/endElement 之间借用
     void key(const std::string &k) { if (!first) o += ','; first = false; json::EmitStr(o, k); o += ':'; }
     void str(const std::string &k, const std::string &v) { key(k); json::EmitStr(o, v); }
     void nul(const std::string &k) { key(k); o += "null"; }
@@ -1027,7 +1028,28 @@ struct W {
     void begin(const std::string &k) { key(k); o += '{'; first = true; }
     void beginArr(const std::string &k) { key(k); o += '['; }
     void end() { o += '}'; first = false; }
+    // 数组里的元素本身是个对象：进来时先把 first 存起来、置成"元素内第一个键"，
+    // 出去再交还外层 —— 外层该不该在下个键前补逗号，跟元素内无关。
+    // 没有这两个方法的话，调用方就得自己 `bool saved = w.first; …; w.first = saved;`
+    // （原来有三处这么写，逗号错位只有整帧 JSON 才看得出来）。
+    void beginElement() { o += '{'; outerFirst = first; first = true; }
+    void endElement() { o += '}'; first = outerFirst; }
 };
+
+// pending 那一格在三处出现（classify 的返回、sessions 列表行、snapshot 的 session 格），
+// 形状同一个、只差 text 的长度：列表行截到 120（dsh_state.py:551），另外两处不截。
+// textLimit=0 表示不截。options 一律不截不设条数上限 —— 裁决写在 spec §4。
+static void EmitPending(W &w, const Pending &p, size_t textLimit) {
+    if (!p.ok) { w.nul("pending"); return; }
+    w.begin("pending");
+    w.str("kind", p.kind);
+    w.optStr("tool", p.tool);
+    w.str("text", textLimit ? Utf8Trunc(p.text, textLimit) : p.text);
+    w.beginArr("options");
+    for (size_t i = 0; i < p.options.size(); ++i) { if (i) w.o += ','; json::EmitStr(w.o, p.options[i]); }
+    w.o += ']';
+    w.end();
+}
 
 static void EmitVerdict(W &w, const Verdict &v) {
     w.str("state", v.state);
@@ -1037,16 +1059,7 @@ static void EmitVerdict(W &w, const Verdict &v) {
     w.str("end_reason", v.endReason);          // 恒为字符串：Python 给的是 ""，不是 null
     if (v.hasTurn) w.num("turn", v.turn); else w.nul("turn");
     if (v.hasStep) w.num("step", v.step); else w.nul("step");
-    if (v.pending.ok) {
-        w.begin("pending");
-        w.str("kind", v.pending.kind);
-        w.optStr("tool", v.pending.tool);
-        w.str("text", v.pending.text);
-        w.key("options"); w.o += '[';
-        for (size_t i = 0; i < v.pending.options.size(); ++i) { if (i) w.o += ','; json::EmitStr(w.o, v.pending.options[i]); }
-        w.o += ']';
-        w.end();
-    } else w.nul("pending");
+    EmitPending(w, v.pending, 0);
     if (!v.error.empty()) { w.key("error"); json::EmitStr(w.o, v.error); }
 }
 
@@ -1072,16 +1085,7 @@ static void EmitSessionRow(W &w, const Row &r) {
     w.begin("usage_total");
     w.num("input", r.usageIn); w.num("output", r.usageOut); w.num("total", r.usageTotal);
     w.end();
-    if (r.v.pending.ok) {
-        w.begin("pending");
-        w.str("kind", r.v.pending.kind);
-        w.optStr("tool", r.v.pending.tool);
-        w.str("text", Utf8Trunc(r.v.pending.text, 120));
-        w.key("options"); w.o += '[';
-        for (size_t i = 0; i < r.v.pending.options.size(); ++i) { if (i) w.o += ','; json::EmitStr(w.o, r.v.pending.options[i]); }
-        w.o += ']';
-        w.end();
-    } else w.nul("pending");
+    EmitPending(w, r.v.pending, 120);
 }
 
 // snapshot 的 session 那一格：字段白名单照 Python 的 dict 推导逐项搬
@@ -1098,16 +1102,7 @@ static void EmitSessionDict(W &w, const Row &r) {
     { char buf[32]; snprintf(buf, sizeof buf, "%.1f", r.v.ageSec); w.key("age_sec"); w.o += buf; }
     w.optStr("last_event", r.v.lastEvent);
     w.optStr("last_tool", r.v.lastTool);
-    if (r.v.pending.ok) {
-        w.begin("pending");
-        w.str("kind", r.v.pending.kind);
-        w.optStr("tool", r.v.pending.tool);
-        w.str("text", r.v.pending.text);
-        w.key("options"); w.o += '[';
-        for (size_t i = 0; i < r.v.pending.options.size(); ++i) { if (i) w.o += ','; json::EmitStr(w.o, r.v.pending.options[i]); }
-        w.o += ']';
-        w.end();
-    } else w.nul("pending");
+    EmitPending(w, r.v.pending, 0);
     w.str("end_reason", r.v.endReason);
     // Python 只在 error 那一支才往 out 里塞 "error"，别的状态根本没这一格
     if (!r.v.error.empty()) { w.key("error"); json::EmitStr(w.o, r.v.error); }
@@ -1538,7 +1533,7 @@ static std::string Snapshot(double ts, bool wantBalance,
     w.str("strip_right", t.stripRight);
     w.str("tooltip", t.tooltip);
     w.str("tooltip_full", t.tooltipFull);
-    w.key("tip_lines"); w.o += '[';
+    w.beginArr("tip_lines");
     for (size_t i = 0; i < t.tipLines.size(); ++i) { if (i) w.o += ','; json::EmitStr(w.o, t.tipLines[i]); }
     w.o += ']';
     w.boolean("attention", state == "needs_action" || state == "error");
@@ -1550,19 +1545,20 @@ static std::string Snapshot(double ts, bool wantBalance,
     if (primary) EmitSessionDict(w, *primary);
     w.end();
 
-    w.key("waiting"); w.o += '[';
+    w.beginArr("waiting");
     size_t emitted = 0;
     for (const Row *s : waiting) {
         if (emitted >= 8) break;
         if (primary && s->key == primary->key) continue;
         if (emitted) w.o += ',';
-        w.o += '{';
-        bool saved = w.first; w.first = true;
+        w.beginElement();
         w.str("project", s->project);
-        w.optStr("text", s->v.pending.ok ? s->v.pending.text : "");
+        // Python 是 `(s.get("pending") or {}).get("text")`：没有 pending 才是 null，
+        // 有 pending 但 text 是空串就出 ""。用 optStr 会把空串也写成 null。
+        if (s->v.pending.ok) w.str("text", s->v.pending.text); else w.nul("text");
         { char buf[32]; snprintf(buf, sizeof buf, "%.1f", s->v.ageSec); w.key("age_sec"); w.o += buf; }
         w.str("key", s->key);
-        w.o += '}'; w.first = saved;
+        w.endElement();
         ++emitted;
     }
     w.o += ']';
@@ -1573,25 +1569,29 @@ static std::string Snapshot(double ts, bool wantBalance,
 
     w.num("sessions_scanned", (long long)rows.size());
 
-    w.key("recent"); w.o += '[';
+    w.beginArr("recent");
     size_t rc = 0;
     for (const auto &s : rows) {
         if (s.v.ageSec > kActiveWindow) continue;
         if (rc >= 6) break;
         if (rc) w.o += ',';
-        w.o += '{';
-        bool saved = w.first; w.first = true;
+        w.beginElement();
         w.str("project", s.project);
         w.str("state", s.v.state);
         { char buf[32]; snprintf(buf, sizeof buf, "%.1f", s.v.ageSec); w.key("age_sec"); w.o += buf; }
-        w.o += '}'; w.first = saved;
+        w.endElement();
         ++rc;
     }
     w.o += ']';
 
-    w.key("sessions"); w.o += '[';
+    w.beginArr("sessions");
     size_t n = std::min<size_t>(rows.size(), kSessionsInSnapshot);
-    for (size_t i = 0; i < n; ++i) { if (i) w.o += ','; w.o += '{'; bool saved = w.first; w.first = true; EmitSessionRow(w, rows[i]); w.o += '}'; w.first = saved; }
+    for (size_t i = 0; i < n; ++i) {
+        if (i) w.o += ',';
+        w.beginElement();
+        EmitSessionRow(w, rows[i]);
+        w.endElement();
+    }
     w.o += ']';
 
     w.o += '}';
