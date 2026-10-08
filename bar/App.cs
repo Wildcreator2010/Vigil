@@ -985,8 +985,8 @@ namespace Vigil
             {
                 Log($"找不到引擎 native={Engine.NativePath() ?? "无"} script={Engine.ScriptPath() ?? "无"}");
                 Balloon("状态检测引擎不可用",
-                        "随包的 vigil-engine.exe 不在，回退用的 runtime\\python\\python.exe"
-                        + "（或系统里能解 zstd 的 Python 3.14）也找不到",
+                        "随包的 vigil-engine.exe 不在，回退用的 Python 3.14 也找不到"
+                        + "（安装目录 runtime\\python\\ 或系统 PATH / py 启动器）",
                         ToolTipIcon.Error);
                 return;
             }
@@ -1639,8 +1639,8 @@ namespace Vigil
             if (probe == null)
             {
                 Balloon("状态检测引擎不可用",
-                        "随包的 vigil-engine.exe 不在，回退用的 runtime\\python\\python.exe"
-                        + "（或系统里能解 zstd 的 Python 3.14）也找不到",
+                        "随包的 vigil-engine.exe 不在，回退用的 Python 3.14 也找不到"
+                        + "（安装目录 runtime\\python\\ 或系统 PATH / py 启动器）",
                         ToolTipIcon.Error);
                 done?.Invoke(false, "状态检测引擎不可用");
                 return;

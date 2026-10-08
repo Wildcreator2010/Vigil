@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""校验 dist/ 分发产物：文件齐不齐 + 随附解释器能不能真干活。
+"""校验 dist/ 分发产物：文件齐不齐 + 随包那颗引擎能不能真干活。
 
   python tools/verify_package.py                自动取 dist/ 下最新的 Vigil-*-win-x64
   python tools/verify_package.py <dist 目录>     指定目录

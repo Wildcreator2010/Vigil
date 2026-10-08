@@ -28,6 +28,6 @@ ui-qa/
 # 隔离工作区（git worktree），不进版本库
 .worktrees/
 
-# 打包变体的量测产物（每个 185MB，量完默认删）
+# 打包变体的量测产物（每个 ~161MB，量完默认删）
 dist-measure/
 .msg.txt

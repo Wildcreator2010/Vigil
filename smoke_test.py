@@ -4,7 +4,7 @@
   python smoke_test.py           引擎 + CLI 契约（无副作用，可随时复跑）
   python smoke_test.py --build   额外做 Release 编译，断言 0 警告 0 错误 + 解释器解析
   python smoke_test.py --setup   编译安装向导 + 开一次 GUI 读控件 + 静默装到 %TEMP% 再卸载
-  python smoke_test.py --package 校验 dist/ 分发产物（随附解释器跑真引擎 + 版本对齐）
+  python smoke_test.py --package 校验 dist/ 分发产物（随包引擎跑真快照 + 版本对齐）
   python smoke_test.py --gui     额外启动 Vigil.exe，在 Win32 层校验任务栏停靠
 
 --gui 会真的往任务栏里挂一个状态栏，结束时用 taskkill /f 收掉（优雅关闭当前不可用，
@@ -1009,8 +1009,8 @@ def check_package() -> None:
               f"{size} 字节")
 
     # 这条才是「零前置」的直接证据：把 PATH 削到只剩 System32（本机 python、py、uv 全都看不见），
-    # 产物里的 Vigil 仍然必须认随附解释器。上面 verify_package.py 那条是在本机 PATH 下跑的，
-    # 挡不住"其实靠的是宿主 python"这种情况。
+    # 产物里的 Vigil 仍然必须认随包那颗引擎。上面 verify_package.py 那条是在本机 PATH 下跑的，
+    # 挡不住"其实靠的是宿主 python"这种情况 —— 引擎换级之后这条判据的对象跟着变，原意没变。
     app = os.path.join(target, "app")
     exe = os.path.join(app, "Vigil.exe")
     if os.path.isfile(exe):
@@ -1035,8 +1035,8 @@ def check_package() -> None:
 def check_installer_e2e() -> None:
     """静默装到 %TEMP% 再卸掉：装/卸两条路径的唯一真证据。
 
-    载荷用**框架依赖**的开发产物（6.7MB，`BAR_OUT`）而不是 185MB 自包含包：这段验的是
-    "安装/卸载动作对不对"，随附解释器对不对由 verify_package.py 验。两件事分开，
+    载荷用**框架依赖**的开发产物（6.7MB，`BAR_OUT`）而不是 161MB 自包含包：这段验的是
+    "安装/卸载动作对不对"，随包引擎能不能真干活由 verify_package.py 验。两件事分开，
     别让冒烟等一次 publish。
 
     这段会 taskkill /f 掉正在跑的状态栏（安装器 spec §5.2 第 1 步本来就要求这么干，

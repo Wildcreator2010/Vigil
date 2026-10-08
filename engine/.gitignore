@@ -4,6 +4,9 @@
 *.log
 *.out
 b.txt
+# 冒烟注入时把引擎临时挪到一边用的名字（正常会当场还原；崩溃时留在这儿也别当源码提交）
+*.exe.hidden
+__pycache__/
 t-real.zstd
 out-utf8.log
 vcvars.log
