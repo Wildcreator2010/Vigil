@@ -21,8 +21,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import dsh_state as ds          # noqa: E402
+import _exe                   # noqa: E402
 
-EXE = os.path.join(HERE, "vigil-engine.exe")
+EXE = _exe.require_exe()   # 不存在或比源码旧就当场退出，不拿旧二进制得出"一致"
 FIELDS = ("state", "turn", "step", "last_event", "last_tool", "end_reason")
 # 默认走 --session：C++ 自己解压，整条通路都不碰 CPython。加 --stdin 退回只比判定的老口径。
 FILE_MODE = "--stdin" not in sys.argv
@@ -50,10 +51,32 @@ def cpp_verdict_file(path: str, mtime: float, ts: float) -> dict:
     return json.loads(p.stdout.decode("utf-8"))
 
 
+def boundary_cases() -> list[str]:
+    """age_sec 的舍入边界：这些值不是从会话里捞的，是照着 Python 的 round() 挑的。
+
+    为什么单独立一组：真实会话的 age 小数部分是随机的，"C++ 忘了舍入"这种改动
+    只会让它差 0.x 秒 —— 而下面的实数据判据曾经放到 1.0 秒容差，正好把这种
+    改动整个吞掉（compare_snapshot 的 0.55 容差吞掉 %.1f→%.0f 是同一类事故）。
+    另外 Python 的 round(x, 1) 在 .x5 上是"往偶数取"（banker's rounding），
+    手写 floor(x*10+0.5)/10 会在这些点取到另一边 —— 实数据几乎碰不到，
+    所以必须拿 1.25 / 0.25 这种整可表示的值钉住。
+    """
+    fails: list[str] = []
+    ts = 1_800_000_000.0
+    for age in (0.05, 0.15, 0.25, 0.35, 1.25, 2.5, 19.96, 20.04, 159518.96, 0.9999999):
+        mtime = ts - age
+        want = ds.classify({"tail": [], "last_turn_end": None}, mtime, ts)
+        got = cpp_verdict([], mtime, ts)
+        for k in FIELDS:
+            if want.get(k) != got.get(k):
+                fails.append(f"age={age} {k}: py={want.get(k)!r} cpp={got.get(k)!r}")
+        # 这里不放容差：mtime/ts 是同一对参数喂给两边的，age_sec 必须逐字相等
+        if want["age_sec"] != got["age_sec"]:
+            fails.append(f"age={age} age_sec: py={want['age_sec']!r} cpp={got['age_sec']!r}")
+    return fails
+
+
 def main() -> int:
-    if not os.path.isfile(EXE):
-        print(f"先编 C++：engine/build-one.bat vigil_engine.cpp vigil-engine.exe")
-        return 2
     limit = 0
     if "--limit" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--limit") + 1])
@@ -87,9 +110,10 @@ def main() -> int:
         for k in FIELDS:
             if want.get(k) != got.get(k):
                 diffs.append(f"{k}: py={want.get(k)!r} cpp={got.get(k)!r}")
-        # age 只比整数秒：两边取整时刻差几毫秒是正常的
-        if abs(float(want.get("age_sec") or 0) - float(got.get("age_sec") or 0)) > 1.0:
-            diffs.append(f"age_sec: py={want.get('age_sec')} cpp={got.get('age_sec')}")
+        # 逐字相等：mtime 与 ts 是同一对参数喂给两边的，这里不存在"取整时刻差几毫秒"
+        # 那种误差 —— 上一版写的 1.0 秒容差把"C++ 忘了 round 到 1 位小数"整个吞掉了。
+        if want.get("age_sec") != got.get("age_sec"):
+            diffs.append(f"age_sec: py={want.get('age_sec')!r} cpp={got.get('age_sec')!r}")
         wp, gp = want.get("pending"), got.get("pending")
         if bool(wp) != bool(gp):
             diffs.append(f"pending 有无: py={bool(wp)} cpp={bool(gp)}")
@@ -108,6 +132,14 @@ def main() -> int:
                   f"T{want.get('turn')}/S{want.get('step')} {os.path.basename(os.path.dirname(path))}")
 
     print(f"\n对照 {checked} 个会话，一致 {checked - bad}，不一致 {bad}")
+
+    edge = boundary_cases()
+    for msg in edge:
+        print("  ✗ " + msg)
+    if edge:
+        bad += len(edge)
+    else:
+        print("✓ age_sec 舍入边界逐字一致（含 .x5 的 banker's rounding 点）")
     return 0 if bad == 0 and checked else 1
 
 

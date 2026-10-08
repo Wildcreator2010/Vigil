@@ -22,8 +22,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import dsh_state as ds          # noqa: E402
+import _exe                   # noqa: E402
 
-EXE = os.path.join(HERE, "vigil-engine.exe")
+EXE = _exe.require_exe()
 ROUNDS = 3
 INTERVAL = 0.2
 
@@ -54,9 +55,6 @@ def read_lines(proc, n, timeout=30.0):
 
 
 def main() -> int:
-    if not os.path.isfile(EXE):
-        print("先编引擎：engine/build.cmd")
-        return 2
     fails = []
 
     proc = subprocess.Popen([EXE, "--watch", "--interval", str(INTERVAL), "--no-balance"],
@@ -92,7 +90,11 @@ def main() -> int:
                         fails.append(f"第 {i + 1} 行 sessions 条数 py={len(py['sessions'])} "
                                      f"cpp={len(snap['sessions'])}")
 
-        # 缓存诊断行：第二轮起命中数应当等于"这一轮扫到的会话数"
+        # 缓存诊断行的新契约：**只在有未命中时**才打（每帧都打会把 App.Log 的
+        # 200 行环形缓冲挤爆）。所以稳态的证据不是"第二行 hits 很大"，而是
+        # "第二轮起根本没有 CACHE 行" —— 沉默本身就是全命中的证明。
+        # 上一版断言写的是 hits[1] >= 10，改成安静稳态后那条会静默失效
+        # （只剩一行，`len(hits) >= 2` 永不成立），所以判据必须跟着换。
         time.sleep(0.6)
         proc.terminate()
         err = proc.stderr.read() or ""
@@ -101,9 +103,11 @@ def main() -> int:
             if line.startswith("CACHE") and "hits=" in line:
                 hits.append(int(line.split("hits=")[1].split()[0]))
         if not hits:
-            fails.append(f"stderr 里没有 CACHE 诊断行（缓存没实现）：{err[:200]!r}")
-        elif len(hits) >= 2 and hits[1] < 10:
-            fails.append(f"第二轮缓存命中只有 {hits[1]}，文件没变应当接近全部命中：{hits}")
+            fails.append(f"第一轮应当有未命中并打 CACHE 行，实际一行都没有：{err[:200]!r}")
+        elif hits[0] != 0:
+            fails.append(f"第一轮 hits 应为 0（冷启动没有缓存），实得 {hits[0]}")
+        elif len(hits) > 1:
+            fails.append(f"稳态不该再打 CACHE 行（打了说明每帧都在重解）：{hits}")
     finally:
         if proc.poll() is None:
             proc.kill()

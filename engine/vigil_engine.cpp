@@ -32,7 +32,6 @@
 #include <type_traits>
 #include <vector>
 
-#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -40,7 +39,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <io.h>
-#endif
 
 #include "third_party/zstd/zstd.h"
 #include "third_party/zstd/zstd_errors.h"
@@ -354,7 +352,6 @@ static bool ReadWholeFile(const std::string &path, std::vector<unsigned char> &o
 // 必须带小数秒：Python 用的是 st.st_mtime（浮点），而 _stat64 的 st_mtime 是整秒。
 // 差的零点几秒会一路进到 age_sec，两边永远对不齐 —— 所以直接读 FILETIME。
 static double FileMtime(const std::string &path) {
-#if defined(_WIN32)
     HANDLE h = CreateFileA(path.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -363,14 +360,18 @@ static double FileMtime(const std::string &path) {
     BOOL ok = GetFileTime(h, &ct, &at, &wt);
     CloseHandle(h);
     if (!ok) return 0.0;
-    // FILETIME 是 1601-01-01 起的 100ns 计数，换到 unix epoch 的浮点秒
+    // FILETIME 是 1601-01-01 起的 100ns 计数。要换成 Python 那边同一个 double：
+    // CPython 的 st_mtime 走 _PyTime_ns_to_double，是"整数秒 + 纳秒余数/1e9"，
+    // 不是"一个大整数去除"。实测 2000 个随机时间戳：
+    //   (double)ticks/1e7            37% 差一个 ulp
+    //   (double)ns/1e9               24% 差一个 ulp
+    //   sec + (double)ns%1e9/1e9     0%
+    // ulp 在这个量级是 2.4e-7 秒，平时谁也不看；但 age 落在 .x5 中点附近时，
+    // 这半个 ulp 就把 round(x,1) 判到对面去 —— compare_snapshot_boundary 的
+    // 1.25 / 0.05 两例量的就是它。
     ULARGE_INTEGER u; u.LowPart = wt.dwLowDateTime; u.HighPart = wt.dwHighDateTime;
-    return (double)u.QuadPart / 1e7 - 11644473600.0;
-#else
-    struct stat st{};
-    if (stat(path.c_str(), &st) != 0) return 0.0;
-    return (double)st.st_mtime;
-#endif
+    long long ns = (long long)(u.QuadPart - 116444736000000000ULL) * 100LL;
+    return (double)(ns / 1000000000LL) + (double)(ns % 1000000000LL) / 1e9;
 }
 
 static std::string BaseName(const std::string &p) {
@@ -412,16 +413,7 @@ static std::string ProjectName(const std::string &cwd, const std::string &fallba
     return n.empty() ? fallback : n;
 }
 
-static std::string ExpandUser(const std::string &p) {
-    if (p.size() < 2 || p[0] != '~' || (p[1] != '/' && p[1] != '\\')) return p;
-    const char *home = getenv("USERPROFILE");
-    if (!home) home = getenv("HOME");
-    std::string rest = p.substr(2);
-    return std::string(home ? home : "") + (rest.empty() ? "" : "\\" + rest);
-}
-
 static bool HarnessRunning() {
-#if defined(_WIN32)
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
     PROCESSENTRY32W e{};
@@ -440,13 +432,9 @@ static bool HarnessRunning() {
     }
     CloseHandle(snap);
     return found;
-#else
-    return false;
-#endif
 }
 
 static void WalkSessions(const std::string &dir, int depth, std::vector<std::string> &out) {
-#if defined(_WIN32)
     // 会话在 `<root>/sessions/*/*/session.v4.jsonl.zstd`，也就是 sessions 之下还要
     // 走两层目录、在第三层里列文件。depth 是"当前正在列的这一层的序号"，
     // 所以放行到 3：写成 >2 会在第三层之前就 return，扫出来永远是 0 个
@@ -463,9 +451,6 @@ static void WalkSessions(const std::string &dir, int depth, std::vector<std::str
         else if (name == kSessionFile) out.push_back(full);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-#else
-    (void)dir; (void)depth; (void)out;
-#endif
 }
 
 // ---------------------------------------------------------------- 会话与判定
@@ -669,9 +654,45 @@ static Todo TodoProgress(const JValue *todos) {
     return t;
 }
 
+// Python 侧只有一个 age：classify() 内部用原始值比阈值，但**发出去的是
+// round(age, 1)**，之后的筛选、排序、文案都读那个已舍入的 age_sec
+// （dsh_state.py:352 与 511/512/517/658/661）。C++ 原来一路用原始值，
+// 于是在阈值边界上两边会差半格 —— compare_watch 抓到的是同一个问题的另一面：
+// 159518.96 在 Python 是 159519（先 round 到 159519.0 再 int），在 C++ 是 159518。
+// 所以这里照 Python 分成两个量：v.age 原始、v.ageSec 已舍入。
+static double Round1(double x) {
+    // Python 的 round(x, 1) 是"对这个 double 的**精确十进制值**取最近的一位小数，
+    // 正好落在中点上就往偶数取"。两种偷懒写法都不对：
+    //   snprintf("%.1f")  —— MSVC 在中点上是往**远离零**的方向取（1.25 → 1.3），
+    //                       与 Python 反着来，而 1.25 这种年龄真的会出现
+    //                       （两个 1.8e9 量级的大数相减，结果必然落在 ulp=2.4e-7
+    //                        的格点上，0.1 的整数倍是够得着的）；
+    //   floor(x*10+0.5)/10 —— x*10 自己会先舍一次，0.14999999999999999437*10
+    //                       正好等于 1.5，于是被当成中点处理，判成 0.2（Python 是 0.1）。
+    // 所以先把精确展开打出来，再自己按位判。
+    if (!(x > 0.0)) return 0.0;
+    char buf[64];
+    snprintf(buf, sizeof buf, "%.27f", x);   // VS2015 起 CRT 的十进制转换是正确舍入的
+    std::string s(buf);
+    size_t dot = s.find('.');
+    std::string digits;
+    for (size_t i = 0; i < s.size(); ++i) if (i != dot) digits += s[i];
+    size_t keep = dot + 1;                     // 整数部分 + 保留的那一位小数
+    long long n = strtoll(digits.substr(0, keep).c_str(), nullptr, 10);
+    std::string rest = digits.substr(keep);
+    int cmp = rest[0] > '5' ? 1 : (rest[0] < '5' ? -1 : 0);
+    if (cmp == 0)
+        for (size_t i = 1; i < rest.size(); ++i)
+            if (rest[i] != '0') { cmp = 1; break; }   // 年龄非负，尾数只会变大
+    if (cmp > 0) ++n;
+    else if (cmp == 0 && (n % 2 != 0)) ++n;           // 正中点：往偶数取
+    return (double)n / 10.0;
+}
+
 struct Verdict {
     std::string state = "idle";
     double age = 0;
+    double ageSec = 0;   // round(age, 1)：阈值之外的 everything
     bool hasTurn = false, hasStep = false;
     long turn = 0, step = 0;
     std::string lastEvent, lastTool, endReason, error;
@@ -682,6 +703,7 @@ static Verdict Classify(const Session &s, double mtime, double ts) {
     const Events &ev = s.tail;
     Verdict v;
     v.age = ts - mtime; if (v.age < 0) v.age = 0;
+    v.ageSec = Round1(v.age);
     v.endReason = ReasonKind(s.lastTurnEnd.get());
     if (!ev.empty()) v.lastEvent = TypeOf(ev.back());
 
@@ -754,16 +776,10 @@ static std::vector<CacheEntry> gCache;
 static const size_t kCacheMax = 200;
 
 static long long FileSize(const std::string &path) {
-#if defined(_WIN32)
     WIN32_FILE_ATTRIBUTE_DATA d{};
     if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &d)) return -1;
     ULARGE_INTEGER u; u.LowPart = d.nFileSizeLow; u.HighPart = d.nFileSizeHigh;
     return (long long)u.QuadPart;
-#else
-    struct stat st{};
-    if (stat(path.c_str(), &st) != 0) return -1;
-    return (long long)st.st_size;
-#endif
 }
 
 static std::shared_ptr<Session> ReadSessionCached(const std::string &path, double mtime,
@@ -845,9 +861,9 @@ static std::vector<Row> Scan(const std::string &globRoot, double ts, long long &
 static void PickPrimary(const std::vector<Row> &rows, const Row *&primary,
                         std::vector<const Row *> &waiting) {
     for (const auto &s : rows)
-        if (s.v.state == "needs_action" && s.v.age <= kWaitPromoteWindow) waiting.push_back(&s);
+        if (s.v.state == "needs_action" && s.v.ageSec <= kWaitPromoteWindow) waiting.push_back(&s);
     std::vector<const Row *> recent;
-    for (const auto &s : rows) if (s.v.age <= kActiveWindow) recent.push_back(&s);
+    for (const auto &s : rows) if (s.v.ageSec <= kActiveWindow) recent.push_back(&s);
 
     const std::vector<const Row *> &pool = !recent.empty() ? recent : waiting;
     if (pool.empty()) { primary = rows.empty() ? nullptr : &rows.front(); return; }
@@ -856,7 +872,7 @@ static void PickPrimary(const std::vector<Row> &rows, const Row *&primary,
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](const Row *a, const Row *b) {
                          if (a->priority != b->priority) return a->priority > b->priority;
-                         return a->v.age < b->v.age;
+                         return a->v.ageSec < b->v.ageSec;
                      });
     primary = ranked.front();
     if (!waiting.empty()) return;                       // 有等待的就用它，否则退回 busy
@@ -869,13 +885,6 @@ static void PickPrimary(const std::vector<Row> &rows, const Row *&primary,
 }
 
 // ---------------------------------------------------------------- 文本组装
-static std::string Money(const std::string &available, const std::string &currency,
-                         const std::string &total) {
-    if (available != "1") return "--";
-    std::string sym = currency == "USD" ? "$" : (currency == "CNY" ? "¥" : "");
-    return sym + (total.empty() ? "0" : total);
-}
-
 static std::string Thousands(long long v) {
     std::string d = std::to_string(v < 0 ? -v : v), r;
     for (size_t i = 0; i < d.size(); ++i) { if (i && (d.size() - i) % 3 == 0) r += ','; r += d[i]; }
@@ -903,7 +912,7 @@ static Text ComposeText(const Row *primary, const std::string &state, const std:
         std::string tip = t.label + "｜" + primary->project;
         if (primary->v.hasTurn) tip += "｜T" + std::to_string(primary->v.turn);
         if (primary->v.pending.ok) tip += "｜" + primary->v.pending.text;
-        tip += "｜静默 " + std::to_string((long long)primary->v.age) + "s";
+        tip += "｜静默 " + std::to_string((long long)primary->v.ageSec) + "s";
         t.tooltip = ClampTip(tip);
 
         t.tipLines.push_back(t.label + "｜" + primary->project);
@@ -930,7 +939,7 @@ static Text ComposeText(const Row *primary, const std::string &state, const std:
         if (primary->usageTotal)
             t.tipLines.push_back("用量：入 " + Thousands(primary->usageIn) + " / 出 " +
                                  Thousands(primary->usageOut) + " tokens");
-        t.tipLines.push_back("已静默 " + std::to_string((long long)primary->v.age) + "s ｜ 待处理 " +
+        t.tipLines.push_back("已静默 " + std::to_string((long long)primary->v.ageSec) + "s ｜ 待处理 " +
                              std::to_string(waitingCount) + " 个");
     } else {
         t.stripLeft = t.label;
@@ -968,7 +977,7 @@ struct W {
 
 static void EmitVerdict(W &w, const Verdict &v) {
     w.str("state", v.state);
-    { char buf[32]; snprintf(buf, sizeof buf, "%.1f", v.age); w.key("age_sec"); w.o += buf; }
+    { char buf[32]; snprintf(buf, sizeof buf, "%.1f", v.ageSec); w.key("age_sec"); w.o += buf; }
     w.optStr("last_event", v.lastEvent);
     w.optStr("last_tool", v.lastTool);
     w.str("end_reason", v.endReason);          // 恒为字符串：Python 给的是 ""，不是 null
@@ -995,7 +1004,7 @@ static void EmitSessionRow(W &w, const Row &r) {
     w.key("state"); json::EmitStr(w.o, r.v.state);
     if (r.v.hasTurn) { w.key("turn"); w.o += std::to_string(r.v.turn); } else w.nul("turn");
     if (r.v.hasStep) { w.key("step"); w.o += std::to_string(r.v.step); } else w.nul("step");
-    { char buf[32]; snprintf(buf, sizeof buf, "%.1f", r.v.age); w.key("age_sec"); w.o += buf; }
+    { char buf[32]; snprintf(buf, sizeof buf, "%.1f", r.v.ageSec); w.key("age_sec"); w.o += buf; }
     w.optStr("last_event", r.v.lastEvent);
     w.optStr("last_tool", r.v.lastTool);
     w.key("end_reason"); json::EmitStr(w.o, r.v.endReason);
@@ -1032,7 +1041,7 @@ static void EmitSessionDict(W &w, const Row &r) {
     w.str("state", r.v.state);
     if (r.v.hasTurn) w.num("turn", r.v.turn); else w.nul("turn");
     if (r.v.hasStep) w.num("step", r.v.step); else w.nul("step");
-    { char buf[32]; snprintf(buf, sizeof buf, "%.1f", r.v.age); w.key("age_sec"); w.o += buf; }
+    { char buf[32]; snprintf(buf, sizeof buf, "%.1f", r.v.ageSec); w.key("age_sec"); w.o += buf; }
     w.optStr("last_event", r.v.lastEvent);
     w.optStr("last_tool", r.v.lastTool);
     if (r.v.pending.ok) {
@@ -1067,15 +1076,51 @@ static void EmitSessionDict(W &w, const Row &r) {
 //  而保存那一步照样退出 0 —— 今天刚在 Python 侧修掉一个同型的不对称，见 15d003b）。
 // 所以 DPAPI 的参数逐项照 dsh_state.py 的 _dpapi：描述符 "Vigil"、无附加熵、
 // 加密时 CRYPTPROTECT_UI_FORBIDDEN，解密时 flags 给 0。
-#if defined(_WIN32)
+#include <direct.h>
 #include <wincrypt.h>
 #include <winhttp.h>
-#endif
 
+// 引擎自己的目录。Python 侧是 os.path.dirname(os.path.abspath(__file__))；
+// C++ 若写 ".\balance.key" 就是跟着**当前工作目录**走 —— 而 C# 起子进程时会把
+// WorkingDirectory 设成别处（bar/StateClient.cs:168），那时 Key 找不找得到
+// 取决于从哪里启动，这是个静默的错（review 抓的）。
+static std::string ExeDir() {
+    char buf[MAX_PATH]{};
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::string full(buf, n);
+        size_t slash = full.find_last_of("\\/");
+        if (slash != std::string::npos) return full.substr(0, slash);
+    }
+    return ".";
+}
+
+// getenv 的 C4996 抱怨的是返回的指针可能被 putenv 改写后失效；本引擎全程不调
+// putenv/_putenv，环境块只读，指针与进程同寿。封一层把这个前提写明，
+// vigil_engine.cpp 就能在 /W4 /WX 下干净，而不是整文件屏蔽掉 CRT 弃用警告。
+static std::string Env(const char *name) {
+#pragma warning(suppress : 4996)
+    const char *v = getenv(name);
+    return v ? std::string(v) : std::string();
+}
+
+// ntpath.expanduser 在家目录上的取值顺序：USERPROFILE 优先，其次 HOME。
+static std::string HomeDir() {
+    std::string h = Env("USERPROFILE");
+    return h.empty() ? Env("HOME") : h;
+}
+
+// 与 dsh_state.py:770 state_dir() 对齐：%LOCALAPPDATA%\Vigil，缺失时退回
+// expanduser("~/.local/share")/Vigil —— 也就是 %USERPROFILE%\.local\share\Vigil，
+// 不是 %USERPROFILE%\AppData\Local\Vigil。两边必须落在同一个目录，否则 Python
+// 在无 LOCALAPPDATA 的环境里写下的 balance.protected，C++ 会读不到（反之亦然）。
 static std::string StateDir() {
-    const char *la = getenv("LOCALAPPDATA");
-    std::string base = (la && *la) ? std::string(la)
-                                   : (getenv("USERPROFILE") ? std::string(getenv("USERPROFILE")) + "\\AppData\\Local" : std::string("."));
+    std::string base = Env("LOCALAPPDATA");
+    if (base.empty()) {
+        std::string home = HomeDir();
+        if (home.empty()) return ".\\Vigil";
+        base = home + "\\.local\\share";
+    }
     return base + "\\Vigil";
 }
 
@@ -1083,7 +1128,6 @@ static std::string BalancePath(const char *name) { return StateDir() + "\\" + na
 
 static bool Dpapi(const std::vector<unsigned char> &in, bool protect,
                   std::vector<unsigned char> &out) {
-#if defined(_WIN32)
     DATA_BLOB bi{}; bi.cbData = (DWORD)in.size(); bi.pbData = (BYTE *)in.data();
     DATA_BLOB bo{};
     BOOL ok = protect
@@ -1093,10 +1137,6 @@ static bool Dpapi(const std::vector<unsigned char> &in, bool protect,
     out.assign(bo.pbData, bo.pbData + bo.cbData);
     LocalFree(bo.pbData);
     return true;
-#else
-    (void)in; (void)protect; (void)out;
-    return false;
-#endif
 }
 
 static std::string ReadTextFile(const std::string &path) {
@@ -1110,8 +1150,8 @@ struct KeyInfo { std::string key, source; };
 
 static KeyInfo BalanceKey() {
     for (const char *var : {"DEEPSEEK_BALANCE_KEY", "DEEPSEEK_API_KEY"}) {
-        const char *v = getenv(var);
-        if (v && *v) {
+        std::string v = Env(var);
+        if (!v.empty()) {
             std::string s = v;
             while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r')) s.pop_back();
             size_t f = s.find_first_not_of(" \t\r\n");
@@ -1129,11 +1169,11 @@ static KeyInfo BalanceKey() {
     }
     // 明文候选：次序与 balance_key() 一致 —— state_dir() 排第一（DPAPI 失败时的
     // 回退就落在那儿），再是引擎目录与用户目录下的几处历史位置
-    std::string home = getenv("USERPROFILE") ? getenv("USERPROFILE") : "";
+    std::string home = HomeDir();
     std::vector<std::string> files = {
         BalancePath("balance.key"),
-        ".\\balance.key",
-        "..\\balance.key",
+        ExeDir() + "\\balance.key",
+        ExeDir() + "\\..\\balance.key",
     };
     if (!home.empty()) {
         files.push_back(home + "\\.dsh\\deepseek_balance_key");
@@ -1152,21 +1192,33 @@ static KeyInfo BalanceKey() {
 static std::string SaveBalanceKey(const std::string &key) {
     std::vector<unsigned char> in(key.begin(), key.end());
     std::vector<unsigned char> out;
+    // 目录可能还不存在（首次运行）：Python 的 state_dir() 自己会 mkdir
+    _mkdir(StateDir().c_str());
     if (Dpapi(in, true, out)) {
         std::string path = BalancePath("balance.protected");
-        std::ofstream f(path, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char *>(out.data()), (std::streamsize)out.size());
-        f.close();
+        {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            f.write(reinterpret_cast<const char *>(out.data()), (std::streamsize)out.size());
+            f.close();
+            if (f.fail()) return "写入失败：" + path;
+        }
+        // 写失败必须说出来：静默返回路径 = 面板显示"已保存"，下次启动却什么都读不到
+        std::ifstream check(path, std::ios::binary);
+        if (!check) return "写入失败：" + path;
         return path;
     }
     // DPAPI 不可用：与 Python 同一处理 —— 退回明文并**照样算保存成功**，
     // 所以路径里带这句提示，界面上不假装是加密的
     std::string path = BalancePath("balance.key");
-    std::ofstream f(path, std::ios::trunc);
-    f << key;
-    f.close();
+    {
+        std::ofstream f(path, std::ios::trunc);
+        f << key;
+        f.close();
+        if (f.fail()) return "写入失败：" + path;
+    }
     return path + "（DPAPI 不可用，已存为明文，请注意文件权限）";
 }
+
 
 static bool ClearBalanceKey(std::string &removedPath) {
     for (const char *name : {"balance.protected", "balance.key"}) {
@@ -1187,7 +1239,6 @@ struct Balance {
 };
 
 static bool FetchJson(const std::string &key, std::string &body, std::string &err) {
-#if defined(_WIN32)
     HINTERNET h = WinHttpOpen(L"Vigil", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h) { err = "WinHttpOpen 失败"; return false; }
@@ -1222,11 +1273,13 @@ static bool FetchJson(const std::string &key, std::string &body, std::string &er
                     }
                     if (status == 200) { body = got; ok = true; }
                     else {
-                        std::string tail = got.substr(0, 200);
+                        // 截断必须按字符：原来"每轮砍一个字节直到长度够"会把多字节中文
+                        // 劈成半个字，错误文案本身变成非法 UTF-8
+                        std::string tail = Utf8Trunc(got, 200);
                         err = "HTTP " + std::to_string(status) +
                               (status == 401 ? "（Key 无效或没有余额查询权限，请到平台控制台 API Keys 页确认）" : "") +
                               " " + tail;
-                        while (Utf8Len(err) > 220) err = err.substr(0, err.size() - 1);
+                        err = Utf8Trunc(err, 220);
                     }
                 } else err = "HTTP 请求发送失败";
             } else err = "请求头写入失败";
@@ -1236,16 +1289,13 @@ static bool FetchJson(const std::string &key, std::string &body, std::string &er
     } else err = "连接 api.deepseek.com 失败";
     WinHttpCloseHandle(h);
     return ok;
-#else
-    (void)key; (void)body; (void)err;
-    return false;
-#endif
 }
 
 // TTL 缓存 + refresh.token 强刷，照 fetch_balance 的语义
 static Balance gBalanceCache;
 static bool gHaveCache = false;
 static double gCacheAt = 0;
+static double gRefreshToken = -1;      // 上一轮看到的 refresh.token mtime；-1 = 还没看过
 static const double kBalanceTtl = 300.0;
 
 static Balance FetchBalance(double ts, bool force) {
@@ -1284,16 +1334,28 @@ static Balance FetchBalance(double ts, bool force) {
         return Stringify(*v);
     };
     const JValue *avail = root.at("is_available");
-    b.available = (!avail || avail->b) && first != nullptr;
-    if (first) {
-        b.currency = strOf(first->at("currency"));
-        b.total = strOf(first->at("total_balance"));
-        b.granted = strOf(first->at("granted_balance"));
-        b.toppedUp = strOf(first->at("topped_up_balance"));
+    // 真值判定与 Python 的 bool() 对齐：缺省算 true；JSON 里 1 / "x" 都是真值，
+    // 原来只读 ->b，遇到 `is_available: 1`（数字）会误判成 false
+    bool availOk = true;
+    if (avail) {
+        if (avail->kind == JValue::Bool) availOk = avail->b;
+        else if (avail->kind == JValue::Num) availOk = avail->num != 0;
+        else if (avail->kind == JValue::Str) availOk = !avail->str.empty();
+        else if (avail->kind == JValue::Null) availOk = false;
     }
-    if (b.currency.empty()) b.currency = strOf(root.at("currency"));
+    b.available = availOk && first != nullptr;
+    auto orRoot = [&](const char *inInfo, const char *inRoot) -> std::string {
+        std::string v = first ? strOf(first->at(inInfo)) : "";
+        if (v.empty()) v = strOf(root.at(inRoot));       // 根级 bal_* 兜底，同 Python
+        return v;
+    };
+    b.currency = orRoot("currency", "currency");
+    b.total = orRoot("total_balance", "bal_available");
+    b.granted = orRoot("granted_balance", "bal_granted");
+    b.toppedUp = orRoot("topped_up_balance", "bal_topped_up");
     if (b.total.empty()) {
-        b.available = false;
+        // Python 在这里**不**改 available，只补一句错误；原来强置 false 会让
+        // "有 total 字段但为空"这种帧从 `¥0` 变成 `--`（review 抓的）
         b.error = "接口未返回余额字段：" + Utf8Trunc(body, 160);
     }
     gBalanceCache = b; gHaveCache = true; gCacheAt = ts;
@@ -1318,17 +1380,31 @@ static void EmitBalance(W &w, const Balance &b, bool wantBalance) {
     w.boolean("cached", b.cached);
 }
 
+// 单独把余额那一格出成一行 JSON：--save-balance-key 存完要顺手查一次并回显，
+// 那是 App.cs:1643 写明的契约（"保存完它还会顺手查一次余额，最长 20 秒"）
+static std::string BalanceJson(double ts) {
+    Balance b = FetchBalance(ts, true);
+    W w; w.o += '{'; w.begin("balance"); EmitBalance(w, b, true); w.end(); w.o += '}';
+    return w.o;
+}
+
 // ---------------------------------------------------------------- 整帧快照
-static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nullptr) {
+// demo 非空时走 --demo 那条路：把主会话伪造成某个状态，用来肉眼核对各状态的视觉
+// （照 dsh_state.py 的 --demo：伪 age_sec=3、needs_action 给三选项的问题、error 给 429）
+static std::string Snapshot(double ts, bool wantBalance,
+                            const std::string *demo = nullptr) {
     long long hits = 0;
-    std::string home = getenv("USERPROFILE") ? getenv("USERPROFILE") : "";
+    std::string home = HomeDir();
     std::string root = home + "\\.dsh\\sessions";
     bool running = HarnessRunning();
     std::vector<Row> rows = Scan(root, ts, hits);
-    // 每轮一行诊断：常驻时看"这轮重解了几个文件"，就能看出缓存到底有没有在工作
-    std::fprintf(stderr, "CACHE files=%zu hits=%lld\n", rows.size(), hits);
-    std::fflush(stderr);
-    if (hitsOut) *hitsOut = hits;
+    // 只在**有未命中**时打诊断。每帧都打会把日志挤爆：StateClient 把子进程 stderr
+    // 逐行转进 App.Log 的 200 行环形缓冲（bar/StateClient.cs:244），常驻 2 秒一帧
+    // 等于每 400 秒把真实诊断全冲干净 —— 而稳态本来就没有可报告的事。
+    if (hits != (long long)rows.size()) {
+        std::fprintf(stderr, "CACHE files=%zu hits=%lld\n", rows.size(), hits);
+        std::fflush(stderr);
+    }
 
     const Row *primary = nullptr;
     std::vector<const Row *> waiting;
@@ -1337,18 +1413,50 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
     std::string state;
     if (!running) state = "offline";
     else if (!primary) state = "idle";
-    else if (primary->v.age > kActiveWindow && primary->v.state != "needs_action") state = "idle";
-    else if (primary->v.state == "needs_action" && primary->v.age > kStaleAlertWindow) state = "idle";
+    else if (primary->v.ageSec > kActiveWindow && primary->v.state != "needs_action") state = "idle";
+    else if (primary->v.state == "needs_action" && primary->v.ageSec > kStaleAlertWindow) state = "idle";
     else state = primary->v.state;
 
-    // 余额这一层还没搬过来（HTTP + DPAPI + Key 发现是独立一块），
-    // 所以先固定出"已禁用"那一格 —— 与 python snapshot(want_balance=False) 同形。
-    // 余额：--no-balance 时与 Python 一样给"已禁用"那一格；要查时按 TTL 与
-    // refresh.token 决定这一轮是否真的发请求
+    // --demo：把主会话伪造成某个状态（照 dsh_state.py 的 --demo）。
+    // 注意 Python 在 demo 下**不看 running** 也用 fake 出 session 与文案，所以这里
+    // 单独记一个 useFake 标记，不能沿用下面 `running ? primary : nullptr` 那条。
+    Row fake;
+    bool useFake = false;
+    if (demo && !demo->empty()) {
+        fake = primary ? *primary : Row{};
+        if (!primary) {
+            fake.project = "Demo";
+            fake.v.hasTurn = true; fake.v.turn = 12;
+            fake.v.hasStep = true; fake.v.step = 3;
+        }
+        fake.v.state = *demo;
+        fake.v.age = 3.0; fake.v.ageSec = 3.0;
+        fake.v.error.clear();
+        fake.v.pending = Pending{};
+        if (*demo == "needs_action") {
+            fake.v.pending.ok = true;
+            fake.v.pending.kind = "question";
+            fake.v.pending.tool = "ask_user_question";
+            fake.v.pending.text = "要不要先只改固件那套？两套都改会牵动协议、服务端和测试。";
+            fake.v.pending.options = {"只改固件", "两套都改", "先不动"};
+            fake.todo.ok = true;
+            fake.todo.total = 8; fake.todo.done = 5; fake.todo.inProgress = 1; fake.todo.pending = 2;
+        } else if (*demo == "error") {
+            fake.v.error = "429: The model service is temporarily rate limited";
+        }
+        state = *demo;
+        primary = &fake;
+        useFake = true;
+    }
+
+    // 余额：--no-balance 时与 Python 一样给"已禁用"那一格。
+    // 强刷判据照 --watch 的 `fresh != token`（值**变了**就刷），不是"比上次新"：
+    // 后者遇到未来 mtime 的 token 会每帧都打 HTTP，而删掉 token 则永远不刷。
     Balance bal;
     if (wantBalance) {
         double token = RefreshTokenMtime();
-        bal = FetchBalance(ts, token > 0 && token > gCacheAt);
+        bal = FetchBalance(ts, token != gRefreshToken);
+        gRefreshToken = token;
     } else {
         bal.available = false; bal.error = "已禁用"; bal.skipped = true;
     }
@@ -1365,7 +1473,8 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
     w.boolean("app_running", running);
     w.str("state", state);
 
-    Text t = ComposeText(running ? primary : nullptr, state, money, waiting.size());
+    // demo 下 Python 也照 fake 出文案（不看 app 是否在跑），所以不能一律 running ? …
+    Text t = ComposeText((useFake || running) ? primary : nullptr, state, money, waiting.size());
     w.str("label", t.label);
     w.str("glyph", t.glyph);
     w.str("color", t.color);
@@ -1380,11 +1489,12 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
     w.o += ']';
     w.boolean("attention", state == "needs_action" || state == "error");
 
-    if (running && primary) {
-        w.begin("session");
-        EmitSessionDict(w, *primary);
-        w.end();
-    } else { w.nul("session"); }
+    // session 那一格：Python 是 `(primary or {})` 的字段白名单 —— 没有主会话时出**空对象**
+    // 而不是 null，且**不管 app_running 真假**都照 primary 出（App.cs 的副标题就在读它）。
+    // 原来写成 `if (running && primary) … else null` 两条都偏了（review 抓的）。
+    w.begin("session");
+    if (primary) EmitSessionDict(w, *primary);
+    w.end();
 
     w.key("waiting"); w.o += '[';
     size_t emitted = 0;
@@ -1396,7 +1506,7 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
         bool saved = w.first; w.first = true;
         w.str("project", s->project);
         w.optStr("text", s->v.pending.ok ? s->v.pending.text : "");
-        { char buf[32]; snprintf(buf, sizeof buf, "%.1f", s->v.age); w.key("age_sec"); w.o += buf; }
+        { char buf[32]; snprintf(buf, sizeof buf, "%.1f", s->v.ageSec); w.key("age_sec"); w.o += buf; }
         w.str("key", s->key);
         w.o += '}'; w.first = saved;
         ++emitted;
@@ -1412,14 +1522,14 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
     w.key("recent"); w.o += '[';
     size_t rc = 0;
     for (const auto &s : rows) {
-        if (s.v.age > kActiveWindow) continue;
+        if (s.v.ageSec > kActiveWindow) continue;
         if (rc >= 6) break;
         if (rc) w.o += ',';
         w.o += '{';
         bool saved = w.first; w.first = true;
         w.str("project", s.project);
         w.str("state", s.v.state);
-        { char buf[32]; snprintf(buf, sizeof buf, "%.1f", s.v.age); w.key("age_sec"); w.o += buf; }
+        { char buf[32]; snprintf(buf, sizeof buf, "%.1f", s.v.ageSec); w.key("age_sec"); w.o += buf; }
         w.o += '}'; w.first = saved;
         ++rc;
     }
@@ -1439,55 +1549,99 @@ static std::string ToJson(const Verdict &v) {
     return w.o;
 }
 
+// 现在 7 条，且 flag 是全局扫的（原来只认 argv[2]，`--json --no-balance` 那种
+// 不带位置的调用形状根本走不通 —— 而 App.cs:757 就是这么调的）
+static double NowSeconds() {
+    struct timespec t{};
+    timespec_get(&t, TIME_UTC);
+    return (double)t.tv_sec + t.tv_nsec / 1e9;
+}
+
 int main(int argc, char **argv) {
-#if defined(_WIN32)
     _setmode(_fileno(stdout), _O_BINARY);   // 中文按 UTF-8 原样出，别让 CRT 转码
-#endif
-    std::string mode = argc > 1 ? argv[1] : "";
-    if (mode == "--session" && argc >= 5) {
-        std::vector<unsigned char> raw;
-        if (!ReadWholeFile(argv[2], raw)) { std::printf("{\"error\":\"读不到文件\"}\n"); return 1; }
-        Session s = ReadSessionFromPlain(Unpack(raw));
-        std::printf("%s\n", ToJson(Classify(s, strtod(argv[3], nullptr), strtod(argv[4], nullptr))).c_str());
+    std::vector<std::string> a;
+    for (int i = 1; i < argc; ++i) a.push_back(argv[i]);
+    auto has = [&](const char *f) { for (auto &x : a) if (x == f) return true; return false; };
+    auto valueOf = [&](const char *f, const std::string &def = "") {
+        for (size_t i = 0; i + 1 < a.size(); ++i) if (a[i] == f) return a[i + 1];
+        return def;
+    };
+    std::string mode = a.empty() ? "" : a[0];
+    bool wantBalance = !has("--no-balance");
+    // C# 侧的形状：`--json --no-balance`（一次性快照）、`--demo STATE --json`、
+    // `--state-only`。--json 在两边都只是"出机器可读的一行"，与 --snapshot 同义。
+    if (mode == "--json" || mode == "--state-only") {
+        std::string out = Snapshot(NowSeconds(), wantBalance);
+        if (mode == "--state-only") {
+            size_t p = out.find("\"state\":\"");
+            size_t q = p == std::string::npos ? std::string::npos : out.find('"', p + 9);
+            std::printf("%s\n", p == std::string::npos ? "" : out.substr(p + 9, q - p - 9).c_str());
+        } else std::printf("%s\n", out.c_str());
         return 0;
     }
-    if (mode == "--classify" && argc >= 4) {
+    if (mode == "--demo") {
+        std::string state = a.size() > 1 ? a[1] : "";
+        bool known = false;
+        for (const auto &s : kStates) if (state == s.code) known = true;
+        if (!known) {
+            std::fprintf(stderr, "未知状态 %s，可选：", state.c_str());
+            for (size_t i = 0; i < sizeof kStates / sizeof kStates[0]; ++i)
+                std::fprintf(stderr, "%s%s", i ? ", " : "", kStates[i].code);
+            std::fprintf(stderr, "\n");
+            return 2;
+        }
+        // demo 与 Python 一样不查余额
+        std::printf("%s\n", Snapshot(NowSeconds(), false, &state).c_str());
+        return 0;
+    }
+    if (mode == "--states") {
+        for (const auto &s : kStates)
+            std::printf("{\"state\":\"%s\",\"label\":\"%s\",\"glyph\":\"%s\",\"color\":\"%s\"}\n",
+                        s.code, s.label, s.glyph, s.color);
+        return 0;
+    }
+    if (mode == "--session" && a.size() >= 4) {
+        std::vector<unsigned char> raw;
+        if (!ReadWholeFile(a[1], raw)) { std::printf("{\"error\":\"读不到文件\"}\n"); return 1; }
+        Session s = ReadSessionFromPlain(Unpack(raw));
+        std::printf("%s\n", ToJson(Classify(s, strtod(a[2].c_str(), nullptr),
+                                            strtod(a[3].c_str(), nullptr))).c_str());
+        return 0;
+    }
+    if (mode == "--classify" && a.size() >= 3) {
         std::string plain, line;
         while (std::getline(std::cin, line)) { plain += line; plain += '\n'; }
         Session s = ReadSessionFromPlain(plain);
-        std::printf("%s\n", ToJson(Classify(s, strtod(argv[2], nullptr), strtod(argv[3], nullptr))).c_str());
+        std::printf("%s\n", ToJson(Classify(s, strtod(a[1].c_str(), nullptr),
+                                            strtod(a[2].c_str(), nullptr))).c_str());
         return 0;
     }
-    if (mode == "--snapshot" && argc >= 3) {
-        bool wantBalance = !(argc >= 4 && std::string(argv[3]) == "--no-balance");
-        std::printf("%s\n", Snapshot(strtod(argv[2], nullptr), wantBalance).c_str());
+    if (mode == "--snapshot") {
+        // <now> 可省：省略就是"现在"，与 --json 同义
+        double ts = a.size() >= 2 ? strtod(a[1].c_str(), nullptr) : NowSeconds();
+        std::printf("%s\n", Snapshot(ts, wantBalance).c_str());
         return 0;
     }
     if (mode == "--watch") {
-        // 照 Python 的 --watch：每 interval 秒出一行 NDJSON，供 StateClient 按行读。
-        // 余额的 TTL / refresh.token 强刷那一层还没搬，先把节奏与缓存做对。
-        double interval = 2.0;
-        bool wantBalance = true;
-        for (int i = 2; i < argc; ++i) {
-            std::string a = argv[i];
-            if (a == "--interval" && i + 1 < argc) interval = strtod(argv[++i], nullptr);
-            else if (a == "--no-balance") wantBalance = false;
-        }
+        double interval = strtod(valueOf("--interval", "2").c_str(), nullptr);
         if (interval <= 0) interval = 2.0;
+        if (interval < 0.2) interval = 0.2;      // 与 Python 的 max(0.2, interval) 同下限
         for (;;) {
-            struct timespec t{};
-            timespec_get(&t, TIME_UTC);
-            double ts = (double)t.tv_sec + t.tv_nsec / 1e9;
-            std::printf("%s\n", Snapshot(ts, wantBalance).c_str());
+            double ts = NowSeconds();
+            // 一帧坏了不能带走整个常驻进程：Python 的 --watch 有同样的兜底，
+            // 出一行 {ok:false, state:"unknown"} 让状态栏显式变"未知"而不是静默停更
+            try {
+                std::printf("%s\n", Snapshot(ts, wantBalance).c_str());
+            } catch (const std::exception &ex) {
+                std::printf("{\"ok\":false,\"error\":\"%s\",\"state\":\"unknown\",\"generated_at\":%.6f}\n",
+                            ex.what(), ts);
+            } catch (...) {
+                std::printf("{\"ok\":false,\"error\":\"引擎本轮异常\",\"state\":\"unknown\",\"generated_at\":%.6f}\n",
+                            ts);
+            }
             std::fflush(stdout);
-            // 分片睡：整段 Sleep(interval) 时外部 terminate/kill 也是立刻生效的，
-            // 但分片能让"睡够就走"不累积误差，且将来插 refresh.token 检查有落点。
             for (double slept = 0; slept < interval; slept += 0.1) {
-#if defined(_WIN32)
                 Sleep(100);
-#else
-                struct timespec nap{0, 100000000L}; nanosleep(&nap, nullptr);
-#endif
             }
         }
         return 0;
@@ -1501,6 +1655,9 @@ int main(int argc, char **argv) {
         }
         if (key.empty()) { std::fprintf(stderr, "没有读到 Key，已取消。\n"); return 2; }
         std::printf("已保存到 %s\n", SaveBalanceKey(key).c_str());
+        // 存完顺手查一次余额并回显：少了这一步，面板要等到下一个 TTL 才看得见余额，
+        // 而 App.cs 那边的超时与提示文案都是按"这一步会发生"写的
+        std::printf("%s\n", BalanceJson(NowSeconds()).c_str());
         return 0;
     }
     if (mode == "--clear-balance-key") {
@@ -1510,16 +1667,19 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (mode == "--balance-probe") {
-        // 只报来源与长度，**永不**报 Key 本身：面板那套"只显示来源"的口径
+        // 只报来源与长度，**永不**报 Key 本身：面板"只显示来源"的口径
         // 不能因为多了个诊断入口就漏出去
         KeyInfo ki = BalanceKey();
         std::printf("source=%s len=%zu\n", ki.source.c_str(), ki.key.size());
         return 0;
     }
-    std::printf("用法: vigil-engine --session <会话文件> <mtime> <now>\n"
+    std::printf("用法: vigil-engine --watch [--interval 秒] [--no-balance]\n"
+                "      vigil-engine --json [--no-balance]        一次性快照\n"
+                "      vigil-engine --state-only                 只出状态码\n"
+                "      vigil-engine --demo <状态码>              伪造一帧，视觉自检\n"
+                "      vigil-engine --states                     打印状态图例\n"
+                "      vigil-engine --session <会话文件> <mtime> <now>\n"
                 "      vigil-engine --classify <mtime> <now>  < records.jsonl\n"
-                "      vigil-engine --snapshot <now> [--no-balance]\n"
-                "      vigil-engine --watch [--interval 秒] [--no-balance]\n"
                 "      vigil-engine --save-balance-key   (Key 从 stdin 进)\n"
                 "      vigil-engine --clear-balance-key\n"
                 "      vigil-engine --balance-probe\n");

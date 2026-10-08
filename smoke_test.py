@@ -825,7 +825,7 @@ def check_runtime_row() -> None:
 def check_engine_parity() -> None:
     """C++ 引擎与 Python 引擎的对照门禁（--engine，也进 --all）。
 
-    为什么必须在切换**之前**装好：四个 compare_*.py 现在只是开发期工具，一旦
+    为什么必须在切换**之前**装好：这些 compare_*.py 现在只是开发期工具，一旦
     vigil-engine.exe 替下 CPython，它就是唯一实现 —— 那时没有门禁盯着，C++ 与
     设计文档哪天悄悄分叉没人知道。所以先把判据挂上，再谈切换。
 
@@ -836,11 +836,16 @@ def check_engine_parity() -> None:
     exe = os.path.join(HERE, "engine", "vigil-engine.exe")
     if not os.path.isfile(exe):
         check("vigil-engine.exe 已编（engine/build.cmd）", False,
-              "引擎没编，下面四条对照无从谈起")
+              "引擎没编，下面几条对照无从谈起")
         return
+    src = os.path.join(HERE, "engine", "vigil_engine.cpp")
+    check("vigil-engine.exe 不比 vigil_engine.cpp 旧",
+          os.path.getmtime(src) <= os.path.getmtime(exe),
+          "源码比二进制新：上一次构建没成功或没重编，对照的是旧二进制，结论不作数")
     for name, why in (
-        ("compare_classify", "单会话判定逐字段（真实会话）"),
+        ("compare_classify", "单会话判定逐字段（真实会话 + 舍入边界）"),
         ("compare_snapshot", "整帧快照逐字段（同一时刻）"),
+        ("compare_snapshot_boundary", "阈值与取整边界（合成会话，年龄已知）"),
         ("compare_watch", "常驻 --watch 节奏与解析缓存"),
         ("compare_balance", "Key 存取双向互操作"),
     ):

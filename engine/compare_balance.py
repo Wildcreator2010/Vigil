@@ -27,8 +27,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import dsh_state as ds          # noqa: E402
+import _exe                   # noqa: E402
 
-EXE = os.path.join(HERE, "vigil-engine.exe")
+EXE = _exe.require_exe()
 PROBE_A = "CPP-WROTE-NOT-A-REAL-KEY-1111"
 PROBE_B = "PY-WROTE-NOT-A-REAL-KEY-2222"
 
@@ -39,9 +40,6 @@ def run(args, stdin=None):
 
 
 def main() -> int:
-    if not os.path.isfile(EXE):
-        print("先编引擎：engine/build.cmd")
-        return 2
     for var in ("DEEPSEEK_BALANCE_KEY", "DEEPSEEK_API_KEY"):
         os.environ.pop(var, None)              # 环境变量会盖住落盘分支
     sd = ds.state_dir()

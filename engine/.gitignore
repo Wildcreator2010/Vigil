@@ -2,8 +2,9 @@
 *.exe
 *.obj
 *.log
+*.out
+b.txt
 t-real.zstd
 out-utf8.log
-vcvars.log
 vcvars.log
 .git-commit-msg.txt

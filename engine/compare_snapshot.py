@@ -4,8 +4,9 @@
 主会话选择、waiting/recent 的筛选与上限、文案组装、字段白名单 —— 那些都在判定之外。
 所以再要一层：同一时刻、同一批真实会话，两边各出一帧，逐字段深比。
 
-余额那一格故意不比：HTTP + DPAPI + Key 发现还没搬过去，C++ 固定出"已禁用"，
-与 want_balance=False 的 Python 同形。搬完之后把 _SKIP 里的 balance 去掉即可。
+余额那一格比的是"已禁用"这个形状：两边都走 want_balance=False / --no-balance，
+字段集合与占位文案必须逐字一致（真实查询那一层由 compare_balance.py 单独对照，
+那里有 HTTP 时间戳，不能混进这一帧）。
 
 用法（在仓库根）:  python engine/compare_snapshot.py
 """
@@ -20,10 +21,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import dsh_state as ds          # noqa: E402
+import _exe                   # noqa: E402
 
-EXE = os.path.join(HERE, "vigil-engine.exe")
-# 不比的东西：时间戳两边必然不同；balance 是已知未搬的那一层
-_SKIP = {"generated_at", "balance"}
+EXE = _exe.require_exe()
+# 不比的东西只剩时间戳；balance 已经搬完，"已禁用"那一格要逐字比
+_SKIP = {"generated_at"}
 
 
 def walk(a, b, path=""):
@@ -57,9 +59,6 @@ def walk(a, b, path=""):
 
 
 def main() -> int:
-    if not os.path.isfile(EXE):
-        print("先编引擎：engine/build.cmd")
-        return 2
     ts = ds.now()
     py = ds.snapshot(ds.SESSION_GLOB, ts, want_balance=False)
     p = subprocess.run([EXE, "--snapshot", repr(ts), "--no-balance"],
@@ -69,6 +68,16 @@ def main() -> int:
         return 1
     cpp = json.loads(p.stdout.decode("utf-8"))
 
+    # 自证不是空跑：把 balance 那一格改坏一个字段，对照器必须立刻报出来。
+    # balance 曾经整格躺在 _SKIP 里（那时它确实还没搬），搬完之后一旦忘了摘掉、
+    # 或者哪天 walk() 被改成提前 return，这一层就又没人看了 —— 而"没人看"是
+    # 静默的。容差 0.05 吞掉 age_sec 那次是同一类事故，这里不再靠"我记得我在比"。
+    probe = json.loads(json.dumps(cpp))
+    probe["balance"]["available"] = True
+    if not any(d.startswith(".balance") for d in walk(py, probe)):
+        print("✗ 对照器没有在比 balance：_SKIP 里还留着它，或 walk() 短路了")
+        return 1
+
     print(f"Python: state={py['state']} sessions_scanned={py['sessions_scanned']} "
           f"waiting={len(py['waiting'])} recent={len(py['recent'])} sessions={len(py['sessions'])}")
     print(f"C++   : state={cpp['state']} sessions_scanned={cpp['sessions_scanned']} "
@@ -77,7 +86,7 @@ def main() -> int:
     for d in diffs[:40]:
         print("  ✗ " + d)
     if not diffs:
-        print("\n✓ 整帧快照逐字段一致（不比 generated_at 与 balance）")
+        print("\n✓ 整帧快照逐字段一致（只不比 generated_at）")
         return 0
     print(f"\n共 {len(diffs)} 处差异" + ("（只显示前 40 条）" if len(diffs) > 40 else ""))
     return 1
