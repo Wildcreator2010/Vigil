@@ -822,6 +822,42 @@ def check_runtime_row() -> None:
           "排法要收在 Ui 工厂里，别在页面里手搓 Grid")
 
 
+def check_engine_parity() -> None:
+    """C++ 引擎与 Python 引擎的对照门禁（--engine，也进 --all）。
+
+    为什么必须在切换**之前**装好：四个 compare_*.py 现在只是开发期工具，一旦
+    vigil-engine.exe 替下 CPython，它就是唯一实现 —— 那时没有门禁盯着，C++ 与
+    设计文档哪天悄悄分叉没人知道。所以先把判据挂上，再谈切换。
+
+    引擎没编出来时记 ✗ 而不是静默跳过：静默跳过等于把这条门禁变成"看心情生效"，
+    而 build.cmd 是纯手工步骤，最容易忘。
+    """
+    print("\n== C++ 引擎与 Python 引擎对照 ==")
+    exe = os.path.join(HERE, "engine", "vigil-engine.exe")
+    if not os.path.isfile(exe):
+        check("vigil-engine.exe 已编（engine/build.cmd）", False,
+              "引擎没编，下面四条对照无从谈起")
+        return
+    for name, why in (
+        ("compare_classify", "单会话判定逐字段（真实会话）"),
+        ("compare_snapshot", "整帧快照逐字段（同一时刻）"),
+        ("compare_watch", "常驻 --watch 节奏与解析缓存"),
+        ("compare_balance", "Key 存取双向互操作"),
+    ):
+        script = os.path.join(HERE, "engine", name + ".py")
+        try:
+            r = subprocess.run([sys.executable, "-X", "utf8", script],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=900, cwd=HERE)
+            ok = r.returncode == 0
+            tail = ((r.stdout or "").strip().splitlines() or [""])[-1]
+            if not ok:
+                tail = " | ".join(l for l in (r.stdout or "").splitlines() if "✗" in l)[:300]
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            ok, tail = False, f"{type(ex).__name__}: {ex}"
+        check(f"{name}：{why}", ok, tail[:300])
+
+
 def check_setup() -> None:
     print("\n== 安装向导 ==")
     if not shutil.which("dotnet"):
@@ -5276,6 +5312,8 @@ def main() -> int:
     check_shot_pipeline()
     check_brand_palette()
     check_brand_pixels()
+    if full or "--engine" in args:
+        check_engine_parity()
     panel_shots: dict[str, int] = {}
     if full or "--gui" in args:
         # 「空表那张」先用假引擎量好：它是本段所有「有没有数据行」门禁的基线
