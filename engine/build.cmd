@@ -33,7 +33,8 @@ cl /nologo /EHsc /W3 /O2 /std:c++20 /utf-8 ^
    third_party\zstd\decompress\zstd_ddict.c ^
    third_party\zstd\decompress\zstd_decompress.c ^
    third_party\zstd\decompress\zstd_decompress_block.c ^
-   /Fe:vigil-engine.exe
+   /Fe:vigil-engine.exe ^
+   crypt32.lib winhttp.lib
 if errorlevel 1 ( echo [FAIL] compile & exit /b 1 )
 
 del /q *.obj 2>nul

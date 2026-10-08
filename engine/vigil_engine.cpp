@@ -1061,6 +1061,263 @@ static void EmitSessionDict(W &w, const Row &r) {
     if (r.hasRecords) w.num("records", r.records); else w.nul("records");
 }
 
+// ---------------------------------------------------------------- 余额
+// 这一层的全部风险都在**互操作**上：C++ 存的 Key 必须 Python 读得回来，反之亦然
+// （切换期两边会并存；万一只有单边能读，表现是"保存成功但来源永远 none"，
+//  而保存那一步照样退出 0 —— 今天刚在 Python 侧修掉一个同型的不对称，见 15d003b）。
+// 所以 DPAPI 的参数逐项照 dsh_state.py 的 _dpapi：描述符 "Vigil"、无附加熵、
+// 加密时 CRYPTPROTECT_UI_FORBIDDEN，解密时 flags 给 0。
+#if defined(_WIN32)
+#include <wincrypt.h>
+#include <winhttp.h>
+#endif
+
+static std::string StateDir() {
+    const char *la = getenv("LOCALAPPDATA");
+    std::string base = (la && *la) ? std::string(la)
+                                   : (getenv("USERPROFILE") ? std::string(getenv("USERPROFILE")) + "\\AppData\\Local" : std::string("."));
+    return base + "\\Vigil";
+}
+
+static std::string BalancePath(const char *name) { return StateDir() + "\\" + name; }
+
+static bool Dpapi(const std::vector<unsigned char> &in, bool protect,
+                  std::vector<unsigned char> &out) {
+#if defined(_WIN32)
+    DATA_BLOB bi{}; bi.cbData = (DWORD)in.size(); bi.pbData = (BYTE *)in.data();
+    DATA_BLOB bo{};
+    BOOL ok = protect
+        ? CryptProtectData(&bi, L"Vigil", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &bo)
+        : CryptUnprotectData(&bi, nullptr, nullptr, nullptr, nullptr, 0, &bo);
+    if (!ok) return false;
+    out.assign(bo.pbData, bo.pbData + bo.cbData);
+    LocalFree(bo.pbData);
+    return true;
+#else
+    (void)in; (void)protect; (void)out;
+    return false;
+#endif
+}
+
+static std::string ReadTextFile(const std::string &path) {
+    std::vector<unsigned char> raw;
+    if (!ReadWholeFile(path, raw)) return "";
+    return std::string(raw.begin(), raw.end());
+}
+
+// Key 的落点。返回值是"来源"字符串，面板只显示它、不显示 Key 本身。
+struct KeyInfo { std::string key, source; };
+
+static KeyInfo BalanceKey() {
+    for (const char *var : {"DEEPSEEK_BALANCE_KEY", "DEEPSEEK_API_KEY"}) {
+        const char *v = getenv(var);
+        if (v && *v) {
+            std::string s = v;
+            while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            size_t f = s.find_first_not_of(" \t\r\n");
+            if (f != std::string::npos) return {s.substr(f), std::string("env:") + var};
+        }
+    }
+    std::vector<unsigned char> blob;
+    if (ReadWholeFile(BalancePath("balance.protected"), blob)) {
+        std::vector<unsigned char> plain;
+        if (Dpapi(blob, false, plain)) {
+            std::string s(plain.begin(), plain.end());
+            while (!s.empty() && (s.back() == '\0' || s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+            if (!s.empty()) return {s, "dpapi"};
+        }
+    }
+    // 明文候选：次序与 balance_key() 一致 —— state_dir() 排第一（DPAPI 失败时的
+    // 回退就落在那儿），再是引擎目录与用户目录下的几处历史位置
+    std::string home = getenv("USERPROFILE") ? getenv("USERPROFILE") : "";
+    std::vector<std::string> files = {
+        BalancePath("balance.key"),
+        ".\\balance.key",
+        "..\\balance.key",
+    };
+    if (!home.empty()) {
+        files.push_back(home + "\\.dsh\\deepseek_balance_key");
+        files.push_back(home + "\\.deepseek\\balance.key");
+    }
+    for (const auto &f : files) {
+        std::string s = ReadTextFile(f);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        if (s.empty()) continue;
+        size_t slash = f.find_last_of("\\/");
+        return {s, "file:" + (slash == std::string::npos ? f : f.substr(slash + 1))};
+    }
+    return {"", "none"};
+}
+
+static std::string SaveBalanceKey(const std::string &key) {
+    std::vector<unsigned char> in(key.begin(), key.end());
+    std::vector<unsigned char> out;
+    if (Dpapi(in, true, out)) {
+        std::string path = BalancePath("balance.protected");
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char *>(out.data()), (std::streamsize)out.size());
+        f.close();
+        return path;
+    }
+    // DPAPI 不可用：与 Python 同一处理 —— 退回明文并**照样算保存成功**，
+    // 所以路径里带这句提示，界面上不假装是加密的
+    std::string path = BalancePath("balance.key");
+    std::ofstream f(path, std::ios::trunc);
+    f << key;
+    f.close();
+    return path + "（DPAPI 不可用，已存为明文，请注意文件权限）";
+}
+
+static bool ClearBalanceKey(std::string &removedPath) {
+    for (const char *name : {"balance.protected", "balance.key"}) {
+        std::string p = BalancePath(name);
+        if (DeleteFileA(p.c_str())) { removedPath = p; return true; }
+    }
+    return false;
+}
+
+static double RefreshTokenMtime() { return FileMtime(StateDir() + "\\refresh.token"); }
+
+struct Balance {
+    bool available = false;
+    std::string currency, total, granted, toppedUp, error, source;
+    double fetchedAt = 0;
+    bool cached = false;
+    bool skipped = false;
+};
+
+static bool FetchJson(const std::string &key, std::string &body, std::string &err) {
+#if defined(_WIN32)
+    HINTERNET h = WinHttpOpen(L"Vigil", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!h) { err = "WinHttpOpen 失败"; return false; }
+    WinHttpSetTimeouts(h, 8000, 8000, 12000, 12000);
+    bool ok = false;
+    HINTERNET c = WinHttpConnect(h, L"api.deepseek.com", 443, 0);
+    if (c) {
+        std::string path = "/user/balance";
+        std::wstring wpath;
+        for (char ch : path) wpath += (wchar_t)(unsigned char)ch;
+        HINTERNET r = WinHttpOpenRequest(c, L"GET", wpath.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (r) {
+            std::wstring hdr = L"Authorization: Bearer ";
+            for (unsigned char ch : key) hdr += (wchar_t)ch;
+            hdr += L"\r\nAccept: application/json";
+            if (WinHttpAddRequestHeaders(r, hdr.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD)) {
+                if (WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                       WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                    WinHttpReceiveResponse(r, nullptr)) {
+                    DWORD status = 0, len = sizeof(status);
+                    WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
+                    std::string got;
+                    for (;;) {
+                        DWORD avail = 0;
+                        if (!WinHttpQueryDataAvailable(r, &avail) || !avail) break;
+                        std::vector<char> chunk(avail);
+                        DWORD read = 0;
+                        if (!WinHttpReadData(r, chunk.data(), avail, &read) || !read) break;
+                        got.append(chunk.data(), read);
+                    }
+                    if (status == 200) { body = got; ok = true; }
+                    else {
+                        std::string tail = got.substr(0, 200);
+                        err = "HTTP " + std::to_string(status) +
+                              (status == 401 ? "（Key 无效或没有余额查询权限，请到平台控制台 API Keys 页确认）" : "") +
+                              " " + tail;
+                        while (Utf8Len(err) > 220) err = err.substr(0, err.size() - 1);
+                    }
+                } else err = "HTTP 请求发送失败";
+            } else err = "请求头写入失败";
+            WinHttpCloseHandle(r);
+        }
+        WinHttpCloseHandle(c);
+    } else err = "连接 api.deepseek.com 失败";
+    WinHttpCloseHandle(h);
+    return ok;
+#else
+    (void)key; (void)body; (void)err;
+    return false;
+#endif
+}
+
+// TTL 缓存 + refresh.token 强刷，照 fetch_balance 的语义
+static Balance gBalanceCache;
+static bool gHaveCache = false;
+static double gCacheAt = 0;
+static const double kBalanceTtl = 300.0;
+
+static Balance FetchBalance(double ts, bool force) {
+    KeyInfo ki = BalanceKey();
+    if (!force && gHaveCache && (ts - gCacheAt) < kBalanceTtl) {
+        Balance b = gBalanceCache;
+        b.cached = true;
+        return b;
+    }
+    Balance b;
+    b.source = ki.source;
+    b.fetchedAt = ts;
+    if (ki.key.empty()) {
+        b.error = "未配置余额 Key";
+        gBalanceCache = b; gHaveCache = true; gCacheAt = ts;
+        return b;
+    }
+    std::string body, err;
+    if (!FetchJson(ki.key, body, err)) {
+        b.error = err;
+        gBalanceCache = b; gHaveCache = true; gCacheAt = ts;
+        return b;
+    }
+    JValue root;
+    if (!json::Parse(body, root) || root.kind != JValue::Obj) {
+        b.error = "接口返回不是合法 JSON";
+        gBalanceCache = b; gHaveCache = true; gCacheAt = ts;
+        return b;
+    }
+    const JValue *infos = root.at("balance_infos");
+    const JValue *first = (infos && infos->kind == JValue::Arr && !infos->arr.empty())
+                              ? &infos->arr.front() : nullptr;
+    auto strOf = [](const JValue *v) -> std::string {
+        if (!v) return "";
+        if (v->kind == JValue::Str) return v->str;
+        return Stringify(*v);
+    };
+    const JValue *avail = root.at("is_available");
+    b.available = (!avail || avail->b) && first != nullptr;
+    if (first) {
+        b.currency = strOf(first->at("currency"));
+        b.total = strOf(first->at("total_balance"));
+        b.granted = strOf(first->at("granted_balance"));
+        b.toppedUp = strOf(first->at("topped_up_balance"));
+    }
+    if (b.currency.empty()) b.currency = strOf(root.at("currency"));
+    if (b.total.empty()) {
+        b.available = false;
+        b.error = "接口未返回余额字段：" + Utf8Trunc(body, 160);
+    }
+    gBalanceCache = b; gHaveCache = true; gCacheAt = ts;
+    return b;
+}
+
+static void EmitBalance(W &w, const Balance &b, bool wantBalance) {
+    if (!wantBalance) {
+        w.boolean("available", false);
+        w.str("error", "已禁用");
+        w.boolean("skipped", true);
+        return;
+    }
+    w.boolean("available", b.available);
+    if (b.currency.empty()) w.nul("currency"); else w.str("currency", b.currency);
+    if (b.total.empty()) w.nul("total"); else w.str("total", b.total);
+    if (b.granted.empty()) w.nul("granted"); else w.str("granted", b.granted);
+    if (b.toppedUp.empty()) w.nul("topped_up"); else w.str("topped_up", b.toppedUp);
+    if (b.error.empty()) w.nul("error"); else w.str("error", b.error);
+    w.str("source", b.source);
+    { char buf[32]; snprintf(buf, sizeof buf, "%.6f", b.fetchedAt); w.key("fetched_at"); w.o += buf; }
+    w.boolean("cached", b.cached);
+}
+
 // ---------------------------------------------------------------- 整帧快照
 static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nullptr) {
     long long hits = 0;
@@ -1086,7 +1343,20 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
 
     // 余额这一层还没搬过来（HTTP + DPAPI + Key 发现是独立一块），
     // 所以先固定出"已禁用"那一格 —— 与 python snapshot(want_balance=False) 同形。
+    // 余额：--no-balance 时与 Python 一样给"已禁用"那一格；要查时按 TTL 与
+    // refresh.token 决定这一轮是否真的发请求
+    Balance bal;
+    if (wantBalance) {
+        double token = RefreshTokenMtime();
+        bal = FetchBalance(ts, token > 0 && token > gCacheAt);
+    } else {
+        bal.available = false; bal.error = "已禁用"; bal.skipped = true;
+    }
     std::string money = "--";
+    if (wantBalance && bal.available) {
+        std::string sym = bal.currency == "USD" ? "$" : (bal.currency == "CNY" ? "¥" : "");
+        money = sym + (bal.total.empty() ? "0" : bal.total);
+    }
 
     W w;
     w.o += '{';
@@ -1134,9 +1404,7 @@ static std::string Snapshot(double ts, bool wantBalance, long long *hitsOut = nu
     w.o += ']';
 
     w.begin("balance");
-    w.boolean("available", false);
-    w.str("error", wantBalance ? "未配置余额 Key" : "已禁用");
-    if (!wantBalance) w.boolean("skipped", true);
+    EmitBalance(w, bal, wantBalance);
     w.end();
 
     w.num("sessions_scanned", (long long)rows.size());
@@ -1224,9 +1492,36 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
+    if (mode == "--save-balance-key") {
+        // Key 只从 stdin 进：argv 不是秘密存放处（本机任何进程都读得到子进程命令行）
+        std::string key, line;
+        while (std::getline(std::cin, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            key += line;
+        }
+        if (key.empty()) { std::fprintf(stderr, "没有读到 Key，已取消。\n"); return 2; }
+        std::printf("已保存到 %s\n", SaveBalanceKey(key).c_str());
+        return 0;
+    }
+    if (mode == "--clear-balance-key") {
+        std::string removed;
+        if (ClearBalanceKey(removed)) { std::printf("已删除 %s\n", removed.c_str()); return 0; }
+        std::printf("没有已保存的 Key\n");
+        return 0;
+    }
+    if (mode == "--balance-probe") {
+        // 只报来源与长度，**永不**报 Key 本身：面板那套"只显示来源"的口径
+        // 不能因为多了个诊断入口就漏出去
+        KeyInfo ki = BalanceKey();
+        std::printf("source=%s len=%zu\n", ki.source.c_str(), ki.key.size());
+        return 0;
+    }
     std::printf("用法: vigil-engine --session <会话文件> <mtime> <now>\n"
                 "      vigil-engine --classify <mtime> <now>  < records.jsonl\n"
                 "      vigil-engine --snapshot <now> [--no-balance]\n"
-                "      vigil-engine --watch [--interval 秒] [--no-balance]\n");
+                "      vigil-engine --watch [--interval 秒] [--no-balance]\n"
+                "      vigil-engine --save-balance-key   (Key 从 stdin 进)\n"
+                "      vigil-engine --clear-balance-key\n"
+                "      vigil-engine --balance-probe\n");
     return 2;
 }
