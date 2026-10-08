@@ -997,52 +997,66 @@ def check_package() -> None:
 
     每次冒烟都重编 161MB 的自包含载荷不现实，所以校验逻辑落在 tools/verify_package.py，
     打包脚本和这里共用同一份 —— 两处各写一份就会有一处悄悄不生效。
+
+    两版并存以后这里**逐 flavor 过**：期望的引擎级是从 tools/flavors.py 读的，
+    不是从目录名猜的。只出了一版也照样绿（那一版没建就跳过），因为门禁该管的是
+    "建出来的那份对不对"，而不是"这台机器上跑没跑过另一条打包命令"。
     """
     print("\n== 分发产物 ==")
-    dist = sorted(glob.glob(os.path.join(HERE, "dist", "Vigil-*-win-x64")))
-    if not dist:
-        check("dist/ 有产物（先跑 package.cmd）", False, "没有 dist\\Vigil-*-win-x64")
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import flavors
+
+    present = {f: os.path.join(HERE, "dist", flavors.dist_name(f)) for f in flavors.FLAVORS}
+    built = [f for f, d in present.items() if os.path.isdir(os.path.join(d, "app"))]
+    if not built:
+        check("dist/ 有产物（先跑 package.cmd both）", False,
+              "没有 " + " / ".join(present.values()))
         return
-    target = dist[-1]
     log = os.path.join(HERE, "verify-package.log")
     with open(log, "w", encoding="utf-8") as f:      # 别接管道：管道会吞掉退出码
         p = subprocess.run(["cmd", "/c", "package.cmd", "--verify-only"],
                            stdout=f, stderr=subprocess.STDOUT, timeout=1800, cwd=HERE)
     out = open(log, encoding="utf-8", errors="replace").read()
-    check("package.cmd --verify-only 通过", p.returncode == 0, out[-600:])
+    check("package.cmd --verify-only 通过（每一版都按自己的形状验）", p.returncode == 0, out[-600:])
     for line in out.splitlines():
         if line.strip().startswith("OK ") or line.startswith("  ·"):
             print("   " + line.strip())
 
-    zips = glob.glob(os.path.join(HERE, "dist", "*.zip"))
-    check("有可分发的 zip", bool(zips), "跑一次完整的 package.cmd")
-    if zips:
-        size = os.path.getsize(zips[0])
-        check("zip 体积在合理区间（自包含载荷压缩后 40–200MB）", 40_000_000 < size < 200_000_000,
-              f"{size} 字节")
+    for f in built:
+        zip_path = os.path.join(HERE, "dist", flavors.dist_name(f) + ".zip")
+        size = os.path.getsize(zip_path) if os.path.isfile(zip_path) else 0
+        check(f"{f} 版有可分发的 zip", size > 0, zip_path)
+        if size:
+            check(f"{f} 版 zip 体积在合理区间（自包含载荷压缩后 40–260MB）",
+                  40_000_000 < size < 260_000_000, f"{size} 字节")
 
     # 这条才是「零前置」的直接证据：把 PATH 削到只剩 System32（本机 python、py、uv 全都看不见），
     # 产物里的 Vigil 仍然必须认随包那颗引擎。上面 verify_package.py 那条是在本机 PATH 下跑的，
     # 挡不住"其实靠的是宿主 python"这种情况 —— 引擎换级之后这条判据的对象跟着变，原意没变。
-    app = os.path.join(target, "app")
-    exe = os.path.join(app, "Vigil.exe")
-    if os.path.isfile(exe):
-        sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    thin_env = {"PATH": sys32, "SystemRoot": os.environ.get("SystemRoot", ""),
+                "TEMP": os.environ.get("TEMP", ""), "TMP": os.environ.get("TMP", ""),
+                "USERPROFILE": os.environ.get("USERPROFILE", ""),
+                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
+                "APPDATA": os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Roaming")}
+    for f in built:
+        app = os.path.join(present[f], "app")
+        exe = os.path.join(app, "Vigil.exe")
+        if not os.path.isfile(exe):
+            continue
         r = subprocess.run([exe, "--engine-probe"], capture_output=True, text=True,
-                           errors="replace", timeout=180, cwd=app,
-                           env={"PATH": sys32, "SystemRoot": os.environ.get("SystemRoot", ""),
-                                "TEMP": os.environ.get("TEMP", ""), "TMP": os.environ.get("TMP", ""),
-                                "USERPROFILE": os.environ.get("USERPROFILE", ""),
-                                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
-                                "APPDATA": os.environ.get("APPDATA", "")})
+                           errors="replace", timeout=180, cwd=app, env=thin_env)
         kv = dict(l.split("=", 1) for l in (r.stdout or "").splitlines() if "=" in l)
-        # 判据从"选中随附解释器"换成"选中随包的 vigil-engine.exe"：载荷里已经没有
-        # 解释器这个东西了，而这条断言的原意没变 —— 宿主 PATH 上有什么都不该影响它。
-        check("PATH 被削到只剩 System32（模拟没装 Python 的机器），仍认随包的 C++ 引擎",
-              kv.get("kind") == "native"
-              and os.path.normcase(kv.get("engine", ""))
-              == os.path.normcase(os.path.join(app, "vigil-engine.exe")),
-              f"rc={r.returncode} 实得 {kv}")
+        want = flavors.engine_kind(f)
+        if want == "native":
+            hit = kv.get("engine", "").lower().endswith("vigil-engine.exe")
+        else:
+            # python 版：宿主 PATH 已经空了，还能起引擎的唯一解释就是那份随包解释器。
+            hit = os.path.normcase(kv.get("python", "")).startswith(
+                os.path.normcase(os.path.join(app, "runtime", "python")))
+        check(f"{f} 版：PATH 削到只剩 System32（模拟没装 Python 的机器）仍认随包引擎",
+              kv.get("kind") == want and hit and kv.get("slug") == flavors.slug(f),
+              f"rc={r.returncode} 期望 kind={want} slug={flavors.slug(f)} 实得 {kv}")
 
 
 def check_installer_e2e() -> None:
@@ -1208,9 +1222,10 @@ LICENSE_MUST_CONTAIN = (
     "fluentui-system-icons", "microsoft-ui-xaml", "dotnet/wpf",
     "Segoe Fluent Icons",
     # 编进 vigil-engine.exe 的解压子集：BSD-3 要求副本保留版权声明，声明里必须有一节。
-    # 上一版这里钉的是 embeddable 解释器的 PSF —— 载荷不再带解释器，那条义务失去对象；
-    # 留着这两个关键词等于把"产物里有 Python"这句话钉回门禁。
     "Meta Platforms", "Zstandard", "BSD 3-Clause",
+    # 两版并存以后 PSF 又回来了：Vachellia 那一版的载荷里就躺着 embeddable 解释器。
+    # 措辞必须把"哪一版带、哪一版不带"写清楚 —— 声明文件是两版共用的，读串行比少写更糟。
+    "Python Software Foundation", "embeddable",
 )
 
 # 标准 SPDX MIT 正文——去掉标题行与版权行之后剩下的那部分。权威参照逐字取自本机

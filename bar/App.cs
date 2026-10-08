@@ -1311,15 +1311,20 @@ namespace Vigil
         /// <summary>`Vigil.exe --engine-probe`：只报解析结果就退，不开窗口、不抢单实例。</summary>
         private static int EngineProbe()
         {
-            // 四行 k=v 是给冒烟与安装包校验读的，不是给人看的，所以 kind 单独一行：
+            // 六行 k=v 是给冒烟与安装包校验读的，不是给人看的，所以 kind 单独一行：
             // 随包切到 vigil-engine.exe 之后，"python=none" 不再是故障，
             // 而 kind 缺了的话两边的判据都只能猜。
+            // codename/slug 是两版并存以后加的：产物校验光看"引擎是哪一级"不够，
+            // 还得确认这份 exe 认自己是哪一版 —— 否则 Python 引擎那版会装进
+            // Programs\Vigil-Lilium，而页面上写着 Lilium。
             string kind = Engine.Kind();
             string exe = Engine.NativePath(), script = Engine.ScriptPath();
             string py = Engine.PythonForFallback();
             Console.WriteLine("kind=" + (kind.Length == 0 ? "none" : kind));
             Console.WriteLine("engine=" + (exe ?? script ?? "none"));
             Console.WriteLine("python=" + (exe != null ? "none" : (py ?? "none")));
+            Console.WriteLine("codename=" + VersionCodename);
+            Console.WriteLine("slug=" + ProductSlug);
             bool ok = exe != null || (script != null && py != null);
             // zstd 这一格的原义是"选中的解释器能 import compression.zstd"。
             // C++ 那份把解压能力编在自己怀里，所以同一句"能不能解 zstd"答案是 built-in。

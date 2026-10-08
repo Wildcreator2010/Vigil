@@ -71,22 +71,47 @@ def main() -> int:
         lines.append(f"{fname}\n  组件：{role}\n  来源包：{pkg} {ver}\n  许可证：MIT\n")
         print(f"  OK {fname}  <- {pkg} {ver}")
 
-    # zstd 的原文从**仓库里那份 vendored 源码**取，而不是从 THIRD-PARTY-NOTICES 抄：
-    # 声明文件是人写的摘要，摘要会漂；随包分发的那 11 个 .c 自己带的 LICENSE 才是凭据。
-    # 上一版这里收的是 embeddable 解释器的 PSF 全文 —— 载荷不再带 CPython，
-    # 那条义务跟着走；换成编译进 vigil-engine.exe 的解压子集。
-    zsrc = os.path.join(ROOT, "engine", "third_party", "zstd", "LICENSE")
-    if os.path.isfile(zsrc):
-        with open(zsrc, encoding="utf-8", errors="replace") as f:
-            body = f.read()
-        with open(os.path.join(out, "zstd-BSD.txt"), "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(body)
-        lines.append("zstd-BSD.txt\n  组件：libzstd 解压子集（编进 app\\vigil-engine.exe）\n"
-                     "  来源：engine\\third_party\\zstd，原文即本文件\n"
-                     "  许可证：BSD-3-Clause（与 Apache-2.0 双许可，本项目取 BSD-3）\n")
-        print("  OK zstd-BSD.txt  <- engine\\third_party\\zstd\\LICENSE")
+    # 剩下的原文**看载荷里实际有什么**才决定收哪一份，而不是看打包时传了什么参数：
+    # 声明义务的对象是"随包分发了什么"，参数说了不算（判据与 verify_package.py 同一处）。
+    #   cpp 版  → vigil-engine.exe 怀里编进了 vendored zstd 解压子集（BSD-3）
+    #   python 版 → app\runtime\python 那份 embeddable CPython（PSF）
+    # 上一版这里在换引擎时把 PSF 那条整个删了 —— 那是错的：1.0.0 那条线还在出包，
+    # 它的载荷里就躺着解释器。
+    ships_python = os.path.isfile(os.path.join(dist, "app", "runtime", "python", "python.exe"))
+    ships_engine = os.path.isfile(os.path.join(dist, "app", "vigil-engine.exe"))
+    if ships_python and ships_engine:
+        missing.append("载荷里同时有 vigil-engine.exe 与 runtime\\python，分不清是哪一版")
+    elif ships_python:
+        py_lic = os.path.join(dist, "app", "runtime", "python", "LICENSE.txt")
+        if os.path.isfile(py_lic):
+            with open(py_lic, encoding="utf-8", errors="replace") as f:
+                body = f.read()
+            with open(os.path.join(out, "python-PSF.txt"), "w",
+                      encoding="utf-8", newline="\r\n") as f:
+                f.write(body)
+            lines.append("python-PSF.txt\n  组件：CPython embeddable（app\\runtime\\python，"
+                         "即这一版的引擎解释器）\n"
+                         "  许可证：Python Software Foundation License\n"
+                         "  同一份原文也随附在 app\\runtime\\python\\LICENSE.txt\n")
+            print("  OK python-PSF.txt  <- app\\runtime\\python\\LICENSE.txt")
+        else:
+            missing.append("app\\runtime\\python\\LICENSE.txt（embeddable 包解压缺失）")
     else:
-        missing.append("engine\\third_party\\zstd\\LICENSE（vendored zstd 的原文，随包分发义务）")
+        # zstd 的原文从**仓库里那份 vendored 源码**取，而不是从 THIRD-PARTY-NOTICES 抄：
+        # 声明文件是人写的摘要，摘要会漂；随包分发的那 11 个 .c 自己带的 LICENSE 才是凭据。
+        zsrc = os.path.join(ROOT, "engine", "third_party", "zstd", "LICENSE")
+        if os.path.isfile(zsrc):
+            with open(zsrc, encoding="utf-8", errors="replace") as f:
+                body = f.read()
+            with open(os.path.join(out, "zstd-BSD.txt"), "w",
+                      encoding="utf-8", newline="\r\n") as f:
+                f.write(body)
+            lines.append("zstd-BSD.txt\n  组件：libzstd 解压子集（编进 app\\vigil-engine.exe）\n"
+                         "  来源：engine\\third_party\\zstd，原文即本文件\n"
+                         "  许可证：BSD-3-Clause（与 Apache-2.0 双许可，本项目取 BSD-3）\n")
+            print("  OK zstd-BSD.txt  <- engine\\third_party\\zstd\\LICENSE")
+        else:
+            missing.append("engine\\third_party\\zstd\\LICENSE（vendored zstd 的原文，随包分发义务）")
 
     with open(os.path.join(out, "README.txt"), "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write("\n".join(lines))
