@@ -346,3 +346,47 @@ package.cmd [win-x64|win-arm64]
 反过来红、而"退出后无孤儿"变成**看不见**孤儿 —— 实测留下 3 个睡死的 vigil-engine.exe。
 README 承诺的"靠 stdout 管道断裂自行退出"在 C++ 这边不自动成立（`printf` 失败只置
 错误位、不抛），要靠 `ferror(stdout)` 显式检查，判据在 `compare_watch.orphan_check()`。
+
+---
+
+## 增补（2026-10-08）：同一台机器装两版 —— Vachellia 与 Lilium 并存
+
+上一条增补把引擎换成 C++ 之后，出现了一个那条增补没回答的问题：**上一版还得能装**。
+载荷换级是改分发物，不是把用户已经装上的那套删掉重来的许可。于是同一条产品线要同时
+出两个版本，且**名字都还叫 Vigil**，区分靠版本代号：
+
+| 代号 | 版本号 | 引擎 | 产物目录 |
+| --- | --- | --- | --- |
+| Vachellia farnesiana | 1.0.0 | 随包 CPython 跑 `dsh_state.py` | `Vigil-1.0.0-vachellia-farnesiana-win-x64` |
+| Lilium | 1.1.0 | `vigil-engine.exe`（C++） | `Vigil-1.1.0-lilium-win-x64` |
+
+两版由**同一份源码**出：`package.cmd [cpp|python|both]` 只换发布参数
+（`-p:Version/-p:ProductCodename/-p:ProductSlug`），产品代码一行不动 —— 所以任何一次
+数字变化都能归因到参数上，这也是 §4「载荷形状」那条判据仍然成立的前提。
+
+### 推翻与新增
+
+| 原设计 | 现在的做法 | 依据 |
+| --- | --- | --- |
+| §5：安装目录 `%LOCALAPPDATA%\Programs\Vigil`、卸载键 `Uninstall\Vigil`、`Vigil.lnk` | **各带 slug**：`Programs\Vigil-<slug>` / `Uninstall\Vigil-<slug>` / `Vigil-<slug>.lnk`，DisplayName 带代号 | 共用一个名字时，后装的那版会把前一版的目录与快捷方式**静默盖掉**，症状是"装了 A 打开是 B"，两台机器上都复现不出来 |
+| §5：Run 值名 `Vigil`（每版一条） | **两版共用一个 Run 槽**；向导发现槽被另一版占用时默认不勾并说明原因，卸载只清指向自己的那一条 | 两个都注册 = 开机两版都起 = 第二版必然弹"同时只能开一个"，用户每天开机被骚扰一次；而"能不能关掉"仍然是用户的开关（`/NO-AUTOSTART` + 面板里那条 ToggleSwitch 都没变） |
+| §4/§6：数据目录归这一次安装所有 | `%LOCALAPPDATA%\Vigil` 是**两版共用**的（settings.json 与余额 Key 都在那儿），卸载任何一版都不动它 | Key 是按当前 Windows 账户 DPAPI 加密的，换版本要求重录一次是把用户的成本算成产品的便利 |
+| §6 第 3 步：第二个实例静默把面板请求交给首个实例就退出 | 带 `--panel` 来仍静默交接；**空手再开一次**弹一个走品牌色板的告知窗，主按钮叫出在跑那一版的面板，8 秒无人理会自收 | "我双击的为什么没开"从此要有答案。原生 MessageBox 不算答案（弹窗也是界面，用品牌资源）；而"再点一次图标叫出面板"是改名前就有的有用行为，不能被弹窗压在下面 |
+| —— | 装任何一版之前先跑 `MigrateLegacyInstall`：把分版本之前那套 `Programs\Vigil` **整棵树搬**到 Vachellia 身份下，注册表改名、Run 路径改写、.lnk 重建 | 遗留那版的引擎就是 CPython，按上表的对应关系它的身份是 Vachellia。判据用 marker 文件钉"同一棵树被搬走"，不是"新装了一份" |
+| §9 产物校验 | 载荷必须**自证身份**：目录名、两个 exe 的 FileVersion、`--engine-probe` 的 kind/codename/slug、该随包的那份许可证原文，全部对着 `tools/flavors.py` 逐项比 | 只查"文件齐不齐"的校验，对"Python 引擎那版被装进 Vigil-Lilium"是瞎的 |
+| §8 收许可证 | 收哪一份看**解压完的载荷里实际有什么**，不看打包参数 | 随附义务的对象是"实际分发了什么"。上一条增补把 PSF 整节删掉即为反例：Vachellia 那条线还在出包，它的载荷里就躺着解释器 |
+
+未被推翻的部分仍然成立：安装器本体（§5 的流程与开关）、§3 可行性实测、
+"构建输出不要接管道"那条编译门禁。
+
+### 这一段踩到的坑
+
+**门禁自己杀死了自己**：收尾时用 `engine_pids()` 逐个 `taskkill /f /pid`，而
+`engine_pids()` 的口径是"机器上所有 python.exe + vigil-engine.exe"—— 里面包括正在跑
+这段冒烟的那个 python。现场不是报错，是**日志戛然而止、连汇总行都没有**，退出码 1，
+看着像 smoke_test 自己坏了。改按镜像名收（`taskkill /f /im vigil-engine.exe`）。
+凡是"清理一组进程"的收尾，先问一句：这个集合里有没有我。
+
+**判据的 substring 会自己咬自己**：`Programs\Vigil` 是 `Programs\Vigil-Vachellia` 的
+前缀，"改写后不留指向老窝的路径"用裸 `in` 判就成了**永远红**。带尾分隔符比。
+和 §12 那几条同族：红一大堆时先怀疑判据，再怀疑产品。

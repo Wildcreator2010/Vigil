@@ -1,6 +1,15 @@
 # Vigil
 
-**Vigil** —— 版本代号 *Vachellia farnesiana*。作者 Wildcreator。
+**Vigil** —— 作者 Wildcreator。同一条产品线上出**两个版本**，靠代号区分：
+
+| 代号 | 版本号 | 状态引擎 | 载荷 |
+| --- | --- | --- | --- |
+| *Vachellia farnesiana* | 1.0.0 | 随包的 CPython 跑 `dsh_state.py` | 184MB / zip 82.6MB |
+| *Lilium* | 1.1.0 | `vigil-engine.exe`（C++，自带 zstd 解压） | 161MB / zip 70.5MB |
+
+两版**可以在同一台机器上同时装着**（各自 `Programs\Vigil-<代号>`、各自卸载项），但
+**同时只能开一版**：第二个开起来的会弹一个说明窗，主按钮直接把在跑那一版的面板叫出来。
+设置与余额 Key 两版共用（`%LOCALAPPDATA%\Vigil`），开机自启也只有一个位置。
 
 嵌在 Windows 任务栏里的 dsh 会话守望条 + 控制台。
 
@@ -27,11 +36,13 @@
 engine\build.cmd :: 编 C++ 状态引擎（要 MSVC；不编的话开发期自动退到 python 那一级）
 build.cmd        :: dotnet build -c Release（开发期：框架依赖，只在装了 .NET 10 SDK 的机器上跑）
 start-bar.bat    :: 启动 bar\bin\Release\net10.0-windows\Vigil.exe
-package.cmd      :: 出可分发到任何电脑的零前置安装包（第一步就是 engine\build.cmd）
+package.cmd      :: 出可分发到任何电脑的零前置安装包（默认 Lilium 那版；python / both 见下）
 ```
 
 `build.cmd` 和 `package.cmd` 是两条路，别混：前者 6.7MB、秒编、要求本机有运行时；
 后者 161MB 自包含 + 0.5MB 引擎、要跑几分钟、产物什么都不要求。
+（工程文件里的默认身份是**当前分支**那一版：`Lilium` / 1.1.0。出另一版不用切代码，
+`package.cmd python` 只是把发布参数换成 Vachellia 那一套 —— 产品代码一行不动。）
 （开发期没跑 `engine\build.cmd` 时，`Vigil.exe --engine-probe` 会报 `kind=python` —— 那
 是回退级在工作，不是坏，但冒烟里那七条 C++↔Python 对照会红，因为引擎没编出来。）
 
@@ -47,7 +58,8 @@ python test_dsh_state.py --live
 ```bat
 python smoke_test.py           :: 引擎与 CLI 契约，无副作用
 python smoke_test.py --setup   :: 编译安装向导 + 开一次窗口读控件 + 静默装到 %TEMP% 再卸载
-python smoke_test.py --package :: 校验 dist/ 分发产物（随包引擎跑真快照、两个 exe 版本对齐）
+python smoke_test.py --package :: 校验 dist/ 分发产物（每一版按自己的形状验、两个 exe 版本对齐）
+python smoke_test.py --coexist :: 两版并存 / 遗留单版迁移 / 第二实例的告知窗（要 dist/ 真产物）
 python smoke_test.py --all     :: 上面全部 + Release 编译 + 状态栏 GUI 冒烟
 ```
 
@@ -61,13 +73,21 @@ python smoke_test.py --all     :: 上面全部 + Release 编译 + 状态栏 GUI 
 不支持 Win7/8。
 
 ```bat
-package.cmd                       :: 产出 dist\Vigil-<版本>-win-x64\ 与同名 zip（约 83MB）
-package.cmd --verify-only         :: 只校验已有产物（冒烟走这条，不重新 publish）
+package.cmd cpp                 :: 默认：Lilium 那一版 → dist\Vigil-1.1.0-lilium-win-x64\ + 同名 zip
+package.cmd python              :: Vachellia 那一版 → dist\Vigil-1.0.0-vachellia-farnesiana-win-x64\
+package.cmd both                :: 两版各出一份（先 python 后 cpp）
+package.cmd --verify-only       :: 只校验已有产物（冒烟走这条，不重新 publish）
 ```
+
+版本参数（版本号 / 代号 / slug）集中在 `tools/flavors.py`，打包与产物校验读的是同一张表；
+出包前会先校 SHA-256 再解压那份 embeddable 解释器，不会把没核对过的下载物发给别人。
 
 把 zip 拷到目标机 → **整个文件夹解压出来**（别在压缩包里双击）→ 双击 `Vigil-Setup.exe`。
 没代码签名，SmartScreen 会拦一次，点「更多信息 → 仍要运行」。装到
-`%LOCALAPPDATA%\Programs\Vigil`，只写 `HKCU`，装完在「设置 → 应用」里能看到、也能从那里卸载。
+`%LOCALAPPDATA%\Programs\Vigil-<slug>`（两版各占一个目录），只写 `HKCU`，装完在「设置 → 应用」
+里能看到 `Vigil Lilium` / `Vigil Vachellia farnesiana` 两条，各自能卸载。
+分版本之前那套单版安装（`Programs\Vigil`）在装任何一版之前都会被自动迁到 Vachellia 的身份上，
+注册表与快捷方式跟着改名，设置与余额 Key 一个字节都不动。
 
 命令行 / 无人值守：
 
@@ -77,17 +97,19 @@ Vigil-Setup.exe /UNINSTALL /S                 :: 静默卸载（默认保留设�
 Vigil-Setup.exe /S /NO-AUTOSTART /NO-START    :: 不写开机自启、装完不启动
 ```
 
-里面装了什么：自包含的 .NET 10 运行时（161MB / 259 个文件）+ `vigil-engine.exe`
-（0.5MB 的 C++ 状态引擎，zstd 解压子集编在它自己怀里）+ `dsh_state.py`（回退级脚本）+ 安装向导。
-载荷里**不再带解释器** —— 少 24MB，目标机上也没有"到底认的哪个 Python"可猜。
-第三方许可证原文随附在 `licenses\`，见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 第 4、5 节。
+里面装了什么：自包含的 .NET 10 运行时（259 个文件）+ 状态引擎 + `dsh_state.py` + 安装向导。
+引擎那一格按版本不同：**Lilium** 是 `vigil-engine.exe`（0.5MB 的 C++，zstd 解压子集编在它
+自己怀里，载荷 161MB），**Vachellia** 是 `app\runtime\python\` 那份 embeddable CPython
+（24MB，载荷 184MB），`dsh_state.py` 在前者是回退级、在后者就是引擎本体。
+第三方许可证原文随附在 `licenses\`，收哪一份看**这个目录里实际有什么**，
+见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 第 4、5 节。
 
-想单独用引擎，不必装任何东西：
+想单独用引擎，不必装任何东西（装在系统里的那份在 `Programs\Vigil-Lilium\`）：
 
 ```bat
-%LOCALAPPDATA%\Programs\Vigil\vigil-engine.exe --pretty    :: 详细视图
-%LOCALAPPDATA%\Programs\Vigil\vigil-engine.exe --json      :: 一行机器可读快照
-%LOCALAPPDATA%\Programs\Vigil\vigil-engine.exe --states    :: 状态图例
+%LOCALAPPDATA%\Programs\Vigil-Lilium\vigil-engine.exe --pretty    :: 详细视图
+%LOCALAPPDATA%\Programs\Vigil-Lilium\vigil-engine.exe --json      :: 一行机器可读快照
+%LOCALAPPDATA%\Programs\Vigil-Lilium\vigil-engine.exe --states    :: 状态图例
 ```
 
 ## 怎么嵌进任务栏的
@@ -192,11 +214,11 @@ Key 存在 `%LOCALAPPDATA%\Vigil\balance.protected`，用当前 Windows 账户�
 | `bar/Settings.cs` | 设置持久化（`settings.json`：轮询间隔、通知开关、重复间隔、主题、是否显示状态条） |
 | `bar/Panel/` | 控制面板（控制台）：左侧导航 + 概览/通知/外观/运行/余额/关于六页，余额 Key 在「余额」页录入 |
 | `test_dsh_state.py` | 16 个状态用例 + 端到端临时会话目录断言，`--live` 加真实数据冒烟 |
-| `smoke_test.py` | 冒烟工具：CLI 契约 + `--demo` 全状态 + 余额 Key 存取，`--build`/`--gui` 加编译与停靠校验 |
+| `smoke_test.py` | 冒烟工具：CLI 契约 + `--demo` 全状态 + 余额 Key 存取，`--build`/`--gui` 加编译与停靠校验，`--package`/`--coexist` 加产物与两版并存校验 |
 | `build.cmd` `start-bar.bat` | 开发期编译 / 启动 |
 | `setup/` | 安装向导（net48 纯代码 WPF，26KB；`Installer.cs` 干活、`Ui.cs` 画界面、`Program.cs` 分参数） |
-| `package.cmd` | 出零前置分发物：自包含 publish + 随附 CPython + 收许可证原文 + 校验 + 压 zip |
-| `tools/` | 常设脚本：`verify_package.py`（产物校验）、`collect_licenses.py`（收第三方许可证原文）、`read_version.py`、`write_readme_install.py`、`shot_window.py`（把真窗口的「Vigil 控制台」抓到前台截屏，专查离屏 `--panel-shot` 看不见的 DWM 背衬与标题栏） |
+| `package.cmd` | 出零前置分发物：`[cpp\|python\|both]` 两版各一套 —— 自包含 publish + 随包引擎（C++ exe 或 embeddable CPython）+ 收许可证原文 + 按 flavor 校验 + 压 zip |
+| `tools/` | 常设脚本：`flavors.py`（两个版本的版本号/代号/slug 唯一出处）、`verify_package.py`（产物校验，含"这一版得自认是哪一版"）、`collect_licenses.py`（按载荷实际内容收第三方许可证原文）、`read_version.py`、`write_readme_install.py`（按 flavor 生成安装说明）、`shot_window.py`（把真窗口的「Vigil 控制台」抓到前台截屏，专查离屏 `--panel-shot` 看不见的 DWM 背衬与标题栏） |
 | `LICENSE` | 本项目自身的 MIT 许可证全文 |
 | `THIRD-PARTY-NOTICES.md` | 第三方组件与素材的归属声明（含 WPF-UI 及其传递依赖的许可证原文） |
 
