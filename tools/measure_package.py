@@ -1,7 +1,15 @@
 """量打包变体的**体积**与**冷启动**，一把尺子比着看。
 
 为什么需要它：'用 C++ 重构能省多少' 这种问题不该靠感觉回答。185MB 的自包含分发物里，
-CPython 只占 24MB，剩下是托管运行时 —— 到底是哪一刀有效，得量出来。
+CPython 只占 24MB，剩下是托管运行时 —— 到底是哪一刀有效，得量出来。那一刀之后
+载荷里已经没有解释器了（引擎换成 vigil-engine.exe，0.5MB），这把尺子仍然成立，
+但**必须把引擎拷进每个变体的产物**：`dotnet publish` 不会带它（csproj 里没这条，
+package.cmd 是手工 copy 的），不拷的话量的就是"找不到 exe → 退到本机 python"
+那条回退路，与用户实际拿到的东西不是同一件事。
+
+顺带这把尺子还会报一条真缺陷：每个变体先跑一次 `Vigil.exe --engine-probe` 并断言
+`kind=native`。单文件变体的 `AppContext.BaseDirectory` 是解包临时目录，
+"随包那颗 exe 还找不找得到"在那里是个未知数 —— 量之前先问，别等用户遇到。
 
 用法（在仓库根跑）:
     python tools/measure_package.py                 # 全部变体
@@ -32,6 +40,7 @@ OUT_ROOT = os.path.join(HERE, "dist-measure")
 RUNS = 5                        # 冷启动重复次数
 SETTLE = 0.35                   # 轮询间隔（秒）
 TIMEOUT = 45.0                  # 单次冷启动上限
+ENGINE = os.path.join(HERE, "engine", "vigil-engine.exe")
 
 VARIANTS = {
     # package.cmd 现在这一条：自包含、不裁剪、不 R2R
@@ -106,6 +115,33 @@ def zip_size(out: str) -> int:
     return n
 
 
+def ship_engine(out: str) -> bool:
+    """把引擎拷进这一份变体产物，与 package.cmd 的 [2/6] 同一件事。
+
+    csproj 不带它（那是 engine\\build.cmd 的产物，进 bin 会把"没编引擎"变成
+    构建失败），所以 publish 出来的目录里**没有** vigil-engine.exe —— 不补这一步，
+    量的每一条冷启动走的都是回退级。
+    """
+    if not os.path.isfile(ENGINE):
+        print("  [跳过] 没有 engine/vigil-engine.exe：先跑 engine/build.cmd，"
+              "否则这份产物量的不是用户拿到的东西")
+        return False
+    shutil.copy2(ENGINE, os.path.join(out, "vigil-engine.exe"))
+    return True
+
+
+def probe_kind(exe: str) -> str:
+    """跑一次产物自己的 `--engine-probe`，返回 kind（native / python / none / ?）。"""
+    try:
+        p = subprocess.run([exe, "--engine-probe"], capture_output=True, text=True,
+                           errors="replace", timeout=180, cwd=os.path.dirname(exe))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"  [探针失败] {type(exc).__name__}: {exc}")
+        return "?"
+    kv = dict(l.split("=", 1) for l in (p.stdout or "").splitlines() if "=" in l)
+    return kv.get("kind", "?")
+
+
 def cold_start(exe: str) -> float:
     """进程起来到状态栏停靠进任务栏的秒数；超时返回 TIMEOUT。"""
     st.subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
@@ -148,19 +184,28 @@ def main() -> int:
             out = publish(v, VARIANTS[v])
             if not out:
                 continue
+            if not ship_engine(out):
+                continue
             raw = tree_bytes(out)
             files = sum(len(fs) for _r, _d, fs in os.walk(out))
             zipped = zip_size(out)
             exe = os.path.join(out, "Vigil.exe")
+            kind = probe_kind(exe)
+            if kind != "native":
+                # 这条不是装饰：单文件变体的 BaseDirectory 是解包临时目录，
+                # 随包那颗 exe 在那里找不找得到是未知的。kind 不是 native，
+                # 下面那组冷启动数字量的就不是用户会走的那条路。
+                print(f"  [警告] 这份变体的产物认的不是随包引擎（kind={kind}）："
+                      "冷启动数字与本仓库的分发形状不可比")
             times = [t for t in (cold_start(exe) for _ in range(RUNS)) if t >= 0]
-            print(f"  载荷 {mb(raw)} / {files} 个文件，zip 后 {mb(zipped)}")
+            print(f"  载荷 {mb(raw)} / {files} 个文件，zip 后 {mb(zipped)}，引擎={kind}")
             if times:
                 print(f"  冷启动（→ 状态栏停靠）中位 {statistics.median(times)*1000:.0f}ms"
                       f"，最差 {max(times)*1000:.0f}ms，样本 {len(times)}/{RUNS}")
-            rows.append((v, raw, zipped,
+            rows.append((v, raw, zipped, kind,
                          statistics.median(times) * 1000 if times else float("nan")))
-            # 每个变体 185MB，四个就是 740MB。本机磁盘只剩几十 G，
-            # 量完即删；要留着看产物加 --keep。
+            # 每个变体 ~162MB（自包含运行时 + 0.5MB 引擎），四个就是 650MB。
+            # 本机磁盘只剩几十 G，量完即删；要留着看产物加 --keep。
             if "--keep" not in sys.argv:
                 shutil.rmtree(out, ignore_errors=True)
                 for leftover in (out + ".log",):
@@ -168,6 +213,10 @@ def main() -> int:
                         os.remove(leftover)
     finally:
         st.subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+        # 引擎子进程在父进程被强杀后是靠管道断裂自退的（README 承诺，且
+        # compare_watch.orphan_check 钉着）；这里不等它，直接收 —— 量测段每次都
+        # 起一个新 Vigil，残留会一路叠，下一轮的"无残留"就不再是证据。
+        st.subprocess.run(["taskkill", "/f", "/im", "vigil-engine.exe"], capture_output=True)
         if backup is not None:
             with open(settings, "w", encoding="utf-8") as fh:
                 fh.write(backup)
@@ -177,10 +226,11 @@ def main() -> int:
     if len(rows) > 1:
         base = next((r for r in rows if r[0] == "base"), rows[0])
         print("\n== 对照 base ==")
-        print(f"{'变体':<12}{'载荷':>10}{'zip':>10}{'冷启动':>10}{'vs base':>22}")
-        for v, raw, zipped, ms in rows:
-            print(f"{v:<12}{raw/1048576:9.1f}M{zipped/1048576:9.1f}M{ms:9.0f}ms"
-                  f"   载荷{(raw-base[1])/1048576:+7.1f}M  启动{ms-base[3]:+7.0f}ms")
+        print(f"{'变体':<12}{'载荷':>10}{'zip':>10}{'冷启动':>10}{'vs base':>26}")
+        for v, raw, zipped, kind, ms in rows:
+            print(f"{v:<12}{raw / 1048576:9.1f}M{zipped / 1048576:9.1f}M{ms:9.0f}ms"
+                  f"   载荷{(raw - base[1]) / 1048576:+7.1f}M  启动{ms - base[4]:+7.0f}ms"
+                  f"  引擎={kind}")
     return 0
 
 
