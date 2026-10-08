@@ -2302,6 +2302,28 @@ def cs_state_map(text: str) -> dict[str, tuple[str, str]]:
     return {c: (lab, hexv) for c, lab, hexv in CS_STATE_ROW.findall(text)}
 
 
+CPP_STATE_ROW = re.compile(
+    r'\{\s*"([a-z_]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"(#[0-9A-Fa-f]{6})"\s*,'
+    r'\s*(-?\d+)\s*\}')
+
+
+def cpp_state_table(text: str) -> dict[str, tuple[str, str, str, int]]:
+    """把 vigil_engine.cpp 的 kStates 收成 code → (标签, 字形, 色, 优先级)。
+
+    只认 `static const StateInfo kStates[] = {` 到第一个 `};` 之间的行：
+    全文件扫会把注释里的示例、--demo 的伪造表也当成表项。
+    """
+    start = text.find("kStates[]")
+    if start < 0:
+        return {}
+    end = text.find("};", start)
+    # 复用 C# 那个剥注释函数：两边都是"按 // 切一刀"，本仓库的 C++ 同样没有
+    # /* */ 块注释，也没有把 // 写进字符串字面量。
+    body = strip_cs_comments(text[start:end if end > 0 else None])
+    return {c: (lab, glyph, hexv, int(prio)) for c, lab, glyph, hexv, prio
+            in CPP_STATE_ROW.findall(body)}
+
+
 def fake_overview_engine_source(state: str = "needs_action", waiting: int = 2,
                                 watch: bool = False, age: float = 3.0) -> str:
     """概览页的注入引擎：一帧**定死**的快照，状态码与待处理条数由参数给。
@@ -2352,6 +2374,54 @@ def fake_overview_engine_source(state: str = "needs_action", waiting: int = 2,
             '    pass\n')
 
 
+def check_state_table_sync() -> None:
+    """状态表三方同步：Python 的 STATES、C++ 的 kStates、前端的 StateMap。
+
+    为什么从概览页那一段里搬出来单跑：这一段只读源码，不需要 GUI，而
+    vigil-engine.exe 一旦替下 CPython，**权威就是 C++ 那张表** —— 三方里任何
+    两方抄错一个字，表现是状态条一个色、列表行另一个色（或界面上直接甩出
+    tool_running），而 --demo 每个状态都能各自演好，只有拿源码比才看得见。
+    原来只钉住"前端 == Python"，C++ 那份是这次新加的第三份，没人比就会悄悄分叉。
+    """
+    print("\n== 状态表三方同步（Python STATES / C++ kStates / 前端 StateMap） ==")
+    ui_path = os.path.join(HERE, "bar", "Panel", "Ui.cs")
+    cpp_path = os.path.join(HERE, "engine", "vigil_engine.cpp")
+    if not (os.path.isfile(ui_path) and os.path.isfile(cpp_path)):
+        check("Ui.cs 与 vigil_engine.cpp 可读", False, f"{ui_path} / {cpp_path}")
+        return
+    ui_code = strip_cs_comments(open(ui_path, encoding="utf-8-sig", errors="replace").read())
+    cpp_src = open(cpp_path, encoding="utf-8-sig", errors="replace").read()
+
+    front = cs_state_map(ui_code)
+    want = {k: (v[0], v[2]) for k, v in ds.STATES.items()}
+    check("前端状态映射的键集与行数覆盖引擎 STATES 全部状态码",
+          len(front) == len(want) and set(front) == set(want),
+          f"前端解析出 {len(front)} 条 / 引擎 {len(want)} 条；"
+          f"多出 {sorted(set(front) - set(want))}，缺失 {sorted(set(want) - set(front))}，"
+          f"解析式 CS_STATE_ROW 认的是 {{ \"code\", (\"标签\", \"#RRGGBB\") }}")
+    bad = sorted(k for k in want if k in front and front[k] != want[k])
+    check("前端状态映射的中文标签与配色逐项等于引擎 STATES",
+          not bad and len(front) == len(want),
+          "; ".join(f"{k}：前端 {front[k]} ≠ 引擎 {want[k]}" for k in bad[:4])
+          if bad else f"逐项比对 {len(want)} 个状态码（标签 + 十六进制色）")
+    check("LabelOf 对不认识的状态码兜「未知」而不是把英文码甩到界面上",
+          'StateMap.TryGetValue' in ui_code and ': "未知"' in ui_code,
+          "LabelOf 里没有 TryGetValue + 「未知」兜底那一支")
+
+    tab = cpp_state_table(cpp_src)
+    want4 = {k: (v[0], v[1], v[2], v[3]) for k, v in ds.STATES.items()}
+    check("C++ kStates 的键集与行数覆盖 Python STATES 全部状态码",
+          len(tab) == len(want4) and set(tab) == set(want4),
+          f"C++ 解析出 {len(tab)} 条 / Python {len(want4)} 条；"
+          f"多出 {sorted(set(tab) - set(want4))}，缺失 {sorted(set(want4) - set(tab))}。"
+          "解析只认 kStates[] 到 }; 之间那一段，改表式的话这里要跟着改")
+    bad4 = sorted(k for k in want4 if k in tab and tab[k] != want4[k])
+    check("C++ kStates 的标签/字形/配色/优先级逐项等于 Python STATES",
+          not bad4 and len(tab) == len(want4),
+          "; ".join(f"{k}：C++ {tab[k]} ≠ Python {want4[k]}" for k in bad4[:4])
+          if bad4 else f"逐项比对 {len(want4)} 个状态码 × 4 个字段")
+
+
 def check_overview_page() -> None:
     """Task 8 概览页填实的门禁，分三面：源码 / 离屏两张定帧 / 真窗口多帧。
 
@@ -2379,22 +2449,8 @@ def check_overview_page() -> None:
     ov_code = strip_cs_comments(ov_src)
     ui_code = strip_cs_comments(ui_src)
 
-    # ---- ① 前端状态映射 == 引擎 STATES ----
-    front = cs_state_map(ui_code)
-    want = {k: (v[0], v[2]) for k, v in ds.STATES.items()}
-    check("前端状态映射的键集与行数覆盖引擎 STATES 全部状态码",
-          len(front) == len(want) and set(front) == set(want),
-          f"前端解析出 {len(front)} 条 / 引擎 {len(want)} 条；"
-          f"多出 {sorted(set(front) - set(want))}，缺失 {sorted(set(want) - set(front))}，"
-          f"解析式 CS_STATE_ROW 认的是 {{ \"code\", (\"标签\", \"#RRGGBB\") }}")
-    bad = sorted(k for k in want if k in front and front[k] != want[k])
-    check("前端状态映射的中文标签与配色逐项等于引擎 STATES",
-          not bad and len(front) == len(want),
-          "; ".join(f"{k}：前端 {front[k]} ≠ 引擎 {want[k]}" for k in bad[:4])
-          if bad else f"逐项比对 {len(want)} 个状态码（标签 + 十六进制色）")
-    check("LabelOf 对不认识的状态码兜「未知」而不是把英文码甩到界面上",
-          'StateMap.TryGetValue' in ui_code and ': "未知"' in ui_code,
-          "LabelOf 里没有 TryGetValue + 「未知」兜底那一支")
+    # ---- ① 三方状态表同步（抽成独立函数：纯读源码，默认那轮就该跑）----
+    check_state_table_sync()
 
     # ---- ② 白底豁免收口：概览页不再有任何写死的纸色/描边色 ----
     hard = [pat for pat in ("Brushes.White", "Brushes.Black", "E2E5EA", "#FFFFFF",
@@ -5315,6 +5371,7 @@ def main() -> int:
     # 见 check_panel_request_guard 的注释）。
     check_panel_request_guard()
     check_balance_key_handling()
+    check_state_table_sync()
     check_shot_pipeline()
     check_brand_palette()
     check_brand_pixels()
