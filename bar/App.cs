@@ -219,9 +219,14 @@ namespace Vigil
             {
                 // 一台机器上同时只跑一版 Vigil（两个版本并存以后这条更硬：两个都起来
                 // 会抢同一条任务栏带、同一份 settings.json）。原来这里是**静默**把手
-                // 交给已运行实例的 —— 装了第二版之后，"我双击的为什么没开"变成没有答案
-                // 的谜，所以要说话；但面板交接不能丢，那是改名前就有的有用行为。
-                ShowAlreadyRunning(panel);
+                // 交给已运行实例的 —— 装了第二版之后变成"我双击的为什么没开"这种没有
+                // 答案的谜，所以要说话。但话分两种说：
+                //   · 带着 --panel 来的，要的是**那一个页面**，把手照旧静默交出去让
+                //     在跑的那一版开。这条既有的"再点一次图标就叫出面板"不能因为
+                //     多了个弹窗就哑掉（面板会开在弹窗底下，等于没叫出来）。
+                //   · 空手再来一次的，才轮到弹窗回答"为什么没开"，主按钮就是那次把手。
+                if (panel != null) RequestPanel(panel);
+                else ShowAlreadyRunning();
                 return 0;
             }
 
@@ -336,7 +341,7 @@ namespace Vigil
         /// · 主按钮仍然是"叫出已在运行的面板"（写 panel.request）—— 两版并存之前
         ///   双击图标就是这个行为，告知不该把它换掉。
         /// </summary>
-        static void ShowAlreadyRunning(string page)
+        static void ShowAlreadyRunning()
         {
             var info = ReadRunningInfo();
             string who = info == null ? "" :
@@ -410,7 +415,8 @@ namespace Vigil
                 win.SetResourceReference(System.Windows.Window.BackgroundProperty, Ui.PageKey);
 
                 void Dismiss(object s, RoutedEventArgs e) { win.Close(); }
-                open.Click += (s, e) => { RequestPanel(page); win.Close(); };
+                // 空请求 = 概览页（TryConsumePanelRequest 里 ""→overview），这里不必自己填页名。
+                open.Click += (s, e) => { RequestPanel(null); win.Close(); };
                 close.Click += Dismiss;
 
                 // 8 秒自收：无人值守的连开（冒烟、量测脚本）等不到人点按钮
@@ -425,7 +431,7 @@ namespace Vigil
             {
                 // 弹窗本身失败不能把这条路堵死：交接照做，人至少不会觉得"双击没反应"
                 Log("弹「已在运行」提示失败: " + ex.Message);
-                RequestPanel(page);
+                RequestPanel(null);
             }
         }
 
