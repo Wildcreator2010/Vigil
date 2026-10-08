@@ -5,10 +5,12 @@
   python smoke_test.py --build   额外做 Release 编译，断言 0 警告 0 错误 + 解释器解析
   python smoke_test.py --setup   编译安装向导 + 开一次 GUI 读控件 + 静默装到 %TEMP% 再卸载
   python smoke_test.py --package 校验 dist/ 分发产物（随包引擎跑真快照 + 版本对齐）
+  python smoke_test.py --coexist 两版并存 / 遗留单版迁移 / 第二实例的告知窗（要 dist/ 真产物）
   python smoke_test.py --gui     额外启动 Vigil.exe，在 Win32 层校验任务栏停靠
 
 --gui 会真的往任务栏里挂一个状态栏，结束时用 taskkill /f 收掉（优雅关闭当前不可用，
-见 check_gui 的注释）。--build 需要 .NET 10 SDK。
+见 check_gui 的注释）。--build 需要 .NET 10 SDK。--coexist 会装真产物到 %TEMP%、动
+HKCU 的卸载键与那个共用的 Run 槽，进出都存好还原。
 """
 
 from __future__ import annotations
@@ -1165,6 +1167,371 @@ def check_installer_e2e() -> None:
         shutil.rmtree(E2E_ROOT, ignore_errors=True)
 
 
+# ---------------------------------------------------------- 两版并存 / 遗留迁移 / 弹窗
+
+
+def dist_payload(flavor: str) -> str:
+    """某一版的分发目录 —— 名字由 tools/flavors.py 说了算，不在这里再抄一份。"""
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import flavors
+    return os.path.join(HERE, "dist", flavors.dist_name(flavor))
+
+
+def win_class(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    _user32().GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def installed_probe(exe: str) -> dict[str, str]:
+    """跑装好的那份 `--engine-probe`，把 k=v 收成 dict（不开窗口、不抢单实例）。"""
+    r = subprocess.run([exe, "--engine-probe"], capture_output=True, text=True,
+                       errors="replace", timeout=180, cwd=os.path.dirname(exe))
+    return dict(l.split("=", 1) for l in (r.stdout or "").splitlines() if "=" in l)
+
+
+def wait_gone(path: str, seconds: float = 60.0) -> bool:
+    """等一个路径真消失。卸载器把自己拷到 %TEMP% 再回头删目录，得给它时间。"""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if not os.path.exists(path):
+            return True
+        time.sleep(0.4)
+    return not os.path.exists(path)
+
+
+def startmenu_lnk(slug: str) -> str:
+    return os.path.join(os.environ.get("APPDATA", HERE), "Microsoft", "Windows",
+                        "Start Menu", "Programs", f"Vigil-{slug}.lnk")
+
+
+def run_points_at(target: str) -> bool:
+    return reg_run_value() == '"' + os.path.join(target, "Vigil.exe") + '"'
+
+
+def check_two_versions_coexist() -> None:
+    """两份真分发产物在同机各装一次：谁也没盖谁，卸掉一个另一个照跑。
+
+    为什么用 dist/ 那两份真产物而不是开发产物：这段要演的恰恰是"两版各自身份成套"，
+    而身份（版本 / 代号 / slug）只有按 flavor 参数 publish 出来的那份才算数 ——
+    开发产物只有一套身份，装两遍也只是同名同目录的同一版，并存压根没发生。
+
+    装到 %TEMP% 下的目标目录（不动 %LOCALAPPDATA%\\Programs），但开始菜单快捷方式与
+    共用的那个 Run 槽是真的系统位置：Run 进出保存/还原，快捷方式由卸载自己清干净。
+    """
+    print("\n== 两版并存 ==")
+    vach, lil = dist_payload("python"), dist_payload("cpp")
+    for name, d in (("Vachellia", vach), ("Lilium", lil)):
+        if not os.path.isfile(os.path.join(d, "Vigil-Setup.exe")):
+            check(f"{name} 版的产物在 dist/（先跑 package.cmd both）", False, d)
+            return
+    root = os.path.join(E2E_ROOT, "coexist")
+    t_vach, t_lil = os.path.join(root, "inst-vachellia"), os.path.join(root, "inst-lilium")
+    UNINST = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    k_vach, k_lil = UNINST + r"\Vigil-Vachellia", UNINST + r"\Vigil-Lilium"
+    lnk_vach, lnk_lil = startmenu_lnk("Vachellia"), startmenu_lnk("Lilium")
+    for lnk in (lnk_vach, lnk_lil):
+        if not os.path.isfile(lnk):
+            continue
+        tgt = shortcut_target(lnk) or ""
+        if os.path.isfile(tgt):
+            # 真装着的版本：这段要从"两个都没装"开始，不该在用户装好的机器上重演一次
+            check("开跑前这两个 slug 没有真安装在册", False, f"{lnk} -> {tgt}")
+            return
+        os.remove(lnk)     # 目标已经不在了的死链：上一段没清干净，接着演
+    saved_run, was_running = reg_run_value(), bool(bar_processes())
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    try:
+        a = subprocess.run([os.path.join(vach, "Vigil-Setup.exe"), "/S",
+                            f"/D={t_vach}", "/NO-START"], capture_output=True, timeout=1800)
+        check("Vachellia 静默安装退出码 0", a.returncode == 0,
+              f"rc={a.returncode} out={(a.stdout or b'').decode('utf-8', 'replace')[-200:]}")
+        b = subprocess.run([os.path.join(lil, "Vigil-Setup.exe"), "/S",
+                            f"/D={t_lil}", "/NO-START", "/NO-AUTOSTART"],
+                           capture_output=True, timeout=1800)
+        check("Lilium 静默安装退出码 0（自启明确不给这一版）", b.returncode == 0,
+              f"rc={b.returncode} out={(b.stdout or b'').decode('utf-8', 'replace')[-200:]}")
+        check("两个安装目录各自独立存在",
+              os.path.isfile(os.path.join(t_vach, "Vigil.exe"))
+              and os.path.isfile(os.path.join(t_lil, "Vigil.exe")),
+              f"{os.path.isdir(t_vach)} / {os.path.isdir(t_lil)}")
+        check("两个卸载键都在，显示名各带自己的代号（控制面板里分得开）",
+              "Vachellia" in (reg_kv(k_vach, "DisplayName") or "")
+              and "Lilium" in (reg_kv(k_lil, "DisplayName") or ""),
+              f"{reg_kv(k_vach, 'DisplayName')} / {reg_kv(k_lil, 'DisplayName')}")
+        check("两个版本号各自登记（1.0.0 与 1.1.0 没互相冒充）",
+              (reg_kv(k_vach, "DisplayVersion") or "").startswith("1.0.0")
+              and (reg_kv(k_lil, "DisplayVersion") or "").startswith("1.1.0"),
+              f"{reg_kv(k_vach, 'DisplayVersion')} / {reg_kv(k_lil, 'DisplayVersion')}")
+        check("共用 Run 槽仍指第一版（第二版没把手拨到自己身上）", run_points_at(t_vach),
+              f"Run={reg_run_value()!r}")
+        check("开始菜单两条快捷方式并存，各指自己那一版",
+              os.path.isfile(lnk_vach) and os.path.isfile(lnk_lil)
+              and long_path(shortcut_target(lnk_vach) or "") == long_path(
+                  os.path.join(t_vach, "Vigil.exe"))
+              and long_path(shortcut_target(lnk_lil) or "") == long_path(
+                  os.path.join(t_lil, "Vigil.exe")),
+              f"vach={shortcut_target(lnk_vach)} lil={shortcut_target(lnk_lil)}")
+        for target, slug, kind in ((t_vach, "Vachellia", "python"), (t_lil, "Lilium", "native")):
+            kv = installed_probe(os.path.join(target, "Vigil.exe"))
+            check(f"装好的 {slug} 认自己是 {slug}，引擎级 {kind}",
+                  kv.get("slug") == slug and kv.get("kind") == kind, f"实得 {kv}")
+
+        u = subprocess.run([os.path.join(t_lil, "Vigil-Setup.exe"), "/UNINSTALL", "/S"],
+                           capture_output=True, timeout=900)
+        check("卸掉 Lilium 退出码 0", u.returncode == 0, f"rc={u.returncode}")
+        check("Lilium 的目录已删除", wait_gone(t_lil), t_lil)
+        check("Lilium 的卸载键与快捷方式已删",
+              reg_kv(k_lil, "DisplayName") is None and not os.path.isfile(lnk_lil), "")
+        check("Vachellia 那边一切照旧（目录/键/快捷方式都还在）",
+              os.path.isfile(os.path.join(t_vach, "Vigil.exe"))
+              and reg_kv(k_vach, "DisplayName") is not None
+              and os.path.isfile(lnk_vach), "")
+        check("别人的卸载没把共用的 Run 槽清掉（自启仍归 Vachellia）", run_points_at(t_vach),
+              f"Run={reg_run_value()!r}")
+        u2 = subprocess.run([os.path.join(t_vach, "Vigil-Setup.exe"), "/UNINSTALL", "/S"],
+                            capture_output=True, timeout=900)
+        check("Vachellia 也卸掉（退出码 0）", u2.returncode == 0, f"rc={u2.returncode}")
+        check("两个目录都没了", wait_gone(t_vach) and not os.path.isdir(t_lil), "")
+        check("Run 槽这时才该被清空（最后卸的那一版才是它的主人）", reg_run_value() is None,
+              f"实得 {reg_run_value()!r}")
+        check("卸载后 %LOCALAPPDATA%\\Vigil 数据目录仍在（两版共用，不是谁的家）",
+              os.path.isdir(ds.state_dir()), ds.state_dir())
+    finally:
+        reg_run_write(saved_run)
+        for lnk in (lnk_vach, lnk_lil):
+            if os.path.isfile(lnk):
+                try:
+                    os.remove(lnk)
+                except OSError:
+                    pass
+        if was_running and saved_run and os.path.isfile(saved_run.strip('"')):
+            exe = saved_run.strip('"')
+            subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_legacy_migration() -> None:
+    """分版本之前那套单版安装（Programs\\Vigil）怎么接到 Vachellia 的身份上。
+
+    判据不是"装了新的一份"，是**同一棵树被搬过去、注册表跟着改名**：所以遗留目录里放
+    一个只有这边有的 marker 文件，迁完必须还在那儿见得到它 —— 重新装一份永远没有它，
+    那种绿是假的。
+    动的是 %LOCALAPPDATA%\\Programs 与 HKCU 的真实位置，全部存好还原；本机已经有真
+    遗留安装时不演（那是用户唯一一份装着的东西，不该拿来当靶子）。
+    """
+    print("\n== 遗留单版迁移 ==")
+    lil = dist_payload("cpp")
+    if not os.path.isfile(os.path.join(lil, "Vigil-Setup.exe")):
+        check("Lilium 版的产物在 dist/（先跑 package.cmd both）", False, lil)
+        return
+    programs = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")
+    legacy, moved = os.path.join(programs, "Vigil"), os.path.join(programs, "Vigil-Vachellia")
+    UNINST = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    k_legacy, k_vach = UNINST + r"\Vigil", UNINST + r"\Vigil-Vachellia"
+    lnk_legacy = os.path.join(os.environ.get("APPDATA", HERE), "Microsoft", "Windows",
+                               "Start Menu", "Programs", "Vigil.lnk")
+    lnk_vach = startmenu_lnk("Vachellia")
+    if os.path.isdir(legacy) or os.path.isdir(moved) or reg_kv(k_legacy, "DisplayName"):
+        check("本机没有真遗留安装才由门禁代演（有就该由用户自己那次安装去迁）", True,
+              "跳过：本机存在 Programs\\Vigil 或 Uninstall\\Vigil，不动用户装着的实件")
+        return
+    saved_run = reg_run_value()
+    settings = os.path.join(ds.state_dir(), "settings.json")
+    keyfile = os.path.join(ds.state_dir(), "balance.key")
+    before = {p: (open(p, "rb").read() if os.path.isfile(p) else None)
+              for p in (settings, keyfile)}
+    root = os.path.join(E2E_ROOT, "migrate")
+    target = os.path.join(root, "inst-lilium")
+    shutil.rmtree(root, ignore_errors=True)
+    made_vach = False
+    try:
+        # 造一个"装开的旧版"：exe 用真产物里那份，外加一个只属于这边的 marker。
+        os.makedirs(legacy)
+        shutil.copy2(os.path.join(lil, "app", "Vigil.exe"), legacy)
+        shutil.copy2(os.path.join(lil, "Vigil-Setup.exe"), legacy)
+        with open(os.path.join(legacy, "legacy-marker.txt"), "w", encoding="utf-8") as f:
+            f.write("装开的遗留单版，迁完必须还能见到这张条\n")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, k_legacy) as k:
+            winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, "Vigil")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.9.0")
+            winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, legacy)
+            winreg.SetValueEx(k, "UninstallString", 0, winreg.REG_SZ,
+                              os.path.join(legacy, "Vigil-Setup.exe"))
+        reg_run_write('"' + os.path.join(legacy, "Vigil.exe") + '"')
+        # 旧的无后缀 .lnk 也得真在场，才谈得上"迁移把死链重建到新名字上"。
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%s');"
+                        "$s.TargetPath='%s';$s.Save()"
+                        % (lnk_legacy.replace("'", "''"), os.path.join(legacy, "Vigil.exe"))],
+                       capture_output=True, timeout=120)
+        # /NO-AUTOSTART：这一版不抢自启，才看得见迁移有没有把**原来那一条**接上新路径
+        # （装完新后又写 Run 的话，两件事就分不出是谁做的了）。
+        # /NO-AUTOSTART：这一版不抢自启，才看得见迁移有没有把**原来那一条**接上新路径
+        # （装完新后又写 Run 的话，两件事就分不出是谁做的了）。
+        # /NO-STARTMENU：这一段的主角是遗留那套身份，Lilium 自己的快捷方式在这儿只是
+        # 噪音，而且装到 %TEMP% 的目标一删就留下一条死链（第一轮就被自己坑过一次）。
+        # 迁移重建的那条 Vigil-Vachellia.lnk 不受这个开关影响，判据照样量得到。
+        r = subprocess.run([os.path.join(lil, "Vigil-Setup.exe"), "/S", f"/D={target}",
+                            "/NO-START", "/NO-AUTOSTART", "/NO-STARTMENU"],
+                           capture_output=True, timeout=1800)
+        check("带遗留安装时静默安装退出码 0", r.returncode == 0, f"rc={r.returncode}")
+        check("遗留目录被搬走而不是留在原地", not os.path.isdir(legacy), legacy)
+        check("迁到了 Vachellia 那一套身份下", os.path.isfile(os.path.join(moved, "Vigil.exe")),
+              moved)
+        made_vach = os.path.isdir(moved)
+        check("是**同一棵树**（marker 文件跟着过来了）",
+              os.path.isfile(os.path.join(moved, "legacy-marker.txt")),
+              "没 marker 就是重新装了一份，不算迁移")
+        check("遗留卸载键没留下，新键登记的是 Vachellia",
+              reg_kv(k_legacy, "DisplayName") is None
+              and "Vachellia" in (reg_kv(k_vach, "DisplayName") or ""),
+              f"legacy={reg_kv(k_legacy, 'DisplayName')} vach={reg_kv(k_vach, 'DisplayName')}")
+        # 判"还指着老窝"要用带尾分隔符的前缀：Programs\Vigil 是 Programs\Vigil-Vachellia
+        # 的子串，裸 in 会把改写成功的值也判成没改（第一轮就是这么假红过一次）。
+        check("键里的路径也跟着改写（不留指向已消失目录的 UninstallString）",
+              legacy + os.sep not in (reg_kv(k_vach, "UninstallString") or "")
+              and moved in (reg_kv(k_vach, "UninstallString") or ""),
+              reg_kv(k_vach, "UninstallString") or "键不存在")
+        check("共用的 Run 槽接上了新路径（开机不会再弹「找不到 Vigil.exe」）",
+              run_points_at(moved), f"Run={reg_run_value()!r}")
+        check("旧的 Vigil.lnk 不再是死链，新名字的快捷方式在",
+              not os.path.isfile(lnk_legacy) and os.path.isfile(lnk_vach),
+              f"legacy={os.path.isfile(lnk_legacy)} vach={os.path.isfile(lnk_vach)}")
+        same = all((open(p, "rb").read() if os.path.isfile(p) else None) == v
+                   for p, v in before.items())
+        check("设置与余额 Key 一个字节都没动（数据目录两版共用）", same,
+              f"{settings} / {keyfile}")
+    finally:
+        for d in (target, moved if made_vach else ""):
+            if d and os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+        # 这一版自己那条卸载键也要一起清：删了目录不删键，「设置 → 应用」里就留一条
+        # 指向 %TEMP% 的假 Vigil，用户只能自己去 HKCU 里抠。
+        for k in (k_vach, k_legacy, UNINST + r"\Vigil-Lilium"):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, k)
+            except OSError:
+                pass
+        for lnk in (lnk_legacy, lnk_vach, startmenu_lnk("Lilium")):
+            if os.path.isfile(lnk):
+                try:
+                    os.remove(lnk)
+                except OSError:
+                    pass
+        reg_run_write(saved_run)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def check_second_instance_dialog() -> None:
+    """已经有一版在跑时再开一次，必须**说人话**：主题化的告知窗，不是原生对话框，也不是哑巴。
+
+    三段各测一件事：① 弹窗出得来、说的是在跑的那一版；② 没人点它也会自收（无人值守的
+    连开不能卡在这儿）；③ 主按钮真的把在跑那一版的面板叫出来 —— 那是点它想得到结果。
+    `--panel` 那条通路**刻意不进这段**：带着页名来的仍然静默把手交出去（"再点一次图标
+    叫出面板"是改名前就有的行为，弹窗会把它压在下面），由 --gui 段的直达页门禁守着。
+    """
+    print("\n== 第二实例的告知 ==")
+    if not os.path.isfile(BAR_EXE):
+        check("Vigil.exe 存在", False, "先跑 build.cmd")
+        return
+    here = os.path.dirname(BAR_EXE)
+    info = os.path.join(ds.state_dir(), "running.json")
+    req = os.path.join(ds.state_dir(), "panel.request")
+    title = "Vigil 已经在运行"
+    saved_info = open(info, "rb").read() if os.path.isfile(info) else None
+    subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+    wait_no_vigil()
+    if os.path.isfile(req):
+        os.remove(req)
+    try:
+        # 首个实例是"那一版正在跑"的证据本身，全程不退出；后两段起的第二实例各自会自己收
+        subprocess.Popen([BAR_EXE], cwd=here)
+        got: dict = {}
+        t0 = time.time()
+        while time.time() - t0 < 25:
+            if os.path.isfile(info):
+                try:
+                    got = json.load(open(info, encoding="utf-8"))
+                except Exception:
+                    got = {}
+                if got.get("pid") in bar_processes():
+                    break
+            time.sleep(0.4)
+        else:
+            check("首个实例留下名片（running.json 且 PID 活着）", False, info)
+            return
+        code = cs_property("ProductCodename")
+        check("名片里写清是哪一版在跑", got.get("codename") == code, f"实得 {got}")
+
+        # ① + ②：起第二个实例，读它说了什么，然后什么都不点，等它自己收
+        b = subprocess.Popen([BAR_EXE], cwd=here)
+        t0, hwnd = time.time(), 0
+        while time.time() - t0 < 20:
+            hwnd = top_window(title)
+            if hwnd:
+                break
+            time.sleep(0.3)
+        if not check("第二实例弹出告知窗（标题「%s」）" % title, bool(hwnd), "20 秒内没有这个窗口"):
+            return
+        res = uia(hwnd, "text")
+        names = "\n".join(res.get("TEXT", []))
+        buttons = "|".join(res.get("BUTTONS", []))
+        check("弹窗把话说明白：一次只能开一个，并报出在跑的那一版",
+              "同时只能开一个" in names and code in names, names[:300])
+        check("弹窗是走品牌资源的主题窗口，不是原生对话框",
+              "打开它的面板" in buttons and "知道了" in buttons
+              and "#32770" not in win_class(hwnd),
+              f"类名={win_class(hwnd)} 按钮={buttons}")
+        deadline = time.time() + 15
+        while b.poll() is None and time.time() < deadline:
+            time.sleep(0.3)
+        check("没人点它也会自己收（8 秒定时器），第二实例退出码 0", b.poll() == 0,
+              f"poll={b.poll()}")
+        check("自收之后告知窗已不在", not top_window(title), "")
+
+        # ③：主按钮真把手交给在跑那一版
+        c = subprocess.Popen([BAR_EXE], cwd=here)
+        t0, hwnd2 = time.time(), 0
+        while time.time() - t0 < 20:
+            hwnd2 = top_window(title)
+            if hwnd2:
+                break
+            time.sleep(0.3)
+        if not check("再起一次窗又出来了（告知不是一次性的）", bool(hwnd2), "等不到窗口"):
+            return
+        inv = uia(hwnd2, "invoke", name="打开它的面板")
+        if not check("主按钮点得动（InvokePattern）", "INVOKED" in inv, str(inv)[:200]):
+            return
+        t_click, panel_hwnd = time.time(), 0
+        while time.time() - t_click < 20:
+            panel_hwnd = top_window("Vigil 控制台")
+            if panel_hwnd:
+                break
+            time.sleep(0.4)
+        check("主按钮叫出的是**在跑那一版**的面板（交接没丢）", bool(panel_hwnd),
+              "点完 20 秒没有「Vigil 控制台」窗口")
+        check("点完第二个实例就退了", c.poll() is not None, f"poll={c.poll()}")
+    finally:
+        subprocess.run(["taskkill", "/f", "/im", "Vigil.exe"], capture_output=True)
+        wait_no_vigil()
+        # 按**镜像名**收引擎子进程，绝不按 pid 列表收：engine_pids() 数的是
+        # "机器上所有 python.exe + vigil-engine.exe"，拿它当 taskkill 的目标会连跑着
+        # 这段冒烟的自己一起杀掉 —— 现场是日志戛然而止、连汇总都没有（真踩过一次）。
+        subprocess.run(["taskkill", "/f", "/im", "vigil-engine.exe"], capture_output=True)
+        for h, _cls, t in list_top_windows():
+            if t in (title, "Vigil 控制台"):
+                close_windows([h])
+        if saved_info is not None:
+            with open(info, "wb") as fh:
+                fh.write(saved_info)
+        elif os.path.isfile(info):
+            os.remove(info)
+        if os.path.isfile(req):
+            os.remove(req)
+
+
 def check_setup_contract() -> None:
     """bar/App.cs 与 setup/Installer.cs 之间那几处必须一致的字面量。
 
@@ -1855,6 +2222,25 @@ def engine_pids() -> set[int]:
 
 
 PANEL_PAGES = ("overview", "notify", "appearance", "runtime", "balance", "about")
+
+
+def engine_detail(pids: set[int]) -> str:
+    """把残留的引擎 pid 说成"是哪一颗、被谁起的、命令行是什么"。
+
+    孤儿的红只有 pid 时没法归因：`--all` 里 GUI 段十几个门禁都起过实例，两个层级的
+    引擎都可能是它。命令行与父进程一眼能看出是哪个注入点没退干净（三轮单跑都干净，
+    说明问题在上下文，不在这一条判据本身 —— 没证据就别动产品）。
+    """
+    if not pids:
+        return ""
+    filt = " or ".join(f"ProcessId={p}" for p in sorted(pids))
+    ps = ('Get-CimInstance Win32_Process -Filter "' + filt + '" | ForEach-Object '
+          '{ "" + $_.ProcessId + "|" + $_.Name + "|ppid=" + $_.ParentProcessId '
+          '+ "|" + $_.CommandLine }')
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True, errors="replace", timeout=90)
+    lines = [l[:220] for l in (r.stdout or "").splitlines() if l.strip()]
+    return " ; ".join(lines) or f"pid={sorted(pids)}（查不到详情）"
 
 
 def run_shot(page: str, out_path: str):
@@ -4738,8 +5124,9 @@ def check_panel_cold_open() -> None:
         deadline = time.time() + 20
         while time.time() < deadline and (bar_processes() or engine_pids() - before):
             time.sleep(1)
-        check("冷打开后无残留", not bar_processes() and not (engine_pids() - before),
-              f"Vigil={sorted(bar_processes())} 引擎={sorted(engine_pids() - before)}")
+        left = engine_pids() - before
+        check("冷打开后无残留", not bar_processes() and not left,
+              f"Vigil={sorted(bar_processes())} 引擎={engine_detail(left)}")
 
 
 def lock_against_delete(path: str) -> int:
@@ -5304,9 +5691,10 @@ def check_panel_request_containment() -> None:
             time.sleep(1)
         if os.path.exists(req):
             os.remove(req)  # 放弃路径只在能删时才删；测试自己不留垃圾给下一轮
+        left = engine_pids() - before
         check("消费失败测试后无残留",
-              not bar_processes() and not (engine_pids() - before) and not os.path.exists(req),
-              f"Vigil={sorted(bar_processes())} 引擎={sorted(engine_pids() - before)} req={os.path.exists(req)}")
+              not bar_processes() and not left and not os.path.exists(req),
+              f"Vigil={sorted(bar_processes())} 引擎={engine_detail(left)} req={os.path.exists(req)}")
 
 
 def check_panel_request_race() -> None:
@@ -5393,9 +5781,10 @@ def check_panel_request_race() -> None:
             time.sleep(1)
         if os.path.exists(req):
             os.remove(req)
+        left = engine_pids() - before
         check("竞态测试后无残留",
-              not bar_processes() and not (engine_pids() - before) and not os.path.exists(req),
-              f"Vigil={sorted(bar_processes())} 引擎={sorted(engine_pids() - before)} req={os.path.exists(req)}")
+              not bar_processes() and not left and not os.path.exists(req),
+              f"Vigil={sorted(bar_processes())} 引擎={engine_detail(left)} req={os.path.exists(req)}")
 
 
 def check_gui() -> None:
@@ -5550,6 +5939,12 @@ def main() -> int:
         check_installer_e2e()
     if full or "--package" in args:
         check_package()
+    if full or "--coexist" in args:
+        # 三段都要 dist/ 的真产物（或起真窗口），所以排在 --package 之后、单独给个开关：
+        # 默认那一轮不该为了"两版能不能并存"等一次 161MB 的 publish。
+        check_two_versions_coexist()
+        check_legacy_migration()
+        check_second_instance_dialog()
     # 纯读源码、无副作用，所以不放 --gui：默认那轮也要钉住「开窗委托体自带 try」
     # 和「请求文件在开窗之后才删」这两条（外部没法让 PanelWindow 构造必然抛，
     # 见 check_panel_request_guard 的注释）。
