@@ -26,6 +26,12 @@ Vigil 把自己**塞进 Windows 任务栏里面**（不是飘在上面的一块�
   已中断 / 疑似卡住 / 未运行。多会话同时在跑时，它挑**最需要你的那一个**显示。
 - 完全本地，零前置：不需要 .NET、不需要 Python、不需要管理员权限。
 
+##捐赠作者一点小钱钱
+
+https://github.com/Wildcreator2010/Vigil/blob/main/Alipay.jpg
+
+https://github.com/Wildcreator2010/Vigil/blob/main/WeChatPay.png
+
 ## 两个版本，一台机器都能装
 
 | 代号 | 版本 | 状态引擎 | 下载体积 |
